@@ -3,7 +3,6 @@ description: Command execution guidelines for isolation-focused Memory Bank
 globs: command-execution.mdc
 alwaysApply: false
 ---
-
 # COMMAND EXECUTION SYSTEM
 
 > **TL;DR:** This system provides guidelines for efficient command execution, balancing clarity and token optimization through appropriate command chaining, with proper documentation of commands and results.
@@ -64,34 +63,34 @@ graph TD
 
 Before executing any npm or build command:
 
-| Step | Windows (PowerShell) | Unix/Linux/Mac | Purpose |
-|------|----------------------|----------------|---------|
-| **Check package.json** | `Test-Path package.json` | `ls package.json` | Verify current directory is project root |
-| **Check for parent directory** | `Test-Path "*/package.json"` | `find . -maxdepth 2 -name package.json` | Find potential project directories |
-| **Navigate to project root** | `cd [project-dir]` | `cd [project-dir]` | Move to correct directory before executing commands |
+| Step | Nushell (Cross-Platform) | Purpose |
+|------|--------------------------|---------|
+| **Check package.json** | `path exists package.json` | Verify current directory is project root |
+| **Check for parent directory** | `glob */package.json` | Find potential project directories |
+| **Navigate to project root** | `cd [project-dir]` | Move to correct directory before executing commands |
 
 ## 📋 REACT-SPECIFIC COMMAND GUIDELINES
 
 For React applications, follow these strict guidelines:
 
-| Command | Correct Usage | Incorrect Usage | Notes |
-|---------|---------------|----------------|-------|
-| **npm start** | `cd [project-root] && npm start` | `npm start` (from parent dir) | Must execute from directory with package.json |
-| **npm run build** | `cd [project-root] && npm run build` | `cd [parent-dir] && npm run build` | Must execute from directory with package.json |
-| **npm install** | `cd [project-root] && npm install [pkg]` | `npm install [pkg]` (wrong dir) | Dependencies installed to nearest package.json |
+| Command | Correct Usage (Nushell) | Incorrect Usage | Notes |
+|---------|-----------------------|----------------|-------|
+| **npm start** | `cd [project-root]; npm start` | `npm start` (from parent dir) | Must execute from directory with package.json |
+| **npm run build** | `cd [project-root]; npm run build` | `cd [parent-dir]; npm run build` | Must execute from directory with package.json |
+| **npm install** | `cd [project-root]; npm install [pkg]` | `npm install [pkg]` (wrong dir) | Dependencies installed to nearest package.json |
 | **npm create** | `npm create vite@latest my-app -- --template react` | Manually configuring webpack | Use standard tools for project creation |
 
 ## 🔄 COMMAND CHAINING PATTERNS
 
-Effective command chaining patterns include:
+Effective command chaining patterns in Nushell:
 
 | Pattern | Format | Examples | Use Case |
 |---------|--------|----------|----------|
-| **Sequential** | `cmd1 && cmd2` | `mkdir dir && cd dir` | Commands that should run in sequence, second only if first succeeds |
-| **Conditional** | `cmd1 || cmd2` | `test -f file.txt || touch file.txt` | Fallback commands, second only if first fails |
-| **Piping** | `cmd1 \| cmd2` | `grep "pattern" file.txt \| wc -l` | Pass output of first command as input to second |
-| **Background** | `cmd &` | `npm start &` | Run command in background |
-| **Grouping** | `(cmd1; cmd2)` | `(echo "Start"; npm test; echo "End")` | Group commands to run as a unit |
+| **Sequential** | `cmd1; cmd2` | `mkdir dir; cd dir` | Commands that should run in sequence, second only if first succeeds |
+| **Conditional** | `try { cmd1 } catch { cmd2 }` | `try { open non-existent.txt } catch { echo "file not found" }` | Fallback commands, second only if first fails |
+| **Piping** | `cmd1 \| cmd2` | `ls \| where name =~ "\.js$"` | Pass structured output of first command as input to second |
+| **Background** | `bg { cmd }` | `bg { npm start }` | Run command in background |
+| **Grouping** | `{ cmd1; cmd2 }` | `{ echo "Start"; npm test; echo "End" }` | Group commands to run as a unit |
 
 ## 📋 COMMAND DOCUMENTATION TEMPLATE
 
@@ -119,27 +118,24 @@ Effective command chaining patterns include:
 
 ```mermaid
 graph TD
-    Platform["Platform<br>Detection"] --> Windows["Windows<br>Commands"]
-    Platform --> Unix["Unix/Linux/Mac<br>Commands"]
+    subgraph Nushell Universal Syntax
+        direction LR
+        Platform["Platform<br>Independent"] --> Nushell["Nushell<br>Commands"]
+    end
 
-    Windows --> WinAdapt["Windows Command<br>Adaptations"]
-    Unix --> UnixAdapt["Unix Command<br>Adaptations"]
-
-    WinAdapt --> WinChain["Windows Chaining:<br>Commands separated by &"]
-    UnixAdapt --> UnixChain["Unix Chaining:<br>Commands separated by ;"]
-
-    WinChain & UnixChain --> Execute["Execute<br>Platform-Specific<br>Commands"]
+    Nushell --> Chaining["Unified Chaining:<br>Commands separated by ;"]
+    Chaining --> Execute["Execute<br>Commands"]
 ```
 
 ## 📋 COMMAND EFFICIENCY EXAMPLES
 
-Examples of efficient command usage:
+Examples of efficient command usage in Nushell:
 
 | Inefficient | Efficient | Explanation |
 |-------------|-----------|-------------|
-| `mkdir dir`<br>`cd dir`<br>`npm init -y` | `mkdir dir && cd dir && npm init -y` | Combines related sequential operations |
-| `ls`<br>`grep "\.js$"` | `ls \| grep "\.js$"` | Pipes output of first command to second |
-| `test -f file.txt`<br>`if not exists, touch file.txt` | `test -f file.txt \|\| touch file.txt` | Creates file only if it doesn't exist |
+| `mkdir dir`<br>`cd dir`<br>`npm init -y` | `mkdir dir; cd dir; npm init -y` | Combines related sequential operations |
+| `ls \| find .js` | `ls \| where name =~ "\.js$"` | Uses Nushell's structured data filtering |
+| `if not (path exists file.txt) { touch file.txt }` | `if not (path exists file.txt) { touch file.txt }` | Creates file only if it doesn't exist (already idiomatic) |
 | `mkdir dir1`<br>`mkdir dir2`<br>`mkdir dir3` | `mkdir dir1 dir2 dir3` | Uses command's built-in multiple argument capability |
 | `npm install pkg1`<br>`npm install pkg2` | `npm install pkg1 pkg2` | Installs multiple packages in one command |
 

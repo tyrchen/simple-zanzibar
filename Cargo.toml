@@ -15,3 +15,5 @@ categories = ["development-tools"]
 keywords = []
 
 [dependencies]
+pest = "2.8.0"
+thiserror = "2.0.12"
