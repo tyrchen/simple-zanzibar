@@ -9,7 +9,7 @@ repository = "https://github.com/tyrchen/simple-zanzibar"
 homepage = "https://github.com/tyrchen/simple-zanzibar"
 description = "A simplified Rust implementation of Google's Zanzibar authorization system with DSL support"
 readme = "README.md"
-categories = ["authentication", "authorization", "security", "web-programming"]
+categories = ["development-tools"]
 keywords = ["zanzibar", "authorization", "permissions", "rbac", "security"]
 exclude = [
   ".cursor/",
