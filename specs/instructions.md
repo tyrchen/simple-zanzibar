@@ -9,3 +9,5 @@ PLAN: 进入 plan mode，根据 @0001-design.md  详细规划任务。注意 DSL
 IMPLEMENT: 进入 implement mode，开始下一个任务
 
 请 review @/src 下的所有代码，确保其正确性。如果没问题，开始下一个任务
+
+帮我更新 @Cargo.toml，使其进入发布状态。同时帮我撰写 @README.md ，包含 zanzibar 的介绍，使用 mermaid 构建的架构/设计/entity/sequential 图表，以及 DSL 的使用说明，项目的使用说明等。

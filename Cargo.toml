@@ -1,20 +1,39 @@
 [package]
 name = "simple-zanzibar"
 version = "0.1.0"
-authors = ["Your Name <YourName@yourdomain.com>"]
-edition = "2024"
+authors = ["Tyr Chen <tyr.chen@gmail.com>"]
+edition = "2021"
 license = "MIT"
-documentation = "https://docs.rs/"
-repository = "https://github.com/TODO"
-homepage = "https://github.com/TODO"
-description = """
-
-"""
+documentation = "https://docs.rs/simple-zanzibar"
+repository = "https://github.com/tyrchen/simple-zanzibar"
+homepage = "https://github.com/tyrchen/simple-zanzibar"
+description = "A simplified Rust implementation of Google's Zanzibar authorization system with DSL support"
 readme = "README.md"
-categories = ["development-tools"]
-keywords = []
+categories = ["authentication", "authorization", "security", "web-programming"]
+keywords = ["zanzibar", "authorization", "permissions", "rbac", "security"]
+exclude = [
+  ".cursor/",
+  "fixtures/",
+  "specs/",
+  "ui/",
+  "_typos.toml",
+  "cliff.toml",
+  "deny.toml",
+  "Makefile",
+]
 
 [dependencies]
 pest = "2.8.0"
 pest_derive = "2.8.0"
 thiserror = "2.0.12"
+
+[dev-dependencies]
+# Add any development dependencies here if needed
+
+[[example]]
+name = "file_permissions"
+path = "examples/file_permissions.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
