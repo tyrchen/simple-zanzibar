@@ -1,0 +1,3 @@
+# Project Brief: Simplified Rust Zanzibar
+
+This project aims to build a simplified, single-node, in-memory authorization system in Rust, inspired by Google's Zanzibar. It will faithfully implement Zanzibar's core concepts, including relation tuples, namespace configuration with userset rewrite rules, and a compatible DSL for policy definition. The implementation will deliberately omit the complexities of a distributed system, such as global consistency, advanced performance optimizations, and persistence, focusing instead on logical correctness and a clear implementation path. A `TupleStore` trait will be defined to allow for future integration of simple persistence solutions.

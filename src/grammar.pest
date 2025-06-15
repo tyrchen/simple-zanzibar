@@ -1,0 +1,62 @@
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
+
+IDENTIFIER = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+STRING_LITERAL = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+
+NAMESPACE = { "namespace" }
+RELATION = { "relation" }
+REWRITE = { "rewrite" }
+THIS = { "this" }
+COMPUTED_USERSET = { "computed_userset" }
+TUPLE_TO_USERSET = { "tuple_to_userset" }
+UNION = { "union" }
+INTERSECTION = { "intersection" }
+EXCLUSION = { "exclusion" }
+
+file = { SOI ~ namespace_def* ~ EOI }
+
+namespace_def = {
+    NAMESPACE ~ IDENTIFIER ~ "{" ~ relation_def* ~ "}"
+}
+
+relation_def = {
+    RELATION ~ IDENTIFIER ~ "{" ~ rewrite_rule? ~ "}"
+}
+
+rewrite_rule = {
+    REWRITE ~ expression
+}
+
+expression = {
+    union_expr | intersection_expr | exclusion_expr | term
+}
+
+term = {
+    this_expr | computed_userset_expr | tuple_to_userset_expr | "(" ~ expression ~ ")"
+}
+
+this_expr = { THIS }
+
+computed_userset_expr = {
+    COMPUTED_USERSET ~ "(" ~ "relation" ~ ":" ~ STRING_LITERAL ~ ")"
+}
+
+tuple_to_userset_expr = {
+    TUPLE_TO_USERSET ~ "("
+        ~ "tupleset" ~ ":" ~ STRING_LITERAL ~ ","
+        ~ "computed_userset" ~ ":" ~ STRING_LITERAL
+    ~ ")"
+}
+
+union_expr = {
+    UNION ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")"
+}
+
+intersection_expr = {
+    INTERSECTION ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")"
+}
+
+exclusion_expr = {
+    EXCLUSION ~ "(" ~ expression ~ "," ~ expression ~ ")"
+}
