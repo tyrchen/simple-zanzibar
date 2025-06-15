@@ -1,10 +1,10 @@
 //! Tests for the core evaluation logic.
 
-use simple_zanzibar::ZanzibarService;
 use simple_zanzibar::error::ZanzibarError;
 use simple_zanzibar::model::{
     NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User, UsersetExpression,
 };
+use simple_zanzibar::ZanzibarService;
 use std::collections::HashMap;
 
 /// Creates a ZanzibarService pre-populated with a common test configuration.

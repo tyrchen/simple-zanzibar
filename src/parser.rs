@@ -2,8 +2,8 @@
 
 use crate::error::ZanzibarError;
 use crate::model::{NamespaceConfig, Relation, RelationConfig, UsersetExpression};
-use pest::Parser;
 use pest::iterators::Pair;
+use pest::Parser;
 use pest_derive::Parser;
 use std::collections::HashMap;
 

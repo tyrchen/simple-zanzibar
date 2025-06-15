@@ -2,8 +2,8 @@
 //! These tests demonstrate the full workflow from DSL parsing to authorization checks.
 
 use simple_zanzibar::{
-    ZanzibarService,
     model::{Object, Relation, RelationTuple, User},
+    ZanzibarService,
 };
 
 const DOCUMENT_SYSTEM_DSL: &str = r#"

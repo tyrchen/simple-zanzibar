@@ -4,8 +4,8 @@
 //! to implement a file permissions system with hierarchical access control.
 
 use simple_zanzibar::{
-    ZanzibarService,
     model::{Object, Relation, RelationTuple, User},
+    ZanzibarService,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
