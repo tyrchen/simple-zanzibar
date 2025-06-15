@@ -106,15 +106,19 @@ fn parse_expression(pair: Pair<Rule>) -> Result<UsersetExpression, ZanzibarError
         Rule::this_expr => Ok(UsersetExpression::This),
         Rule::computed_userset_expr => {
             let mut inner = pair.into_inner();
-            let relation_str = inner.next().unwrap().as_str().trim_matches('\"');
+            // Skip COMPUTED_USERSET keyword, get STRING_LITERAL
+            let _keyword = inner.next().unwrap(); // COMPUTED_USERSET
+            let relation_str = inner.next().unwrap().as_str().trim_matches('\"'); // STRING_LITERAL
             Ok(UsersetExpression::ComputedUserset {
                 relation: Relation(relation_str.to_string()),
             })
         }
         Rule::tuple_to_userset_expr => {
             let mut inner = pair.into_inner();
-            let tupleset_str = inner.next().unwrap().as_str().trim_matches('\"');
-            let computed_str = inner.next().unwrap().as_str().trim_matches('\"');
+            // Based on the grammar, we should have: TUPLE_TO_USERSET, STRING_LITERAL, STRING_LITERAL
+            let _keyword = inner.next().unwrap(); // TUPLE_TO_USERSET
+            let tupleset_str = inner.next().unwrap().as_str().trim_matches('\"'); // First STRING_LITERAL
+            let computed_str = inner.next().unwrap().as_str().trim_matches('\"'); // Second STRING_LITERAL
             Ok(UsersetExpression::TupleToUserset {
                 tupleset_relation: Relation(tupleset_str.to_string()),
                 computed_userset_relation: Relation(computed_str.to_string()),
