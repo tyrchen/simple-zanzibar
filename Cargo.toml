@@ -27,7 +27,7 @@ pest_derive = "2.8.6"
 thiserror = "2.0.18"
 
 [dev-dependencies]
-# Add any development dependencies here if needed
+insta = "1"
 
 [[example]]
 name = "file_permissions"

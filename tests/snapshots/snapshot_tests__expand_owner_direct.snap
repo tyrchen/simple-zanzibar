@@ -1,0 +1,11 @@
+---
+source: tests/snapshot_tests.rs
+expression: expanded
+---
+Union(
+    [
+        User(
+            "alice",
+        ),
+    ],
+)

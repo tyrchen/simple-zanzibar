@@ -252,3 +252,468 @@ fn expand_expression(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        model::{NamespaceConfig, RelationConfig, RelationTuple},
+        store::InMemoryTupleStore,
+    };
+
+    /// Recursively collect user IDs from an expanded userset (test helper).
+    fn collect_user_ids(expanded: &ExpandedUserset, out: &mut Vec<String>) {
+        match expanded {
+            ExpandedUserset::User(id) => out.push(id.clone()),
+            ExpandedUserset::Userset(_, _) => {}
+            ExpandedUserset::Union(children) | ExpandedUserset::Intersection(children) => {
+                for child in children {
+                    collect_user_ids(child, out);
+                }
+            }
+            ExpandedUserset::Exclusion { base, exclude: _ } => {
+                collect_user_ids(base, out);
+            }
+        }
+    }
+
+    /// Helper: build a configs map from a list of namespace configs.
+    fn configs_from(namespaces: Vec<NamespaceConfig>) -> HashMap<String, NamespaceConfig> {
+        namespaces
+            .into_iter()
+            .map(|c| (c.name.clone(), c))
+            .collect()
+    }
+
+    /// Helper: build a minimal store with given tuples.
+    fn store_with(tuples: Vec<RelationTuple>) -> InMemoryTupleStore {
+        let mut store = InMemoryTupleStore::default();
+        for t in tuples {
+            store.write_tuple(t).unwrap();
+        }
+        store
+    }
+
+    // -- Intersection tests --
+
+    #[test]
+    fn test_should_grant_intersection_when_all_match() {
+        // viewer = intersection(this, computed_userset("member"))
+        // Alice is both a direct viewer AND a member → should be true.
+        let ns = NamespaceConfig::new("team")
+            .with_relation(RelationConfig::new(Relation::new("member")))
+            .with_relation(RelationConfig::new(Relation::new("viewer")).with_rewrite(
+                UsersetExpression::Intersection(vec![
+                    UsersetExpression::This,
+                    UsersetExpression::ComputedUserset {
+                        relation: Relation::new("member"),
+                    },
+                ]),
+            ));
+        let configs = configs_from(vec![ns]);
+        let store = store_with(vec![
+            RelationTuple::new(
+                Object::new("team", "eng"),
+                Relation::new("viewer"),
+                User::user_id("alice"),
+            ),
+            RelationTuple::new(
+                Object::new("team", "eng"),
+                Relation::new("member"),
+                User::user_id("alice"),
+            ),
+        ]);
+
+        let result = check(
+            &Object::new("team", "eng"),
+            &Relation::new("viewer"),
+            &User::user_id("alice"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_should_deny_intersection_when_one_fails() {
+        // viewer = intersection(this, computed_userset("member"))
+        // Alice is a direct viewer but NOT a member → should be false.
+        let ns = NamespaceConfig::new("team")
+            .with_relation(RelationConfig::new(Relation::new("member")))
+            .with_relation(RelationConfig::new(Relation::new("viewer")).with_rewrite(
+                UsersetExpression::Intersection(vec![
+                    UsersetExpression::This,
+                    UsersetExpression::ComputedUserset {
+                        relation: Relation::new("member"),
+                    },
+                ]),
+            ));
+        let configs = configs_from(vec![ns]);
+        let store = store_with(vec![RelationTuple::new(
+            Object::new("team", "eng"),
+            Relation::new("viewer"),
+            User::user_id("alice"),
+        )]);
+
+        let result = check(
+            &Object::new("team", "eng"),
+            &Relation::new("viewer"),
+            &User::user_id("alice"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_should_deny_empty_intersection() {
+        let ns = NamespaceConfig::new("test").with_relation(
+            RelationConfig::new(Relation::new("viewer"))
+                .with_rewrite(UsersetExpression::Intersection(vec![])),
+        );
+        let configs = configs_from(vec![ns]);
+        let store = InMemoryTupleStore::default();
+
+        let result = check(
+            &Object::new("test", "1"),
+            &Relation::new("viewer"),
+            &User::user_id("alice"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(!result, "empty intersection must deny access");
+    }
+
+    // -- Exclusion tests --
+
+    #[test]
+    fn test_should_grant_exclusion_when_not_excluded() {
+        // viewer = exclusion(base: this, exclude: computed_userset("banned"))
+        // Alice is a direct viewer and NOT banned → true.
+        let ns = NamespaceConfig::new("doc")
+            .with_relation(RelationConfig::new(Relation::new("banned")))
+            .with_relation(RelationConfig::new(Relation::new("viewer")).with_rewrite(
+                UsersetExpression::Exclusion {
+                    base: Box::new(UsersetExpression::This),
+                    exclude: Box::new(UsersetExpression::ComputedUserset {
+                        relation: Relation::new("banned"),
+                    }),
+                },
+            ));
+        let configs = configs_from(vec![ns]);
+        let store = store_with(vec![RelationTuple::new(
+            Object::new("doc", "1"),
+            Relation::new("viewer"),
+            User::user_id("alice"),
+        )]);
+
+        let result = check(
+            &Object::new("doc", "1"),
+            &Relation::new("viewer"),
+            &User::user_id("alice"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_should_deny_exclusion_when_excluded() {
+        // Alice is a direct viewer but ALSO banned → false.
+        let ns = NamespaceConfig::new("doc")
+            .with_relation(RelationConfig::new(Relation::new("banned")))
+            .with_relation(RelationConfig::new(Relation::new("viewer")).with_rewrite(
+                UsersetExpression::Exclusion {
+                    base: Box::new(UsersetExpression::This),
+                    exclude: Box::new(UsersetExpression::ComputedUserset {
+                        relation: Relation::new("banned"),
+                    }),
+                },
+            ));
+        let configs = configs_from(vec![ns]);
+        let store = store_with(vec![
+            RelationTuple::new(
+                Object::new("doc", "1"),
+                Relation::new("viewer"),
+                User::user_id("alice"),
+            ),
+            RelationTuple::new(
+                Object::new("doc", "1"),
+                Relation::new("banned"),
+                User::user_id("alice"),
+            ),
+        ]);
+
+        let result = check(
+            &Object::new("doc", "1"),
+            &Relation::new("viewer"),
+            &User::user_id("alice"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_should_deny_exclusion_when_not_in_base() {
+        // Bob is NOT a direct viewer (not in base) → false regardless of exclusion.
+        let ns = NamespaceConfig::new("doc")
+            .with_relation(RelationConfig::new(Relation::new("banned")))
+            .with_relation(RelationConfig::new(Relation::new("viewer")).with_rewrite(
+                UsersetExpression::Exclusion {
+                    base: Box::new(UsersetExpression::This),
+                    exclude: Box::new(UsersetExpression::ComputedUserset {
+                        relation: Relation::new("banned"),
+                    }),
+                },
+            ));
+        let configs = configs_from(vec![ns]);
+        let store = InMemoryTupleStore::default();
+
+        let result = check(
+            &Object::new("doc", "1"),
+            &Relation::new("viewer"),
+            &User::user_id("bob"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(!result);
+    }
+
+    // -- Cycle detection --
+
+    #[test]
+    fn test_should_detect_cycle_and_deny() {
+        // rel_a = computed_userset("rel_b"), rel_b = computed_userset("rel_a")
+        // This creates an infinite loop. Cycle detection should break it and return false.
+        let ns = NamespaceConfig::new("test")
+            .with_relation(RelationConfig::new(Relation::new("rel_a")).with_rewrite(
+                UsersetExpression::ComputedUserset {
+                    relation: Relation::new("rel_b"),
+                },
+            ))
+            .with_relation(RelationConfig::new(Relation::new("rel_b")).with_rewrite(
+                UsersetExpression::ComputedUserset {
+                    relation: Relation::new("rel_a"),
+                },
+            ));
+        let configs = configs_from(vec![ns]);
+        let store = InMemoryTupleStore::default();
+
+        let result = check(
+            &Object::new("test", "1"),
+            &Relation::new("rel_a"),
+            &User::user_id("alice"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(!result, "cyclic reference must not cause infinite loop");
+    }
+
+    // -- Error cases --
+
+    #[test]
+    fn test_should_error_on_unknown_namespace() {
+        let configs = HashMap::new();
+        let store = InMemoryTupleStore::default();
+
+        let result = check(
+            &Object::new("nonexistent", "1"),
+            &Relation::new("viewer"),
+            &User::user_id("alice"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        );
+        assert!(matches!(result, Err(ZanzibarError::NamespaceNotFound(_))));
+    }
+
+    #[test]
+    fn test_should_error_on_unknown_relation() {
+        let ns =
+            NamespaceConfig::new("doc").with_relation(RelationConfig::new(Relation::new("owner")));
+        let configs = configs_from(vec![ns]);
+        let store = InMemoryTupleStore::default();
+
+        let result = check(
+            &Object::new("doc", "1"),
+            &Relation::new("nonexistent"),
+            &User::user_id("alice"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        );
+        assert!(matches!(result, Err(ZanzibarError::RelationNotFound(_, _))));
+    }
+
+    // -- Cross-namespace --
+
+    #[test]
+    fn test_should_resolve_cross_namespace_with_distinct_schemas() {
+        // doc namespace: viewer = tuple_to_userset(parent, viewer)
+        // folder namespace: viewer = this (direct only, no computed userset)
+        // These have DIFFERENT relation schemas. The old code (single config) would fail here.
+        let doc_ns = NamespaceConfig::new("doc")
+            .with_relation(RelationConfig::new(Relation::new("parent")))
+            .with_relation(RelationConfig::new(Relation::new("viewer")).with_rewrite(
+                UsersetExpression::TupleToUserset {
+                    tupleset_relation: Relation::new("parent"),
+                    computed_userset_relation: Relation::new("viewer"),
+                },
+            ));
+        let folder_ns = NamespaceConfig::new("folder")
+            .with_relation(RelationConfig::new(Relation::new("viewer")));
+        let configs = configs_from(vec![doc_ns, folder_ns]);
+
+        let store = store_with(vec![
+            // folder:A has viewer bob
+            RelationTuple::new(
+                Object::new("folder", "A"),
+                Relation::new("viewer"),
+                User::user_id("bob"),
+            ),
+            // doc:1 has parent folder:A#viewer
+            RelationTuple::new(
+                Object::new("doc", "1"),
+                Relation::new("parent"),
+                User::userset(Object::new("folder", "A"), Relation::new("viewer")),
+            ),
+        ]);
+
+        // Bob can view doc:1 via folder:A inheritance.
+        let result = check(
+            &Object::new("doc", "1"),
+            &Relation::new("viewer"),
+            &User::user_id("bob"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(result);
+
+        // Alice cannot view doc:1 — she's not a folder:A viewer.
+        let result = check(
+            &Object::new("doc", "1"),
+            &Relation::new("viewer"),
+            &User::user_id("alice"),
+            &configs,
+            &store,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(!result);
+    }
+
+    // -- Expand tests --
+
+    #[test]
+    fn test_should_expand_intersection() {
+        let ns = NamespaceConfig::new("doc")
+            .with_relation(RelationConfig::new(Relation::new("editor")))
+            .with_relation(RelationConfig::new(Relation::new("viewer")).with_rewrite(
+                UsersetExpression::Intersection(vec![
+                    UsersetExpression::This,
+                    UsersetExpression::ComputedUserset {
+                        relation: Relation::new("editor"),
+                    },
+                ]),
+            ));
+        let configs = configs_from(vec![ns]);
+        let store = store_with(vec![
+            RelationTuple::new(
+                Object::new("doc", "1"),
+                Relation::new("viewer"),
+                User::user_id("alice"),
+            ),
+            RelationTuple::new(
+                Object::new("doc", "1"),
+                Relation::new("editor"),
+                User::user_id("bob"),
+            ),
+        ]);
+
+        let expanded = expand(
+            &Object::new("doc", "1"),
+            &Relation::new("viewer"),
+            &configs,
+            &store,
+        )
+        .unwrap();
+        assert!(matches!(expanded, ExpandedUserset::Intersection(_)));
+    }
+
+    #[test]
+    fn test_should_expand_exclusion() {
+        let ns = NamespaceConfig::new("doc")
+            .with_relation(RelationConfig::new(Relation::new("banned")))
+            .with_relation(RelationConfig::new(Relation::new("viewer")).with_rewrite(
+                UsersetExpression::Exclusion {
+                    base: Box::new(UsersetExpression::This),
+                    exclude: Box::new(UsersetExpression::ComputedUserset {
+                        relation: Relation::new("banned"),
+                    }),
+                },
+            ));
+        let configs = configs_from(vec![ns]);
+        let store = store_with(vec![
+            RelationTuple::new(
+                Object::new("doc", "1"),
+                Relation::new("viewer"),
+                User::user_id("alice"),
+            ),
+            RelationTuple::new(
+                Object::new("doc", "1"),
+                Relation::new("banned"),
+                User::user_id("bob"),
+            ),
+        ]);
+
+        let expanded = expand(
+            &Object::new("doc", "1"),
+            &Relation::new("viewer"),
+            &configs,
+            &store,
+        )
+        .unwrap();
+        assert!(matches!(expanded, ExpandedUserset::Exclusion { .. }));
+
+        // Verify the base contains alice and the exclude contains bob.
+        let mut base_users = Vec::new();
+        let mut exclude_users = Vec::new();
+        if let ExpandedUserset::Exclusion { base, exclude } = &expanded {
+            collect_user_ids(base, &mut base_users);
+            collect_user_ids(exclude, &mut exclude_users);
+        }
+        assert!(base_users.contains(&"alice".to_string()));
+        assert!(exclude_users.contains(&"bob".to_string()));
+    }
+
+    #[test]
+    fn test_should_expand_error_on_unknown_namespace() {
+        let configs = HashMap::new();
+        let store = InMemoryTupleStore::default();
+
+        let result = expand(
+            &Object::new("nonexistent", "1"),
+            &Relation::new("viewer"),
+            &configs,
+            &store,
+        );
+        assert!(matches!(result, Err(ZanzibarError::NamespaceNotFound(_))));
+    }
+}

@@ -177,3 +177,201 @@ fn parse_expression(pair: Pair<'_, Rule>) -> Result<UsersetExpression, ZanzibarE
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_parse_empty_file() {
+        let configs = parse_dsl("").unwrap();
+        assert!(configs.is_empty());
+    }
+
+    #[test]
+    fn test_should_parse_empty_namespace() {
+        let configs = parse_dsl("namespace empty {}").unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "empty");
+        assert!(configs[0].relations.is_empty());
+    }
+
+    #[test]
+    fn test_should_parse_relation_without_rewrite() {
+        let configs = parse_dsl("namespace doc { relation owner {} }").unwrap();
+        let owner = configs[0].relations.get(&Relation::new("owner")).unwrap();
+        assert!(owner.userset_rewrite.is_none());
+    }
+
+    #[test]
+    fn test_should_parse_this_rewrite() {
+        let configs = parse_dsl("namespace doc { relation viewer { rewrite this } }").unwrap();
+        let viewer = configs[0].relations.get(&Relation::new("viewer")).unwrap();
+        assert!(matches!(
+            viewer.userset_rewrite,
+            Some(UsersetExpression::This)
+        ));
+    }
+
+    #[test]
+    fn test_should_parse_computed_userset() {
+        let dsl =
+            r#"namespace doc { relation viewer { rewrite computed_userset(relation: "owner") } }"#;
+        let configs = parse_dsl(dsl).unwrap();
+        let viewer = configs[0].relations.get(&Relation::new("viewer")).unwrap();
+        assert!(matches!(
+            viewer.userset_rewrite,
+            Some(UsersetExpression::ComputedUserset { .. })
+        ));
+        if let Some(UsersetExpression::ComputedUserset { relation }) = &viewer.userset_rewrite {
+            assert_eq!(relation.0, "owner");
+        }
+    }
+
+    #[test]
+    fn test_should_parse_tuple_to_userset() {
+        let dsl = r#"
+            namespace doc {
+                relation viewer {
+                    rewrite tuple_to_userset(tupleset: "parent", computed_userset: "viewer")
+                }
+            }
+        "#;
+        let configs = parse_dsl(dsl).unwrap();
+        let viewer = configs[0].relations.get(&Relation::new("viewer")).unwrap();
+        if let Some(UsersetExpression::TupleToUserset {
+            tupleset_relation,
+            computed_userset_relation,
+        }) = &viewer.userset_rewrite
+        {
+            assert_eq!(tupleset_relation.0, "parent");
+            assert_eq!(computed_userset_relation.0, "viewer");
+        } else {
+            panic!("expected TupleToUserset");
+        }
+    }
+
+    #[test]
+    fn test_should_parse_union_with_multiple_children() {
+        let dsl = r#"
+            namespace doc {
+                relation viewer {
+                    rewrite union(this, computed_userset(relation: "owner"), computed_userset(relation: "editor"))
+                }
+            }
+        "#;
+        let configs = parse_dsl(dsl).unwrap();
+        let viewer = configs[0].relations.get(&Relation::new("viewer")).unwrap();
+        if let Some(UsersetExpression::Union(children)) = &viewer.userset_rewrite {
+            assert_eq!(children.len(), 3);
+        } else {
+            panic!("expected Union");
+        }
+    }
+
+    #[test]
+    fn test_should_parse_intersection() {
+        let dsl = r#"
+            namespace doc {
+                relation viewer {
+                    rewrite intersection(this, computed_userset(relation: "member"))
+                }
+            }
+        "#;
+        let configs = parse_dsl(dsl).unwrap();
+        let viewer = configs[0].relations.get(&Relation::new("viewer")).unwrap();
+        if let Some(UsersetExpression::Intersection(children)) = &viewer.userset_rewrite {
+            assert_eq!(children.len(), 2);
+        } else {
+            panic!("expected Intersection");
+        }
+    }
+
+    #[test]
+    fn test_should_parse_exclusion() {
+        let dsl = r#"
+            namespace doc {
+                relation viewer {
+                    rewrite exclusion(this, computed_userset(relation: "banned"))
+                }
+            }
+        "#;
+        let configs = parse_dsl(dsl).unwrap();
+        let viewer = configs[0].relations.get(&Relation::new("viewer")).unwrap();
+        assert!(matches!(
+            viewer.userset_rewrite,
+            Some(UsersetExpression::Exclusion { .. })
+        ));
+    }
+
+    #[test]
+    fn test_should_parse_nested_expressions() {
+        let dsl = r#"
+            namespace doc {
+                relation viewer {
+                    rewrite union(
+                        this,
+                        intersection(
+                            computed_userset(relation: "member"),
+                            exclusion(
+                                computed_userset(relation: "editor"),
+                                computed_userset(relation: "banned")
+                            )
+                        )
+                    )
+                }
+            }
+        "#;
+        let configs = parse_dsl(dsl).unwrap();
+        let viewer = configs[0].relations.get(&Relation::new("viewer")).unwrap();
+        if let Some(UsersetExpression::Union(children)) = &viewer.userset_rewrite {
+            assert_eq!(children.len(), 2);
+            assert!(matches!(children[0], UsersetExpression::This));
+            assert!(matches!(children[1], UsersetExpression::Intersection(_)));
+        } else {
+            panic!("expected nested Union");
+        }
+    }
+
+    #[test]
+    fn test_should_parse_comments_between_elements() {
+        let dsl = r#"
+            // Top-level comment
+            namespace doc {
+                // Comment before relation
+                relation owner {} // Inline comment after
+                // Another comment
+                relation viewer { rewrite this }
+            }
+        "#;
+        let configs = parse_dsl(dsl).unwrap();
+        assert_eq!(configs[0].relations.len(), 2);
+    }
+
+    #[test]
+    fn test_should_parse_multiple_namespaces() {
+        let dsl = r#"
+            namespace doc { relation owner {} }
+            namespace folder { relation viewer {} }
+            namespace org { relation member {} }
+        "#;
+        let configs = parse_dsl(dsl).unwrap();
+        assert_eq!(configs.len(), 3);
+    }
+
+    #[test]
+    fn test_should_reject_invalid_syntax() {
+        assert!(parse_dsl("not valid dsl at all").is_err());
+    }
+
+    #[test]
+    fn test_should_reject_unclosed_namespace() {
+        assert!(parse_dsl("namespace doc {").is_err());
+    }
+
+    #[test]
+    fn test_should_reject_unknown_rewrite_keyword() {
+        let dsl = r#"namespace doc { relation v { rewrite unknown_thing(this) } }"#;
+        assert!(parse_dsl(dsl).is_err());
+    }
+}
