@@ -1,16 +1,65 @@
 //! Integration tests for the Zanzibar service.
-//! These tests demonstrate the full workflow from DSL parsing to authorization checks.
+//!
+//! These tests model real-world authorization systems end-to-end:
+//! DSL parsing → tuple writing → authorization checks.
 
 use simple_zanzibar::{
-    model::{Object, Relation, RelationTuple, User},
     ZanzibarService,
+    model::{Object, Relation, RelationTuple, User},
 };
 
-const DOCUMENT_SYSTEM_DSL: &str = r#"
-    // Document management system with hierarchical permissions
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn tuple(ns: &str, id: &str, rel: &str, user_id: &str) -> RelationTuple {
+    RelationTuple::new(
+        Object::new(ns, id),
+        Relation::new(rel),
+        User::user_id(user_id),
+    )
+}
+
+fn parent_tuple(ns: &str, id: &str, parent_ns: &str, parent_id: &str, rel: &str) -> RelationTuple {
+    RelationTuple::new(
+        Object::new(ns, id),
+        Relation::new("parent"),
+        User::userset(Object::new(parent_ns, parent_id), Relation::new(rel)),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// 1. Google-Drive-like document system
+// ---------------------------------------------------------------------------
+
+const GOOGLE_DRIVE_DSL: &str = r#"
+    namespace org {
+        relation member {}
+    }
+
+    namespace folder {
+        relation owner {}
+        relation parent {}
+
+        relation viewer {
+            rewrite union(
+                this,
+                computed_userset(relation: "owner"),
+                tuple_to_userset(tupleset: "parent", computed_userset: "viewer")
+            )
+        }
+
+        relation editor {
+            rewrite union(
+                this,
+                computed_userset(relation: "owner"),
+                tuple_to_userset(tupleset: "parent", computed_userset: "editor")
+            )
+        }
+    }
+
     namespace doc {
         relation owner {}
-
         relation parent {}
 
         relation viewer {
@@ -23,19 +72,133 @@ const DOCUMENT_SYSTEM_DSL: &str = r#"
         }
 
         relation editor {
-            rewrite this
-        }
-    }
-
-    // Folder system with simple inheritance
-    namespace folder {
-        relation viewer {}
-
-        relation parent {}
-
-        relation inherited_viewer {
             rewrite union(
                 this,
+                computed_userset(relation: "owner"),
+                tuple_to_userset(tupleset: "parent", computed_userset: "editor")
+            )
+        }
+    }
+"#;
+
+#[test]
+fn test_should_model_google_drive_permissions() -> Result<(), Box<dyn std::error::Error>> {
+    let mut svc = ZanzibarService::new();
+    svc.add_dsl(GOOGLE_DRIVE_DSL)?;
+
+    //  org:acme
+    //    └─ folder:root  (owner: alice)
+    //         └─ folder:eng  (viewer: bob)
+    //              └─ doc:design  (editor: charlie)
+
+    svc.write_tuple(tuple("folder", "root", "owner", "alice"))?;
+    svc.write_tuple(parent_tuple("folder", "eng", "folder", "root", "viewer"))?;
+    svc.write_tuple(tuple("folder", "eng", "viewer", "bob"))?;
+    svc.write_tuple(parent_tuple("doc", "design", "folder", "eng", "viewer"))?;
+    svc.write_tuple(tuple("doc", "design", "editor", "charlie"))?;
+
+    let doc = Object::new("doc", "design");
+    let viewer = Relation::new("viewer");
+    let editor = Relation::new("editor");
+
+    // Alice: owner of root → viewer of eng (inherited) → viewer of doc (inherited)
+    assert!(svc.check(&doc, &viewer, &User::user_id("alice"))?);
+    // Alice: owner of root → editor of eng → editor of doc (inherited)
+    assert!(svc.check(&doc, &editor, &User::user_id("alice"))?);
+
+    // Bob: direct viewer of eng → viewer of doc (inherited)
+    assert!(svc.check(&doc, &viewer, &User::user_id("bob"))?);
+    // Bob: NOT an editor of eng → NOT editor of doc
+    assert!(!svc.check(&doc, &editor, &User::user_id("bob"))?);
+
+    // Charlie: direct editor of doc → also viewer of doc
+    assert!(svc.check(&doc, &viewer, &User::user_id("charlie"))?);
+    assert!(svc.check(&doc, &editor, &User::user_id("charlie"))?);
+
+    // Dave: no permissions anywhere
+    assert!(!svc.check(&doc, &viewer, &User::user_id("dave"))?);
+    assert!(!svc.check(&doc, &editor, &User::user_id("dave"))?);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 2. RBAC with group membership and banned users (exclusion)
+// ---------------------------------------------------------------------------
+
+const RBAC_BANNED_DSL: &str = r#"
+    namespace group {
+        relation member {}
+    }
+
+    namespace resource {
+        relation group_access {}
+        relation banned {}
+
+        relation viewer {
+            rewrite exclusion(
+                union(
+                    this,
+                    tuple_to_userset(tupleset: "group_access", computed_userset: "member")
+                ),
+                computed_userset(relation: "banned")
+            )
+        }
+    }
+"#;
+
+#[test]
+fn test_should_model_rbac_with_banned_users() -> Result<(), Box<dyn std::error::Error>> {
+    let mut svc = ZanzibarService::new();
+    svc.add_dsl(RBAC_BANNED_DSL)?;
+
+    // group:eng has members alice, bob, eve
+    svc.write_tuple(tuple("group", "eng", "member", "alice"))?;
+    svc.write_tuple(tuple("group", "eng", "member", "bob"))?;
+    svc.write_tuple(tuple("group", "eng", "member", "eve"))?;
+
+    // resource:secret grants access to group:eng
+    svc.write_tuple(RelationTuple::new(
+        Object::new("resource", "secret"),
+        Relation::new("group_access"),
+        User::userset(Object::new("group", "eng"), Relation::new("member")),
+    ))?;
+
+    // eve is banned from resource:secret
+    svc.write_tuple(tuple("resource", "secret", "banned", "eve"))?;
+
+    // charlie has direct viewer access
+    svc.write_tuple(tuple("resource", "secret", "viewer", "charlie"))?;
+
+    let resource = Object::new("resource", "secret");
+    let viewer = Relation::new("viewer");
+
+    // alice: eng member, not banned → allowed
+    assert!(svc.check(&resource, &viewer, &User::user_id("alice"))?);
+    // bob: eng member, not banned → allowed
+    assert!(svc.check(&resource, &viewer, &User::user_id("bob"))?);
+    // eve: eng member, but banned → DENIED
+    assert!(!svc.check(&resource, &viewer, &User::user_id("eve"))?);
+    // charlie: direct viewer, not banned → allowed
+    assert!(svc.check(&resource, &viewer, &User::user_id("charlie"))?);
+    // dave: no access at all
+    assert!(!svc.check(&resource, &viewer, &User::user_id("dave"))?);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 3. Deep folder nesting (4 levels)
+// ---------------------------------------------------------------------------
+
+const DEEP_NESTING_DSL: &str = r#"
+    namespace folder {
+        relation owner {}
+        relation parent {}
+        relation viewer {
+            rewrite union(
+                this,
+                computed_userset(relation: "owner"),
                 tuple_to_userset(tupleset: "parent", computed_userset: "viewer")
             )
         }
@@ -43,259 +206,397 @@ const DOCUMENT_SYSTEM_DSL: &str = r#"
 "#;
 
 #[test]
-fn test_document_system_integration() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+fn test_should_propagate_through_deep_nesting() -> Result<(), Box<dyn std::error::Error>> {
+    let mut svc = ZanzibarService::new();
+    svc.add_dsl(DEEP_NESTING_DSL)?;
 
-    // Parse and load the DSL
-    service.add_dsl(DOCUMENT_SYSTEM_DSL)?;
+    // folder:L1 → folder:L2 → folder:L3 → folder:L4
+    svc.write_tuple(tuple("folder", "L1", "viewer", "alice"))?;
+    svc.write_tuple(parent_tuple("folder", "L2", "folder", "L1", "viewer"))?;
+    svc.write_tuple(parent_tuple("folder", "L3", "folder", "L2", "viewer"))?;
+    svc.write_tuple(parent_tuple("folder", "L4", "folder", "L3", "viewer"))?;
 
-    // Set up test data
-    let doc1 = Object {
-        namespace: "doc".to_string(),
-        id: "document1".to_string(),
-    };
-    let doc2 = Object {
-        namespace: "doc".to_string(),
-        id: "document2".to_string(),
-    };
+    let viewer = Relation::new("viewer");
 
-    let owner_rel = Relation("owner".to_string());
-    let viewer_rel = Relation("viewer".to_string());
-    let editor_rel = Relation("editor".to_string());
-    let parent_rel = Relation("parent".to_string());
+    // Alice's access should propagate through all 4 levels.
+    assert!(svc.check(
+        &Object::new("folder", "L1"),
+        &viewer,
+        &User::user_id("alice")
+    )?);
+    assert!(svc.check(
+        &Object::new("folder", "L2"),
+        &viewer,
+        &User::user_id("alice")
+    )?);
+    assert!(svc.check(
+        &Object::new("folder", "L3"),
+        &viewer,
+        &User::user_id("alice")
+    )?);
+    assert!(svc.check(
+        &Object::new("folder", "L4"),
+        &viewer,
+        &User::user_id("alice")
+    )?);
 
-    let alice = User::UserId("alice".to_string());
-    let bob = User::UserId("bob".to_string());
-    let charlie = User::UserId("charlie".to_string());
+    // Bob has no access at any level.
+    assert!(!svc.check(&Object::new("folder", "L4"), &viewer, &User::user_id("bob"))?);
 
-    // Alice owns document1
-    service.write_tuple(RelationTuple {
-        object: doc1.clone(),
-        relation: owner_rel.clone(),
-        user: alice.clone(),
-    })?;
-
-    // Bob is a direct viewer of document1
-    service.write_tuple(RelationTuple {
-        object: doc1.clone(),
-        relation: viewer_rel.clone(),
-        user: bob.clone(),
-    })?;
-
-    // Document2 has document1 as parent
-    service.write_tuple(RelationTuple {
-        object: doc2.clone(),
-        relation: parent_rel.clone(),
-        user: User::Userset(doc1.clone(), viewer_rel.clone()),
-    })?;
-
-    // Charlie is a direct editor of document1 (but not owner)
-    service.write_tuple(RelationTuple {
-        object: doc1.clone(),
-        relation: editor_rel.clone(),
-        user: charlie.clone(),
-    })?;
-
-    // Test direct ownership
-    assert!(service.check(&doc1, &owner_rel, &alice)?);
-    assert!(!service.check(&doc1, &owner_rel, &bob)?);
-
-    // Test viewer permissions (union of direct, owner, and inherited)
-    assert!(service.check(&doc1, &viewer_rel, &alice)?); // owner -> viewer
-    assert!(service.check(&doc1, &viewer_rel, &bob)?); // direct viewer
-    assert!(service.check(&doc1, &viewer_rel, &charlie)?); // editor -> viewer
-
-    // Test inherited viewer permissions through parent relationship
-    assert!(service.check(&doc2, &viewer_rel, &alice)?); // inherited from doc1 owner
-    assert!(service.check(&doc2, &viewer_rel, &bob)?); // inherited from doc1 viewer
-
-    // Test editor permissions (intersection of viewer and exclusion of direct editors from owners)
-    assert!(!service.check(&doc1, &editor_rel, &alice)?); // owner, so excluded from editor
-    assert!(!service.check(&doc1, &editor_rel, &bob)?); // not an editor
-    assert!(service.check(&doc1, &editor_rel, &charlie)?); // direct editor and viewer
+    // Owner at L3 should propagate to L4 but NOT upward to L2/L1.
+    svc.write_tuple(tuple("folder", "L3", "owner", "charlie"))?;
+    assert!(svc.check(
+        &Object::new("folder", "L4"),
+        &viewer,
+        &User::user_id("charlie")
+    )?);
+    assert!(svc.check(
+        &Object::new("folder", "L3"),
+        &viewer,
+        &User::user_id("charlie")
+    )?);
+    assert!(!svc.check(
+        &Object::new("folder", "L2"),
+        &viewer,
+        &User::user_id("charlie")
+    )?);
 
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 4. Intersection: team membership + direct grant required
+// ---------------------------------------------------------------------------
+
+const INTERSECTION_DSL: &str = r#"
+    namespace team {
+        relation member {}
+    }
+
+    namespace doc {
+        relation team_ref {}
+        relation viewer_candidate {}
+        relation viewer {
+            rewrite intersection(
+                computed_userset(relation: "viewer_candidate"),
+                tuple_to_userset(tupleset: "team_ref", computed_userset: "member")
+            )
+        }
+    }
+"#;
+
 #[test]
-fn test_folder_system_integration() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+fn test_should_require_both_conditions_for_intersection() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut svc = ZanzibarService::new();
+    svc.add_dsl(INTERSECTION_DSL)?;
 
-    // Parse and load the DSL
-    service.add_dsl(DOCUMENT_SYSTEM_DSL)?;
+    // team:eng members: alice, bob
+    svc.write_tuple(tuple("team", "eng", "member", "alice"))?;
+    svc.write_tuple(tuple("team", "eng", "member", "bob"))?;
 
-    // Set up folder hierarchy: root_folder -> sub_folder
-    let root_folder = Object {
-        namespace: "folder".to_string(),
-        id: "root".to_string(),
-    };
-    let sub_folder = Object {
-        namespace: "folder".to_string(),
-        id: "sub".to_string(),
-    };
+    // doc:spec is linked to team:eng
+    svc.write_tuple(RelationTuple::new(
+        Object::new("doc", "spec"),
+        Relation::new("team_ref"),
+        User::userset(Object::new("team", "eng"), Relation::new("member")),
+    ))?;
 
-    let viewer_rel = Relation("viewer".to_string());
-    let inherited_viewer_rel = Relation("inherited_viewer".to_string());
-    let parent_rel = Relation("parent".to_string());
+    // Only alice is also a viewer_candidate
+    svc.write_tuple(tuple("doc", "spec", "viewer_candidate", "alice"))?;
+    // charlie is a viewer_candidate but NOT a team member
+    svc.write_tuple(tuple("doc", "spec", "viewer_candidate", "charlie"))?;
 
-    let alice = User::UserId("alice".to_string());
-    let bob = User::UserId("bob".to_string());
+    let doc = Object::new("doc", "spec");
+    let viewer = Relation::new("viewer");
 
-    // Alice can view root folder
-    service.write_tuple(RelationTuple {
-        object: root_folder.clone(),
-        relation: viewer_rel.clone(),
-        user: alice.clone(),
-    })?;
-
-    // Sub folder has root folder as parent
-    service.write_tuple(RelationTuple {
-        object: sub_folder.clone(),
-        relation: parent_rel.clone(),
-        user: User::Userset(root_folder.clone(), viewer_rel.clone()),
-    })?;
-
-    // Bob has direct inherited_viewer on sub folder
-    service.write_tuple(RelationTuple {
-        object: sub_folder.clone(),
-        relation: inherited_viewer_rel.clone(),
-        user: bob.clone(),
-    })?;
-
-    // Test direct permissions
-    assert!(service.check(&root_folder, &viewer_rel, &alice)?);
-    assert!(!service.check(&root_folder, &viewer_rel, &bob)?);
-
-    // Test inherited permissions
-    assert!(service.check(&sub_folder, &inherited_viewer_rel, &alice)?); // inherited from parent
-    assert!(service.check(&sub_folder, &inherited_viewer_rel, &bob)?); // direct permission
+    // alice: team member AND viewer_candidate → allowed
+    assert!(svc.check(&doc, &viewer, &User::user_id("alice"))?);
+    // bob: team member but NOT viewer_candidate → denied
+    assert!(!svc.check(&doc, &viewer, &User::user_id("bob"))?);
+    // charlie: viewer_candidate but NOT team member → denied
+    assert!(!svc.check(&doc, &viewer, &User::user_id("charlie"))?);
 
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 5. Permission lifecycle: grant → verify → revoke → verify → re-grant
+// ---------------------------------------------------------------------------
+
 #[test]
-fn test_expand_functionality() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+fn test_should_handle_permission_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
+    let mut svc = ZanzibarService::new();
+    svc.add_dsl("namespace doc { relation viewer {} }")?;
 
-    // Simple DSL for testing expand
-    let simple_dsl = r#"
-        namespace test {
-            relation owner {}
+    let doc = Object::new("doc", "1");
+    let viewer = Relation::new("viewer");
+    let alice = User::user_id("alice");
+    let t = RelationTuple::new(doc.clone(), viewer.clone(), alice.clone());
 
+    // Phase 1: no access
+    assert!(!svc.check(&doc, &viewer, &alice)?);
+
+    // Phase 2: grant → access
+    svc.write_tuple(t.clone())?;
+    assert!(svc.check(&doc, &viewer, &alice)?);
+
+    // Phase 3: revoke → no access
+    svc.delete_tuple(&t)?;
+    assert!(!svc.check(&doc, &viewer, &alice)?);
+
+    // Phase 4: re-grant → access restored
+    svc.write_tuple(t)?;
+    assert!(svc.check(&doc, &viewer, &alice)?);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 6. Group membership (userset indirection)
+// ---------------------------------------------------------------------------
+
+const GROUP_MEMBERSHIP_DSL: &str = r#"
+    namespace group {
+        relation member {}
+    }
+
+    namespace doc {
+        relation viewer {}
+    }
+"#;
+
+#[test]
+fn test_should_resolve_group_membership() -> Result<(), Box<dyn std::error::Error>> {
+    let mut svc = ZanzibarService::new();
+    svc.add_dsl(GROUP_MEMBERSHIP_DSL)?;
+
+    // group:eng has alice and bob as members
+    svc.write_tuple(tuple("group", "eng", "member", "alice"))?;
+    svc.write_tuple(tuple("group", "eng", "member", "bob"))?;
+
+    // doc:design viewer is group:eng#member (userset)
+    svc.write_tuple(RelationTuple::new(
+        Object::new("doc", "design"),
+        Relation::new("viewer"),
+        User::userset(Object::new("group", "eng"), Relation::new("member")),
+    ))?;
+
+    let doc = Object::new("doc", "design");
+    let viewer = Relation::new("viewer");
+
+    // alice and bob are group members → viewers
+    assert!(svc.check(&doc, &viewer, &User::user_id("alice"))?);
+    assert!(svc.check(&doc, &viewer, &User::user_id("bob"))?);
+    // charlie is not a group member → no access
+    assert!(!svc.check(&doc, &viewer, &User::user_id("charlie"))?);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 7. Cross-namespace with completely different schemas
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_should_handle_cross_namespace_distinct_schemas() -> Result<(), Box<dyn std::error::Error>> {
+    let mut svc = ZanzibarService::new();
+
+    // 'project' namespace has admin/contributor — no viewer relation at all
+    // 'ticket' namespace has assignee + parent → uses contributor from project
+    svc.add_dsl(
+        r#"
+        namespace project {
+            relation admin {}
+            relation contributor {}
+        }
+
+        namespace ticket {
+            relation assignee {}
+            relation project_ref {}
             relation viewer {
                 rewrite union(
-                    this,
-                    computed_userset(relation: "owner")
+                    computed_userset(relation: "assignee"),
+                    tuple_to_userset(tupleset: "project_ref", computed_userset: "contributor")
                 )
             }
         }
-    "#;
+    "#,
+    )?;
 
-    service.add_dsl(simple_dsl)?;
+    svc.write_tuple(tuple("project", "alpha", "contributor", "alice"))?;
+    svc.write_tuple(tuple("project", "alpha", "admin", "boss"))?;
+    svc.write_tuple(tuple("ticket", "123", "assignee", "bob"))?;
+    svc.write_tuple(RelationTuple::new(
+        Object::new("ticket", "123"),
+        Relation::new("project_ref"),
+        User::userset(
+            Object::new("project", "alpha"),
+            Relation::new("contributor"),
+        ),
+    ))?;
 
-    let obj = Object {
-        namespace: "test".to_string(),
-        id: "item1".to_string(),
-    };
-    let owner_rel = Relation("owner".to_string());
-    let viewer_rel = Relation("viewer".to_string());
+    let ticket = Object::new("ticket", "123");
+    let viewer = Relation::new("viewer");
 
-    let alice = User::UserId("alice".to_string());
-    let bob = User::UserId("bob".to_string());
-
-    // Alice owns the item
-    service.write_tuple(RelationTuple {
-        object: obj.clone(),
-        relation: owner_rel.clone(),
-        user: alice.clone(),
-    })?;
-
-    // Bob is a direct viewer
-    service.write_tuple(RelationTuple {
-        object: obj.clone(),
-        relation: viewer_rel.clone(),
-        user: bob.clone(),
-    })?;
-
-    // Test expand functionality
-    let expanded = service.expand(&obj, &viewer_rel)?;
-
-    // The expanded result should show the union structure
-    // This is a basic test - in a real system you'd want more detailed assertions
-    // about the structure of the expanded userset
-    println!("Expanded userset: {:?}", expanded);
+    // bob: direct assignee → viewer
+    assert!(svc.check(&ticket, &viewer, &User::user_id("bob"))?);
+    // alice: project contributor → ticket viewer via tuple_to_userset
+    assert!(svc.check(&ticket, &viewer, &User::user_id("alice"))?);
+    // boss: project admin, but admin ≠ contributor → no ticket access
+    assert!(!svc.check(&ticket, &viewer, &User::user_id("boss"))?);
 
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 8. Error handling
+// ---------------------------------------------------------------------------
+
 #[test]
-fn test_error_handling() {
-    let mut service = ZanzibarService::new();
-
-    // Test with invalid DSL
-    let invalid_dsl = r#"
-        namespace invalid {
-            relation bad_syntax {
-                rewrite unknown_operator(this)
-            }
-        }
-    "#;
-
-    // This should fail to parse
-    assert!(service.add_dsl(invalid_dsl).is_err());
-
-    // Test with unknown namespace
-    let unknown_obj = Object {
-        namespace: "unknown".to_string(),
-        id: "item".to_string(),
-    };
-    let rel = Relation("viewer".to_string());
-    let user = User::UserId("alice".to_string());
-
-    // This should fail because namespace doesn't exist
-    assert!(service.check(&unknown_obj, &rel, &user).is_err());
+fn test_should_error_on_invalid_dsl() {
+    let mut svc = ZanzibarService::new();
+    assert!(svc.add_dsl("this is not valid DSL").is_err());
 }
 
 #[test]
-fn test_tuple_management() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+fn test_should_error_on_unknown_namespace_check() {
+    let svc = ZanzibarService::new();
+    let result = svc.check(
+        &Object::new("unknown", "1"),
+        &Relation::new("viewer"),
+        &User::user_id("alice"),
+    );
+    assert!(result.is_err());
+}
 
-    // Simple namespace for testing
-    let simple_dsl = r#"
-        namespace test {
-            relation viewer {}
-        }
-    "#;
+#[test]
+fn test_should_error_on_unknown_relation_check() {
+    let mut svc = ZanzibarService::new();
+    svc.add_dsl("namespace doc { relation owner {} }").unwrap();
+    let result = svc.check(
+        &Object::new("doc", "1"),
+        &Relation::new("nonexistent"),
+        &User::user_id("alice"),
+    );
+    assert!(result.is_err());
+}
 
-    service.add_dsl(simple_dsl)?;
+#[test]
+fn test_should_error_on_duplicate_tuple() {
+    let mut svc = ZanzibarService::new();
+    svc.add_dsl("namespace doc { relation owner {} }").unwrap();
+    let t = tuple("doc", "1", "owner", "alice");
+    svc.write_tuple(t.clone()).unwrap();
+    assert!(svc.write_tuple(t).is_err());
+}
 
-    let obj = Object {
-        namespace: "test".to_string(),
-        id: "item".to_string(),
-    };
-    let rel = Relation("viewer".to_string());
-    let user = User::UserId("alice".to_string());
+#[test]
+fn test_should_error_on_delete_nonexistent_tuple() {
+    let mut svc = ZanzibarService::new();
+    svc.add_dsl("namespace doc { relation owner {} }").unwrap();
+    let t = tuple("doc", "1", "owner", "alice");
+    assert!(svc.delete_tuple(&t).is_err());
+}
 
-    let tuple = RelationTuple {
-        object: obj.clone(),
-        relation: rel.clone(),
-        user: user.clone(),
-    };
+// ---------------------------------------------------------------------------
+// 9. with_store / Default / config override
+// ---------------------------------------------------------------------------
 
-    // Initially, alice should not have viewer permission
-    assert!(!service.check(&obj, &rel, &user)?);
+#[test]
+fn test_should_create_service_with_default() {
+    let svc = ZanzibarService::default();
+    // Should work identically to ::new()
+    let result = svc.check(
+        &Object::new("doc", "1"),
+        &Relation::new("viewer"),
+        &User::user_id("alice"),
+    );
+    assert!(result.is_err()); // no namespace configured
+}
 
-    // Add the tuple
-    service.write_tuple(tuple.clone())?;
+#[test]
+fn test_should_create_service_with_custom_store() {
+    use simple_zanzibar::store::InMemoryTupleStore;
 
-    // Now alice should have viewer permission
-    assert!(service.check(&obj, &rel, &user)?);
+    let store = Box::new(InMemoryTupleStore::default());
+    let mut svc = ZanzibarService::with_store(store);
+    svc.add_dsl("namespace doc { relation viewer {} }").unwrap();
+    svc.write_tuple(tuple("doc", "1", "viewer", "alice"))
+        .unwrap();
+    assert!(
+        svc.check(
+            &Object::new("doc", "1"),
+            &Relation::new("viewer"),
+            &User::user_id("alice"),
+        )
+        .unwrap()
+    );
+}
 
-    // Remove the tuple
-    service.delete_tuple(&tuple)?;
+#[test]
+fn test_should_override_config_on_readd() {
+    let mut svc = ZanzibarService::new();
 
-    // Alice should no longer have viewer permission
-    assert!(!service.check(&obj, &rel, &user)?);
+    // First: viewer = this (direct only)
+    svc.add_dsl("namespace doc { relation owner {} relation viewer { rewrite this } }")
+        .unwrap();
+    svc.write_tuple(tuple("doc", "1", "owner", "alice"))
+        .unwrap();
+    // alice is owner but viewer=this means only direct → false
+    assert!(
+        !svc.check(
+            &Object::new("doc", "1"),
+            &Relation::new("viewer"),
+            &User::user_id("alice"),
+        )
+        .unwrap()
+    );
+
+    // Override: viewer = union(this, computed_userset("owner"))
+    svc.add_dsl(
+        r#"namespace doc {
+            relation owner {}
+            relation viewer { rewrite union(this, computed_userset(relation: "owner")) }
+        }"#,
+    )
+    .unwrap();
+    // Now alice should be viewer via owner
+    assert!(
+        svc.check(
+            &Object::new("doc", "1"),
+            &Relation::new("viewer"),
+            &User::user_id("alice"),
+        )
+        .unwrap()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10. Expand end-to-end
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_should_expand_with_full_hierarchy() -> Result<(), Box<dyn std::error::Error>> {
+    let mut svc = ZanzibarService::new();
+    svc.add_dsl(GOOGLE_DRIVE_DSL)?;
+
+    svc.write_tuple(tuple("folder", "root", "owner", "alice"))?;
+    svc.write_tuple(parent_tuple("folder", "eng", "folder", "root", "viewer"))?;
+    svc.write_tuple(tuple("folder", "eng", "viewer", "bob"))?;
+    svc.write_tuple(parent_tuple("doc", "design", "folder", "eng", "viewer"))?;
+    svc.write_tuple(tuple("doc", "design", "editor", "charlie"))?;
+
+    let expanded = svc.expand(&Object::new("doc", "design"), &Relation::new("viewer"))?;
+
+    // Verify the Debug representation contains all expected users
+    let debug = format!("{expanded:?}");
+    assert!(
+        debug.contains("alice"),
+        "should contain alice (folder owner)"
+    );
+    assert!(debug.contains("bob"), "should contain bob (folder viewer)");
+    assert!(debug.contains("charlie"), "should contain charlie (editor)");
 
     Ok(())
 }

@@ -1,8 +1,22 @@
 build:
 	@cargo build
 
+check: build test fmt-check clippy
+
 test:
 	@cargo nextest run --all-features
+
+fmt:
+	@cargo +nightly fmt
+
+fmt-check:
+	@cargo +nightly fmt --check
+
+clippy:
+	@cargo clippy -- -D warnings
+
+lint:
+	@cargo clippy -- -D warnings -W clippy::pedantic
 
 release:
 	@cargo release tag --execute
@@ -14,4 +28,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test release update-submodule
+.PHONY: build check test fmt fmt-check clippy lint release update-submodule

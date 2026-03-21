@@ -1,0 +1,7 @@
+---
+source: tests/snapshot_tests.rs
+expression: "&viewer.userset_rewrite"
+---
+Some(
+    This,
+)

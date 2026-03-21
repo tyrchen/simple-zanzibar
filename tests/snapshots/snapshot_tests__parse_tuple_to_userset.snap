@@ -1,0 +1,14 @@
+---
+source: tests/snapshot_tests.rs
+expression: "&viewer.userset_rewrite"
+---
+Some(
+    TupleToUserset {
+        tupleset_relation: Relation(
+            "parent",
+        ),
+        computed_userset_relation: Relation(
+            "viewer",
+        ),
+    },
+)
