@@ -1,18 +1,19 @@
-use simple_zanzibar::model::{Object, Relation, RelationTuple, User};
-use simple_zanzibar::store::{InMemoryTupleStore, TupleStore};
+//! Tests for the tuple store.
+
+use simple_zanzibar::{
+    model::{Object, Relation, RelationTuple, User},
+    store::{InMemoryTupleStore, TupleStore},
+};
 
 #[test]
-fn test_write_and_read_tuple() {
+fn test_should_write_and_read_tuple() {
     let mut store = InMemoryTupleStore::default();
 
-    let tuple = RelationTuple {
-        object: Object {
-            namespace: "doc".to_string(),
-            id: "readme".to_string(),
-        },
-        relation: Relation("owner".to_string()),
-        user: User::UserId("alice".to_string()),
-    };
+    let tuple = RelationTuple::new(
+        Object::new("doc", "readme"),
+        Relation::new("owner"),
+        User::user_id("alice"),
+    );
 
     assert!(store.write_tuple(tuple.clone()).is_ok());
 
@@ -22,31 +23,25 @@ fn test_write_and_read_tuple() {
 }
 
 #[test]
-fn test_write_duplicate_tuple() {
+fn test_should_reject_duplicate_tuple() {
     let mut store = InMemoryTupleStore::default();
-    let tuple = RelationTuple {
-        object: Object {
-            namespace: "doc".to_string(),
-            id: "readme".to_string(),
-        },
-        relation: Relation("owner".to_string()),
-        user: User::UserId("alice".to_string()),
-    };
+    let tuple = RelationTuple::new(
+        Object::new("doc", "readme"),
+        Relation::new("owner"),
+        User::user_id("alice"),
+    );
     assert!(store.write_tuple(tuple.clone()).is_ok());
     assert!(store.write_tuple(tuple).is_err());
 }
 
 #[test]
-fn test_delete_tuple() {
+fn test_should_delete_tuple() {
     let mut store = InMemoryTupleStore::default();
-    let tuple = RelationTuple {
-        object: Object {
-            namespace: "doc".to_string(),
-            id: "readme".to_string(),
-        },
-        relation: Relation("owner".to_string()),
-        user: User::UserId("alice".to_string()),
-    };
+    let tuple = RelationTuple::new(
+        Object::new("doc", "readme"),
+        Relation::new("owner"),
+        User::user_id("alice"),
+    );
 
     assert!(store.write_tuple(tuple.clone()).is_ok());
     assert!(store.delete_tuple(&tuple).is_ok());
@@ -56,15 +51,12 @@ fn test_delete_tuple() {
 }
 
 #[test]
-fn test_delete_nonexistent_tuple() {
+fn test_should_reject_delete_nonexistent_tuple() {
     let mut store = InMemoryTupleStore::default();
-    let tuple = RelationTuple {
-        object: Object {
-            namespace: "doc".to_string(),
-            id: "readme".to_string(),
-        },
-        relation: Relation("owner".to_string()),
-        user: User::UserId("alice".to_string()),
-    };
+    let tuple = RelationTuple::new(
+        Object::new("doc", "readme"),
+        Relation::new("owner"),
+        User::user_id("alice"),
+    );
     assert!(store.delete_tuple(&tuple).is_err());
 }

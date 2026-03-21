@@ -1,11 +1,21 @@
 //! Defines the storage abstraction for relation tuples.
+//!
+//! The [`TupleStore`] trait provides the interface for storing and retrieving
+//! [`RelationTuple`]s, while [`InMemoryTupleStore`] offers a simple indexed
+//! in-memory implementation.
 
-use crate::model::{Object, Relation, RelationTuple, User};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
-/// A trait for abstracting the storage and retrieval of `RelationTuple`s.
+use crate::{
+    error::StoreError,
+    model::{Object, Relation, RelationTuple, User},
+};
+
+/// A trait for abstracting the storage and retrieval of [`RelationTuple`]s.
+///
 /// This allows the core logic to be decoupled from the specific storage backend.
-pub trait TupleStore {
+/// Implementations must also implement [`Debug`] for diagnostic purposes.
+pub trait TupleStore: std::fmt::Debug {
     /// Reads tuples from the store, with optional filtering.
     ///
     /// # Arguments
@@ -13,10 +23,6 @@ pub trait TupleStore {
     /// * `object` - The object to filter by.
     /// * `relation` - An optional relation to filter by.
     /// * `user` - An optional user to filter by.
-    ///
-    /// # Returns
-    ///
-    /// A vector of matching `RelationTuple`s.
     fn read_tuples(
         &self,
         object: &Object,
@@ -26,23 +32,42 @@ pub trait TupleStore {
 
     /// Writes a single tuple to the store.
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// `Ok(())` if the write was successful, or an error string if it failed.
-    fn write_tuple(&mut self, tuple: RelationTuple) -> Result<(), String>;
+    /// Returns [`StoreError::DuplicateTuple`] if the tuple already exists.
+    fn write_tuple(&mut self, tuple: RelationTuple) -> Result<(), StoreError>;
 
     /// Deletes a single tuple from the store.
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// `Ok(())` if the delete was successful, or an error string if it failed.
-    fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), String>;
+    /// Returns [`StoreError::TupleNotFound`] if the tuple does not exist.
+    fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), StoreError>;
 }
 
-/// A simple, in-memory implementation of the `TupleStore` trait using a `HashSet`.
-#[derive(Default)]
+/// A simple, in-memory implementation of the [`TupleStore`] trait.
+///
+/// Tuples are indexed by [`Object`] for efficient lookup, avoiding full scans
+/// on every read operation.
+///
+/// # Examples
+///
+/// ```
+/// use simple_zanzibar::store::{InMemoryTupleStore, TupleStore};
+/// use simple_zanzibar::model::{Object, Relation, RelationTuple, User};
+///
+/// let mut store = InMemoryTupleStore::default();
+/// let tuple = RelationTuple::new(
+///     Object::new("doc", "readme"),
+///     Relation::new("owner"),
+///     User::user_id("alice"),
+/// );
+/// store.write_tuple(tuple).unwrap();
+/// ```
+#[derive(Debug, Default)]
 pub struct InMemoryTupleStore {
-    store: HashSet<RelationTuple>,
+    /// Tuples indexed by object for O(1) object lookup.
+    index: HashMap<Object, Vec<RelationTuple>>,
 }
 
 impl TupleStore for InMemoryTupleStore {
@@ -52,30 +77,40 @@ impl TupleStore for InMemoryTupleStore {
         relation: Option<&Relation>,
         user: Option<&User>,
     ) -> Vec<RelationTuple> {
-        self.store
+        let Some(tuples) = self.index.get(object) else {
+            return Vec::new();
+        };
+        tuples
             .iter()
             .filter(|t| {
-                t.object == *object
-                    && relation.is_none_or(|r| t.relation == *r)
-                    && user.is_none_or(|u| t.user == *u)
+                relation.is_none_or(|r| t.relation == *r) && user.is_none_or(|u| t.user == *u)
             })
             .cloned()
             .collect()
     }
 
-    fn write_tuple(&mut self, tuple: RelationTuple) -> Result<(), String> {
-        if self.store.insert(tuple) {
-            Ok(())
-        } else {
-            Err("Tuple already exists".to_string())
+    fn write_tuple(&mut self, tuple: RelationTuple) -> Result<(), StoreError> {
+        let tuples = self.index.entry(tuple.object.clone()).or_default();
+        if tuples.contains(&tuple) {
+            return Err(StoreError::DuplicateTuple);
         }
+        tuples.push(tuple);
+        Ok(())
     }
 
-    fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), String> {
-        if self.store.remove(tuple) {
-            Ok(())
-        } else {
-            Err("Tuple not found".to_string())
+    fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), StoreError> {
+        let tuples = self
+            .index
+            .get_mut(&tuple.object)
+            .ok_or(StoreError::TupleNotFound)?;
+        let pos = tuples
+            .iter()
+            .position(|t| t == tuple)
+            .ok_or(StoreError::TupleNotFound)?;
+        tuples.swap_remove(pos);
+        if tuples.is_empty() {
+            self.index.remove(&tuple.object);
         }
+        Ok(())
     }
 }

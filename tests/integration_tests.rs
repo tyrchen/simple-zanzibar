@@ -2,8 +2,8 @@
 //! These tests demonstrate the full workflow from DSL parsing to authorization checks.
 
 use simple_zanzibar::{
-    model::{Object, Relation, RelationTuple, User},
     ZanzibarService,
+    model::{Object, Relation, RelationTuple, User},
 };
 
 const DOCUMENT_SYSTEM_DSL: &str = r#"
@@ -43,64 +43,55 @@ const DOCUMENT_SYSTEM_DSL: &str = r#"
 "#;
 
 #[test]
-fn test_document_system_integration() -> Result<(), Box<dyn std::error::Error>> {
+fn test_should_verify_document_system() -> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
-
-    // Parse and load the DSL
     service.add_dsl(DOCUMENT_SYSTEM_DSL)?;
 
-    // Set up test data
-    let doc1 = Object {
-        namespace: "doc".to_string(),
-        id: "document1".to_string(),
-    };
-    let doc2 = Object {
-        namespace: "doc".to_string(),
-        id: "document2".to_string(),
-    };
+    let doc1 = Object::new("doc", "document1");
+    let doc2 = Object::new("doc", "document2");
 
-    let owner_rel = Relation("owner".to_string());
-    let viewer_rel = Relation("viewer".to_string());
-    let editor_rel = Relation("editor".to_string());
-    let parent_rel = Relation("parent".to_string());
+    let owner_rel = Relation::new("owner");
+    let viewer_rel = Relation::new("viewer");
+    let editor_rel = Relation::new("editor");
+    let parent_rel = Relation::new("parent");
 
-    let alice = User::UserId("alice".to_string());
-    let bob = User::UserId("bob".to_string());
-    let charlie = User::UserId("charlie".to_string());
+    let alice = User::user_id("alice");
+    let bob = User::user_id("bob");
+    let charlie = User::user_id("charlie");
 
     // Alice owns document1
-    service.write_tuple(RelationTuple {
-        object: doc1.clone(),
-        relation: owner_rel.clone(),
-        user: alice.clone(),
-    })?;
+    service.write_tuple(RelationTuple::new(
+        doc1.clone(),
+        owner_rel.clone(),
+        alice.clone(),
+    ))?;
 
     // Bob is a direct viewer of document1
-    service.write_tuple(RelationTuple {
-        object: doc1.clone(),
-        relation: viewer_rel.clone(),
-        user: bob.clone(),
-    })?;
+    service.write_tuple(RelationTuple::new(
+        doc1.clone(),
+        viewer_rel.clone(),
+        bob.clone(),
+    ))?;
 
     // Document2 has document1 as parent
-    service.write_tuple(RelationTuple {
-        object: doc2.clone(),
-        relation: parent_rel.clone(),
-        user: User::Userset(doc1.clone(), viewer_rel.clone()),
-    })?;
+    service.write_tuple(RelationTuple::new(
+        doc2.clone(),
+        parent_rel,
+        User::userset(doc1.clone(), viewer_rel.clone()),
+    ))?;
 
-    // Charlie is a direct editor of document1 (but not owner)
-    service.write_tuple(RelationTuple {
-        object: doc1.clone(),
-        relation: editor_rel.clone(),
-        user: charlie.clone(),
-    })?;
+    // Charlie is a direct editor of document1
+    service.write_tuple(RelationTuple::new(
+        doc1.clone(),
+        editor_rel.clone(),
+        charlie.clone(),
+    ))?;
 
     // Test direct ownership
     assert!(service.check(&doc1, &owner_rel, &alice)?);
     assert!(!service.check(&doc1, &owner_rel, &bob)?);
 
-    // Test viewer permissions (union of direct, owner, and inherited)
+    // Test viewer permissions (union of direct, owner, and editor)
     assert!(service.check(&doc1, &viewer_rel, &alice)?); // owner -> viewer
     assert!(service.check(&doc1, &viewer_rel, &bob)?); // direct viewer
     assert!(service.check(&doc1, &viewer_rel, &charlie)?); // editor -> viewer
@@ -109,58 +100,49 @@ fn test_document_system_integration() -> Result<(), Box<dyn std::error::Error>> 
     assert!(service.check(&doc2, &viewer_rel, &alice)?); // inherited from doc1 owner
     assert!(service.check(&doc2, &viewer_rel, &bob)?); // inherited from doc1 viewer
 
-    // Test editor permissions (intersection of viewer and exclusion of direct editors from owners)
-    assert!(!service.check(&doc1, &editor_rel, &alice)?); // owner, so excluded from editor
-    assert!(!service.check(&doc1, &editor_rel, &bob)?); // not an editor
-    assert!(service.check(&doc1, &editor_rel, &charlie)?); // direct editor and viewer
+    // Test editor permissions (direct only, no rewrite)
+    assert!(!service.check(&doc1, &editor_rel, &alice)?); // owner but not editor
+    assert!(!service.check(&doc1, &editor_rel, &bob)?); // viewer but not editor
+    assert!(service.check(&doc1, &editor_rel, &charlie)?); // direct editor
 
     Ok(())
 }
 
 #[test]
-fn test_folder_system_integration() -> Result<(), Box<dyn std::error::Error>> {
+fn test_should_verify_folder_system() -> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
-
-    // Parse and load the DSL
     service.add_dsl(DOCUMENT_SYSTEM_DSL)?;
 
-    // Set up folder hierarchy: root_folder -> sub_folder
-    let root_folder = Object {
-        namespace: "folder".to_string(),
-        id: "root".to_string(),
-    };
-    let sub_folder = Object {
-        namespace: "folder".to_string(),
-        id: "sub".to_string(),
-    };
+    let root_folder = Object::new("folder", "root");
+    let sub_folder = Object::new("folder", "sub");
 
-    let viewer_rel = Relation("viewer".to_string());
-    let inherited_viewer_rel = Relation("inherited_viewer".to_string());
-    let parent_rel = Relation("parent".to_string());
+    let viewer_rel = Relation::new("viewer");
+    let inherited_viewer_rel = Relation::new("inherited_viewer");
+    let parent_rel = Relation::new("parent");
 
-    let alice = User::UserId("alice".to_string());
-    let bob = User::UserId("bob".to_string());
+    let alice = User::user_id("alice");
+    let bob = User::user_id("bob");
 
     // Alice can view root folder
-    service.write_tuple(RelationTuple {
-        object: root_folder.clone(),
-        relation: viewer_rel.clone(),
-        user: alice.clone(),
-    })?;
+    service.write_tuple(RelationTuple::new(
+        root_folder.clone(),
+        viewer_rel.clone(),
+        alice.clone(),
+    ))?;
 
     // Sub folder has root folder as parent
-    service.write_tuple(RelationTuple {
-        object: sub_folder.clone(),
-        relation: parent_rel.clone(),
-        user: User::Userset(root_folder.clone(), viewer_rel.clone()),
-    })?;
+    service.write_tuple(RelationTuple::new(
+        sub_folder.clone(),
+        parent_rel,
+        User::userset(root_folder.clone(), viewer_rel.clone()),
+    ))?;
 
     // Bob has direct inherited_viewer on sub folder
-    service.write_tuple(RelationTuple {
-        object: sub_folder.clone(),
-        relation: inherited_viewer_rel.clone(),
-        user: bob.clone(),
-    })?;
+    service.write_tuple(RelationTuple::new(
+        sub_folder.clone(),
+        inherited_viewer_rel.clone(),
+        bob.clone(),
+    ))?;
 
     // Test direct permissions
     assert!(service.check(&root_folder, &viewer_rel, &alice)?);
@@ -174,10 +156,9 @@ fn test_folder_system_integration() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_expand_functionality() -> Result<(), Box<dyn std::error::Error>> {
+fn test_should_expand_userset() -> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
 
-    // Simple DSL for testing expand
     let simple_dsl = r#"
         namespace test {
             relation owner {}
@@ -193,43 +174,27 @@ fn test_expand_functionality() -> Result<(), Box<dyn std::error::Error>> {
 
     service.add_dsl(simple_dsl)?;
 
-    let obj = Object {
-        namespace: "test".to_string(),
-        id: "item1".to_string(),
-    };
-    let owner_rel = Relation("owner".to_string());
-    let viewer_rel = Relation("viewer".to_string());
+    let obj = Object::new("test", "item1");
+    let owner_rel = Relation::new("owner");
+    let viewer_rel = Relation::new("viewer");
 
-    let alice = User::UserId("alice".to_string());
-    let bob = User::UserId("bob".to_string());
+    let alice = User::user_id("alice");
+    let bob = User::user_id("bob");
 
-    // Alice owns the item
-    service.write_tuple(RelationTuple {
-        object: obj.clone(),
-        relation: owner_rel.clone(),
-        user: alice.clone(),
-    })?;
+    service.write_tuple(RelationTuple::new(obj.clone(), owner_rel, alice.clone()))?;
 
-    // Bob is a direct viewer
-    service.write_tuple(RelationTuple {
-        object: obj.clone(),
-        relation: viewer_rel.clone(),
-        user: bob.clone(),
-    })?;
-
-    // Test expand functionality
-    let expanded = service.expand(&obj, &viewer_rel)?;
+    service.write_tuple(RelationTuple::new(obj.clone(), viewer_rel.clone(), bob))?;
 
     // The expanded result should show the union structure
-    // This is a basic test - in a real system you'd want more detailed assertions
-    // about the structure of the expanded userset
-    println!("Expanded userset: {:?}", expanded);
+    let expanded = service.expand(&obj, &viewer_rel)?;
+    assert!(format!("{expanded:?}").contains("alice"));
+    assert!(format!("{expanded:?}").contains("bob"));
 
     Ok(())
 }
 
 #[test]
-fn test_error_handling() {
+fn test_should_handle_errors() {
     let mut service = ZanzibarService::new();
 
     // Test with invalid DSL
@@ -240,27 +205,19 @@ fn test_error_handling() {
             }
         }
     "#;
-
-    // This should fail to parse
     assert!(service.add_dsl(invalid_dsl).is_err());
 
     // Test with unknown namespace
-    let unknown_obj = Object {
-        namespace: "unknown".to_string(),
-        id: "item".to_string(),
-    };
-    let rel = Relation("viewer".to_string());
-    let user = User::UserId("alice".to_string());
-
-    // This should fail because namespace doesn't exist
+    let unknown_obj = Object::new("unknown", "item");
+    let rel = Relation::new("viewer");
+    let user = User::user_id("alice");
     assert!(service.check(&unknown_obj, &rel, &user).is_err());
 }
 
 #[test]
-fn test_tuple_management() -> Result<(), Box<dyn std::error::Error>> {
+fn test_should_manage_tuples() -> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
 
-    // Simple namespace for testing
     let simple_dsl = r#"
         namespace test {
             relation viewer {}
@@ -269,18 +226,11 @@ fn test_tuple_management() -> Result<(), Box<dyn std::error::Error>> {
 
     service.add_dsl(simple_dsl)?;
 
-    let obj = Object {
-        namespace: "test".to_string(),
-        id: "item".to_string(),
-    };
-    let rel = Relation("viewer".to_string());
-    let user = User::UserId("alice".to_string());
+    let obj = Object::new("test", "item");
+    let rel = Relation::new("viewer");
+    let user = User::user_id("alice");
 
-    let tuple = RelationTuple {
-        object: obj.clone(),
-        relation: rel.clone(),
-        user: user.clone(),
-    };
+    let tuple = RelationTuple::new(obj.clone(), rel.clone(), user.clone());
 
     // Initially, alice should not have viewer permission
     assert!(!service.check(&obj, &rel, &user)?);
