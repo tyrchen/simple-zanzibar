@@ -15,7 +15,6 @@ exclude = [
   ".cursor/",
   "fixtures/",
   "specs/",
-  "ui/",
   "_typos.toml",
   "cliff.toml",
   "deny.toml",
