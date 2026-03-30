@@ -15,7 +15,7 @@ use crate::{
 ///
 /// This allows the core logic to be decoupled from the specific storage backend.
 /// Implementations must also implement [`Debug`] for diagnostic purposes.
-pub trait TupleStore: std::fmt::Debug {
+pub trait TupleStore: std::fmt::Debug + Send + Sync {
     /// Reads tuples from the store, with optional filtering.
     ///
     /// # Arguments
