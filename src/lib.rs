@@ -6,15 +6,24 @@ pub mod eval;
 pub mod model;
 pub mod parser;
 pub mod relationship;
+pub mod revision;
 pub mod schema;
 pub mod store;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+
+use arc_swap::ArcSwapOption;
 
 use crate::error::ZanzibarError;
 use crate::model::{NamespaceConfig, Object, Relation, RelationTuple, User};
 use crate::relationship::{
     IndexedRelationshipStore, Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter,
+};
+use crate::revision::{
+    default_retained_snapshots, Consistency, ConsistencyError, ConsistencyToken, DatastoreId,
+    PublishedSnapshot, Revision, SchemaHash,
 };
 use crate::schema::CompiledSchema;
 use crate::store::{InMemoryTupleStore, TupleStore};
@@ -24,6 +33,11 @@ pub struct ZanzibarService {
     configs: HashMap<String, NamespaceConfig>,
     schema: Option<CompiledSchema>,
     relationships: IndexedRelationshipStore,
+    current_snapshot: ArcSwapOption<PublishedSnapshot>,
+    snapshot_history: VecDeque<Arc<PublishedSnapshot>>,
+    datastore_id: DatastoreId,
+    retained_snapshots: NonZeroUsize,
+    last_revision: Option<Revision>,
     store: Box<dyn TupleStore>,
 }
 
@@ -41,8 +55,21 @@ impl ZanzibarService {
             configs: HashMap::new(),
             schema: None,
             relationships: IndexedRelationshipStore::default(),
+            current_snapshot: ArcSwapOption::empty(),
+            snapshot_history: VecDeque::new(),
+            datastore_id: DatastoreId::new_unique(),
+            retained_snapshots: default_retained_snapshots(),
+            last_revision: None,
             store: Box::new(InMemoryTupleStore::default()),
         }
+    }
+
+    /// Creates a new service with a custom exact-snapshot retention window.
+    #[must_use]
+    pub fn with_snapshot_retention(retained_snapshots: NonZeroUsize) -> Self {
+        let mut service = Self::new();
+        service.retained_snapshots = retained_snapshots;
+        service
     }
 
     /// Parses a DSL string and adds the resulting configurations to the service.
@@ -51,6 +78,15 @@ impl ZanzibarService {
     ///
     /// Returns [`ZanzibarError::ParseError`] when the DSL cannot be parsed.
     pub fn add_dsl(&mut self, dsl: &str) -> Result<(), ZanzibarError> {
+        self.add_dsl_with_token(dsl).map(|_| ())
+    }
+
+    /// Parses a DSL string, adds the resulting configurations, and returns a consistency token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::ParseError`] when the DSL cannot be parsed.
+    pub fn add_dsl_with_token(&mut self, dsl: &str) -> Result<ConsistencyToken, ZanzibarError> {
         schema::compile_legacy_dsl(dsl)?;
         let configs = parser::parse_dsl(dsl)?;
         let mut next_configs = self.configs.clone();
@@ -59,10 +95,7 @@ impl ZanzibarService {
         }
         let compiled_schema = schema::compile_legacy_configs(next_configs.values().cloned())?;
         let next_relationships = self.rebuild_relationship_store(&compiled_schema)?;
-        self.configs = next_configs;
-        self.schema = Some(compiled_schema);
-        self.relationships = next_relationships;
-        Ok(())
+        self.publish_snapshot(next_configs, compiled_schema, next_relationships)
     }
 
     /// Adds or updates a namespace configuration.
@@ -71,14 +104,23 @@ impl ZanzibarService {
     ///
     /// Returns [`ZanzibarError::Schema`] when the updated schema does not validate.
     pub fn add_config(&mut self, config: NamespaceConfig) -> Result<(), ZanzibarError> {
+        self.add_config_with_token(config).map(|_| ())
+    }
+
+    /// Adds or updates a namespace configuration and returns a consistency token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::Schema`] when the updated schema does not validate.
+    pub fn add_config_with_token(
+        &mut self,
+        config: NamespaceConfig,
+    ) -> Result<ConsistencyToken, ZanzibarError> {
         let mut next_configs = self.configs.clone();
         next_configs.insert(config.name.clone(), config);
         let compiled_schema = schema::compile_legacy_configs(next_configs.values().cloned())?;
         let next_relationships = self.rebuild_relationship_store(&compiled_schema)?;
-        self.configs = next_configs;
-        self.schema = Some(compiled_schema);
-        self.relationships = next_relationships;
-        Ok(())
+        self.publish_snapshot(next_configs, compiled_schema, next_relationships)
     }
 
     /// Writes a relation tuple to the store.
@@ -87,16 +129,26 @@ impl ZanzibarService {
     ///
     /// Returns [`ZanzibarError::StorageError`] when the underlying store rejects the write.
     pub fn write_tuple(&mut self, tuple: RelationTuple) -> Result<(), ZanzibarError> {
-        if let Some(schema) = &self.schema {
-            let relationship = domain::Relationship::try_from(&tuple)?;
-            schema.validate_relationship(&relationship)?;
-            self.relationships
-                .apply_mutations([RelationshipMutation::Create(relationship)], [])?;
+        if self.schema.is_some() {
+            return self.write_tuple_with_token(&tuple).map(|_| ());
         }
 
         self.store
             .write_tuple(tuple)
             .map_err(ZanzibarError::StorageError)
+    }
+
+    /// Writes a relation tuple and returns a consistency token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::SchemaRequired`] when no schema has been loaded.
+    pub fn write_tuple_with_token(
+        &mut self,
+        tuple: &RelationTuple,
+    ) -> Result<ConsistencyToken, ZanzibarError> {
+        let relationship = domain::Relationship::try_from(tuple)?;
+        self.apply_relationship_mutations([RelationshipMutation::Create(relationship)], [])
     }
 
     /// Applies a validated batch of relationship mutations.
@@ -109,8 +161,8 @@ impl ZanzibarService {
         &mut self,
         mutations: impl IntoIterator<Item = RelationshipMutation>,
         preconditions: impl IntoIterator<Item = Precondition>,
-    ) -> Result<(), ZanzibarError> {
-        let schema = self.schema.as_ref().ok_or(ZanzibarError::SchemaRequired)?;
+    ) -> Result<ConsistencyToken, ZanzibarError> {
+        let schema = self.schema.clone().ok_or(ZanzibarError::SchemaRequired)?;
         let mutations = mutations.into_iter().collect::<Vec<_>>();
         let preconditions = preconditions.into_iter().collect::<Vec<_>>();
 
@@ -118,7 +170,7 @@ impl ZanzibarService {
             schema.validate_relationship(mutation.relationship())?;
         }
         for precondition in &preconditions {
-            validate_precondition_filter(schema, precondition)?;
+            validate_precondition_filter(&schema, precondition)?;
         }
 
         let mut candidate = self.relationships.clone();
@@ -130,8 +182,7 @@ impl ZanzibarService {
             .collect::<Result<Vec<_>, _>>()?;
 
         self.store.replace_all(tuples);
-        self.relationships = candidate;
-        Ok(())
+        self.publish_snapshot(self.configs.clone(), schema, candidate)
     }
 
     /// Deletes a relation tuple from the store.
@@ -141,14 +192,25 @@ impl ZanzibarService {
     /// Returns [`ZanzibarError::StorageError`] when the underlying store rejects the delete.
     pub fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), ZanzibarError> {
         if self.schema.is_some() {
-            let relationship = domain::Relationship::try_from(tuple)?;
-            self.relationships
-                .apply_mutations([RelationshipMutation::Delete(relationship)], [])?;
+            return self.delete_tuple_with_token(tuple).map(|_| ());
         }
 
         self.store
             .delete_tuple(tuple)
             .map_err(ZanzibarError::StorageError)
+    }
+
+    /// Deletes a relation tuple and returns a consistency token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::SchemaRequired`] when no schema has been loaded.
+    pub fn delete_tuple_with_token(
+        &mut self,
+        tuple: &RelationTuple,
+    ) -> Result<ConsistencyToken, ZanzibarError> {
+        let relationship = domain::Relationship::try_from(tuple)?;
+        self.apply_relationship_mutations([RelationshipMutation::Delete(relationship)], [])
     }
 
     /// Checks if a user has a specific relation to an object.
@@ -164,23 +226,12 @@ impl ZanzibarService {
         relation: &Relation,
         user: &User,
     ) -> Result<bool, ZanzibarError> {
-        if !self.configs.contains_key(&object.namespace) {
-            return Err(ZanzibarError::NamespaceNotFound(object.namespace.clone()));
+        if self.schema.is_some() {
+            return self.check_with_consistency(object, relation, user, Consistency::Latest);
         }
 
-        if let Some(schema) = &self.schema {
-            let resource = domain::ObjectRef::try_from(object)?;
-            let object_type = resource.object_type().clone();
-            let relation_name = domain::RelationName::try_from(relation.0.as_str())?;
-            schema.resolver().relation(&object_type, &relation_name)?;
-            return eval::check_with_indexed_store(
-                object,
-                relation,
-                user,
-                &self.configs,
-                &self.relationships,
-                &mut HashSet::new(),
-            );
+        if !self.configs.contains_key(&object.namespace) {
+            return Err(ZanzibarError::NamespaceNotFound(object.namespace.clone()));
         }
 
         eval::check_with_configs(
@@ -189,6 +240,35 @@ impl ZanzibarService {
             user,
             &self.configs,
             self.store.as_ref(),
+            &mut HashSet::new(),
+        )
+    }
+
+    /// Checks if a user has a relation to an object at the requested consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns typed consistency, domain, schema, or evaluation errors when the check cannot run.
+    pub fn check_with_consistency(
+        &self,
+        object: &Object,
+        relation: &Relation,
+        user: &User,
+        consistency: Consistency,
+    ) -> Result<bool, ZanzibarError> {
+        let snapshot = self.snapshot_for_consistency(consistency)?;
+        let resource = domain::ObjectRef::try_from(object)?;
+        let relation_name = domain::RelationName::try_from(relation.0.as_str())?;
+        snapshot
+            .schema()
+            .resolver()
+            .relation(resource.object_type(), &relation_name)?;
+        eval::check_with_indexed_store(
+            object,
+            relation,
+            user,
+            snapshot.configs(),
+            snapshot.relationships(),
             &mut HashSet::new(),
         )
     }
@@ -229,6 +309,91 @@ impl ZanzibarService {
             relationships.apply_mutations([RelationshipMutation::Touch(relationship)], [])?;
         }
         Ok(relationships)
+    }
+
+    fn publish_snapshot(
+        &mut self,
+        configs: HashMap<String, NamespaceConfig>,
+        schema: CompiledSchema,
+        relationships: IndexedRelationshipStore,
+    ) -> Result<ConsistencyToken, ZanzibarError> {
+        let revision = self.next_revision()?;
+        let schema_hash = SchemaHash::for_schema(&schema);
+        let snapshot = Arc::new(PublishedSnapshot::new(
+            revision,
+            schema_hash,
+            Arc::new(configs.clone()),
+            Arc::new(schema.clone()),
+            Arc::new(relationships.clone()),
+        ));
+        let token = ConsistencyToken::new(revision, schema_hash, self.datastore_id);
+
+        self.configs = configs;
+        self.schema = Some(schema);
+        self.relationships = relationships;
+        self.current_snapshot.store(Some(Arc::clone(&snapshot)));
+        self.snapshot_history.push_back(snapshot);
+        while self.snapshot_history.len() > self.retained_snapshots.get() {
+            self.snapshot_history.pop_front();
+        }
+        self.last_revision = Some(revision);
+        Ok(token)
+    }
+
+    fn next_revision(&self) -> Result<Revision, ConsistencyError> {
+        match self.last_revision {
+            Some(revision) => revision.next(),
+            None => Ok(Revision::first()),
+        }
+    }
+
+    fn snapshot_for_consistency(
+        &self,
+        consistency: Consistency,
+    ) -> Result<Arc<PublishedSnapshot>, ZanzibarError> {
+        match consistency {
+            Consistency::Latest => self
+                .current_snapshot
+                .load_full()
+                .ok_or(ZanzibarError::SchemaRequired),
+            Consistency::Exact(token) => {
+                if token.datastore_id() != self.datastore_id {
+                    return Err(ConsistencyError::WrongDatastore.into());
+                }
+                if self
+                    .last_revision
+                    .is_none_or(|latest| token.revision() > latest)
+                {
+                    return Err(ConsistencyError::RevisionUnavailable {
+                        revision: token.revision(),
+                    }
+                    .into());
+                }
+                if let Some(oldest) = self.snapshot_history.front() {
+                    if token.revision() < oldest.revision() {
+                        return Err(ConsistencyError::RevisionExpired {
+                            revision: token.revision(),
+                        }
+                        .into());
+                    }
+                }
+                let snapshot = self
+                    .snapshot_history
+                    .iter()
+                    .find(|snapshot| snapshot.revision() == token.revision())
+                    .cloned()
+                    .ok_or(ConsistencyError::RevisionUnavailable {
+                        revision: token.revision(),
+                    })?;
+                if snapshot.schema_hash() != token.schema_hash() {
+                    return Err(ConsistencyError::SchemaHashMismatch {
+                        revision: token.revision(),
+                    }
+                    .into());
+                }
+                Ok(snapshot)
+            }
+        }
     }
 }
 

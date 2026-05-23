@@ -28,6 +28,7 @@ Read the v2 specs in numeric order. The order is also the implementation depende
 | [80-local-engine-glossary.md](./80-local-engine-glossary.md) | Glossary | Terms whose meaning must stay stable across specs and code. |
 | [90-local-engine-roadmap.md](./90-local-engine-roadmap.md) | Roadmap | Stakeholder-facing milestones and observable exit criteria. |
 | [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md) | Implementation plan | Engineer-facing, dependency-ordered phases with task gates. |
+| [93-improvements-review.md](./93-improvements-review.md) | Review backlog | Deferred review findings and out-of-phase follow-up implementation items. |
 | [99-key-decisions.md](./99-key-decisions.md) | Decisions | Load-bearing design choices, alternatives, and rationale. |
 
 ## Build-Order Graph

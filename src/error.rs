@@ -3,6 +3,7 @@ use thiserror::Error;
 
 use crate::domain::DomainError;
 use crate::relationship::StoreError;
+use crate::revision::ConsistencyError;
 use crate::schema::SchemaError;
 
 #[derive(Error, Debug, PartialEq)]
@@ -30,4 +31,7 @@ pub enum ZanzibarError {
 
     #[error(transparent)]
     Store(#[from] StoreError),
+
+    #[error(transparent)]
+    Consistency(#[from] ConsistencyError),
 }
