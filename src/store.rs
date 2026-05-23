@@ -63,7 +63,7 @@ pub trait TupleStore {
 }
 
 /// A simple, in-memory implementation of the `TupleStore` trait using a `HashSet`.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct InMemoryTupleStore {
     store: HashSet<RelationTuple>,
 }

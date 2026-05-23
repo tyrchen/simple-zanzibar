@@ -1,4 +1,67 @@
 //! A simplified Rust implementation of Google's Zanzibar authorization system.
+//!
+//! ```
+//! use simple_zanzibar::model::{
+//!     ExpandedUserset, LookupResourcesRequest, LookupSubjectsRequest, Object, Relation,
+//!     RelationTuple, User,
+//! };
+//! use simple_zanzibar::revision::Consistency;
+//! use simple_zanzibar::ZanzibarService;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut service = ZanzibarService::new();
+//! service.add_dsl(
+//!     r"
+//!     namespace doc {
+//!         relation viewer {}
+//!     }
+//!     ",
+//! )?;
+//!
+//! let doc = Object {
+//!     namespace: "doc".to_string(),
+//!     id: "readme".to_string(),
+//! };
+//! let viewer = Relation("viewer".to_string());
+//! let alice = User::UserId("alice".to_string());
+//! let token = service.write_tuple_with_token(&RelationTuple {
+//!     object: doc.clone(),
+//!     relation: viewer.clone(),
+//!     user: alice.clone(),
+//! })?;
+//!
+//! assert!(service.check(&doc, &viewer, &alice)?);
+//! assert!(service.check_with_consistency(&doc, &viewer, &alice, Consistency::Exact(token))?);
+//! assert!(matches!(
+//!     service.expand(&doc, &viewer)?,
+//!     ExpandedUserset::Union(_)
+//! ));
+//! assert_eq!(
+//!     service
+//!         .lookup_resources(&LookupResourcesRequest {
+//!             subject: alice.clone(),
+//!             permission: viewer.clone(),
+//!             resource_type: "doc".to_string(),
+//!         })?
+//!         .resources,
+//!     vec![doc.clone()],
+//! );
+//! assert_eq!(
+//!     service
+//!         .lookup_subjects(&LookupSubjectsRequest {
+//!             resource: doc,
+//!             permission: viewer,
+//!             subject_type: "user".to_string(),
+//!         })?
+//!         .subjects,
+//!     vec![alice],
+//! );
+//! # Ok(())
+//! # }
+//! ```
+
+#![forbid(unsafe_code)]
+#![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
 pub mod domain;
 pub mod error;
@@ -11,6 +74,7 @@ pub mod schema;
 pub mod store;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -26,13 +90,18 @@ use crate::relationship::{
     IndexedRelationshipStore, Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter,
 };
 use crate::revision::{
-    default_retained_snapshots, Consistency, ConsistencyError, ConsistencyToken, DatastoreId,
-    PublishedSnapshot, Revision, SchemaHash,
+    Consistency, ConsistencyError, ConsistencyToken, DatastoreId, PublishedSnapshot, Revision,
+    SchemaHash, default_retained_snapshots,
 };
 use crate::schema::CompiledSchema;
 use crate::store::{InMemoryTupleStore, TupleStore};
 
-/// The main service for handling Zanzibar authorization checks.
+/// Compatibility facade for the local Zanzibar engine.
+///
+/// This type preserves the original `ZanzibarService` API while delegating schema-backed reads and
+/// writes to the typed schema, indexed relationship store, and revision snapshot engine. New code
+/// should prefer the request/response methods on this facade; Phase 6 keeps the legacy tuple/config
+/// helpers only as a migration boundary.
 pub struct ZanzibarService {
     configs: HashMap<String, NamespaceConfig>,
     schema: Option<CompiledSchema>,
@@ -44,6 +113,24 @@ pub struct ZanzibarService {
     last_revision: Option<Revision>,
     evaluation_limits: EvaluationLimits,
     store: Box<dyn TupleStore>,
+}
+
+impl fmt::Debug for ZanzibarService {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ZanzibarService")
+            .field("configs", &self.configs)
+            .field("schema", &self.schema)
+            .field("relationships", &self.relationships)
+            .field("current_snapshot", &self.current_snapshot)
+            .field("snapshot_history", &self.snapshot_history)
+            .field("datastore_id", &self.datastore_id)
+            .field("retained_snapshots", &self.retained_snapshots)
+            .field("last_revision", &self.last_revision)
+            .field("evaluation_limits", &self.evaluation_limits)
+            .field("store", &"<dyn TupleStore>")
+            .finish()
+    }
 }
 
 impl Default for ZanzibarService {
@@ -165,6 +252,38 @@ impl ZanzibarService {
     }
 
     /// Applies a validated batch of relationship mutations.
+    ///
+    /// ```
+    /// use simple_zanzibar::domain::Relationship;
+    /// use simple_zanzibar::relationship::{
+    ///     Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter,
+    /// };
+    /// use simple_zanzibar::ZanzibarService;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut service = ZanzibarService::new();
+    /// service.add_dsl(
+    ///     r"
+    ///     namespace doc {
+    ///         relation viewer {}
+    ///     }
+    ///     ",
+    /// )?;
+    ///
+    /// let relationship: Relationship = "doc:readme#viewer@user:alice".parse()?;
+    /// let subject = SubjectFilter::exact("user".try_into()?, "alice".try_into()?, None);
+    /// let precondition = Precondition::MustNotMatch(RelationshipFilter::for_exact_subject(
+    ///     relationship.resource(),
+    ///     relationship.relation().clone(),
+    ///     subject,
+    /// ));
+    /// service.apply_relationship_mutations(
+    ///     [RelationshipMutation::Touch(relationship)],
+    ///     [precondition],
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
@@ -438,13 +557,13 @@ impl ZanzibarService {
                     }
                     .into());
                 }
-                if let Some(oldest) = self.snapshot_history.front() {
-                    if token.revision() < oldest.revision() {
-                        return Err(ConsistencyError::RevisionExpired {
-                            revision: token.revision(),
-                        }
-                        .into());
+                if let Some(oldest) = self.snapshot_history.front()
+                    && token.revision() < oldest.revision()
+                {
+                    return Err(ConsistencyError::RevisionExpired {
+                        revision: token.revision(),
                     }
+                    .into());
                 }
                 let snapshot = self
                     .snapshot_history

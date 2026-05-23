@@ -1,12 +1,12 @@
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 
+use simple_zanzibar::ZanzibarService;
 use simple_zanzibar::error::ZanzibarError;
 use simple_zanzibar::model::{
     NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User,
 };
 use simple_zanzibar::revision::{Consistency, ConsistencyError, ConsistencyToken};
-use simple_zanzibar::ZanzibarService;
 
 const DOC_SCHEMA: &str = r"
     namespace doc {
@@ -26,8 +26,8 @@ fn test_should_round_trip_consistency_token() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn test_should_hash_schema_independently_of_namespace_order(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn test_should_hash_schema_independently_of_namespace_order()
+-> Result<(), Box<dyn std::error::Error>> {
     let doc = namespace("doc", "viewer");
     let folder = namespace("folder", "viewer");
 
@@ -96,8 +96,8 @@ fn test_should_read_exact_snapshot_without_later_delete() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn test_should_read_exact_schema_snapshot_without_later_schema(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn test_should_read_exact_schema_snapshot_without_later_schema()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
     let doc_only_token = service.add_dsl_with_token(DOC_SCHEMA)?;
     service.add_dsl(

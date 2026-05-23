@@ -4,12 +4,12 @@
 use std::str::FromStr;
 
 use simple_zanzibar::{
+    ZanzibarService,
     domain::{DomainError, Relationship},
     eval::EvaluationLimits,
     model::{LookupResourcesRequest, LookupSubjectsRequest, Object, Relation, RelationTuple, User},
     relationship::{Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter},
     revision::Consistency,
-    ZanzibarService,
 };
 
 const DOCUMENT_SYSTEM_DSL: &str = r#"
@@ -307,8 +307,8 @@ fn test_tuple_management() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_tuple_written_before_schema_should_backfill_indexed_store(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn test_tuple_written_before_schema_should_backfill_indexed_store()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
     let obj = Object {
         namespace: "test".to_string(),
@@ -336,8 +336,8 @@ fn test_tuple_written_before_schema_should_backfill_indexed_store(
 }
 
 #[test]
-fn test_relationship_batch_should_validate_and_apply_atomically(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn test_relationship_batch_should_validate_and_apply_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
     service.add_dsl(
         r"
@@ -368,15 +368,17 @@ fn test_relationship_batch_should_validate_and_apply_atomically(
     assert!(service.check(&object, &relation, &User::UserId("bob".to_string()))?);
 
     let missing = relationship("doc:missing#viewer@user:alice")?;
-    assert!(service
-        .apply_relationship_mutations(
-            [
-                RelationshipMutation::Create(relationship("doc:readme#viewer@user:charlie")?),
-                RelationshipMutation::Delete(missing),
-            ],
-            [],
-        )
-        .is_err());
+    assert!(
+        service
+            .apply_relationship_mutations(
+                [
+                    RelationshipMutation::Create(relationship("doc:readme#viewer@user:charlie")?),
+                    RelationshipMutation::Delete(missing),
+                ],
+                [],
+            )
+            .is_err()
+    );
     assert!(!service.check(&object, &relation, &User::UserId("charlie".to_string()))?);
 
     Ok(())
@@ -386,21 +388,23 @@ fn test_relationship_batch_should_validate_and_apply_atomically(
 fn test_relationship_batch_should_require_schema() -> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
 
-    assert!(service
-        .apply_relationship_mutations(
-            [RelationshipMutation::Create(relationship(
-                "doc:readme#viewer@user:alice",
-            )?)],
-            [],
-        )
-        .is_err());
+    assert!(
+        service
+            .apply_relationship_mutations(
+                [RelationshipMutation::Create(relationship(
+                    "doc:readme#viewer@user:alice",
+                )?)],
+                [],
+            )
+            .is_err()
+    );
 
     Ok(())
 }
 
 #[test]
-fn test_lookup_resources_should_reuse_check_semantics_and_deduplicate(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn test_lookup_resources_should_reuse_check_semantics_and_deduplicate()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
     service.add_dsl(
         r#"
@@ -548,8 +552,8 @@ fn test_lookup_subjects_should_return_userset_subjects() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn test_lookup_subjects_should_reject_unknown_subject_namespace(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn test_lookup_subjects_should_reject_unknown_subject_namespace()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
     service.add_dsl(
         r"

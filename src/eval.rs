@@ -763,17 +763,17 @@ where
         } => {
             let tupleset = store.read_tuples(object, Some(tupleset_relation), None);
             for t in tupleset {
-                if let User::Userset(intermediate_obj, _) = t.user {
-                    if check_internal(
+                if let User::Userset(intermediate_obj, _) = t.user
+                    && check_internal(
                         &intermediate_obj,
                         computed_userset_relation,
                         user,
                         configs,
                         store,
                         visited,
-                    )? {
-                        return Ok(true);
-                    }
+                    )?
+                {
+                    return Ok(true);
                 }
             }
             Ok(false)
@@ -809,7 +809,7 @@ where
     }
 }
 
-/// Evaluates a `check` request.
+/// Compatibility-only evaluator for a `check` request against one legacy namespace config.
 ///
 /// # Errors
 ///
@@ -830,7 +830,7 @@ where
     check_internal(object, relation, user, &configs, store, visited)
 }
 
-/// Evaluates a `check` request against a whole schema config map.
+/// Compatibility-only evaluator for a `check` request against legacy namespace configs.
 ///
 /// # Errors
 ///
@@ -851,7 +851,7 @@ where
     check_internal(object, relation, user, configs, store, visited)
 }
 
-/// Evaluates a `check` request against indexed relationships.
+/// Compatibility-only evaluator for a `check` request against indexed relationships.
 ///
 /// # Errors
 ///
@@ -1196,7 +1196,7 @@ fn lookup_result_limit_reached(current_len: usize, limits: EvaluationLimits) -> 
     current_len >= limit
 }
 
-/// Evaluates an `expand` request.
+/// Compatibility-only evaluator for an `expand` request against one legacy namespace config.
 ///
 /// # Errors
 ///
@@ -1212,7 +1212,7 @@ pub fn expand(
     expand_with_configs(object, relation, &configs, store)
 }
 
-/// Evaluates an `expand` request against a whole schema config map.
+/// Compatibility-only evaluator for an `expand` request against legacy namespace configs.
 ///
 /// # Errors
 ///

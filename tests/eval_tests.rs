@@ -1,12 +1,12 @@
 //! Tests for the core evaluation logic.
 
+use simple_zanzibar::ZanzibarService;
 use simple_zanzibar::error::ZanzibarError;
 use simple_zanzibar::eval::{EvaluationError, EvaluationLimits, Membership};
 use simple_zanzibar::model::{
     ExpandedUserset, NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User,
     UsersetExpression,
 };
-use simple_zanzibar::ZanzibarService;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
@@ -338,8 +338,8 @@ fn test_should_return_fanout_exceeded() -> Result<(), ZanzibarError> {
 }
 
 #[test]
-fn test_should_return_fanout_exceeded_after_limit_plus_one_relationships(
-) -> Result<(), ZanzibarError> {
+fn test_should_return_fanout_exceeded_after_limit_plus_one_relationships()
+-> Result<(), ZanzibarError> {
     let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
         max_depth: non_zero(50),
         max_fanout_per_step: non_zero(1_000),
@@ -555,8 +555,8 @@ fn test_should_expand_from_snapshot_path() -> Result<(), ZanzibarError> {
 }
 
 #[test]
-fn test_should_not_spend_expand_tuple_to_userset_fanout_on_direct_grants(
-) -> Result<(), ZanzibarError> {
+fn test_should_not_spend_expand_tuple_to_userset_fanout_on_direct_grants()
+-> Result<(), ZanzibarError> {
     let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
         max_depth: non_zero(50),
         max_fanout_per_step: NonZeroU32::MIN,

@@ -107,10 +107,12 @@ fn test_should_apply_batch_atomically() -> Result<(), Box<dyn std::error::Error>
     ));
 
     assert_eq!(store.rows(), &[existing]);
-    assert!(store
-        .query_relationships(&exact_filter(&created.to_string())?)?
-        .next()
-        .is_none());
+    assert!(
+        store
+            .query_relationships(&exact_filter(&created.to_string())?)?
+            .next()
+            .is_none()
+    );
     Ok(())
 }
 

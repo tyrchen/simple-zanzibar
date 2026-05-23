@@ -70,7 +70,9 @@ pub enum SchemaError {
     },
 
     /// A tuple-to-userset target relation cannot be resolved from the known schema.
-    #[error("tuple-to-userset in '{namespace}.{owner}' references unavailable target relation '{missing}'")]
+    #[error(
+        "tuple-to-userset in '{namespace}.{owner}' references unavailable target relation '{missing}'"
+    )]
     MissingTupleToUsersetTarget {
         /// Namespace containing the owner relation.
         namespace: String,

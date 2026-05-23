@@ -2,7 +2,8 @@
 name = "simple-zanzibar"
 version = "0.1.0"
 authors = ["Tyr Chen <tyr.chen@gmail.com>"]
-edition = "2021"
+edition = "2024"
+rust-version = "1.95"
 license = "MIT"
 documentation = "https://docs.rs/simple-zanzibar"
 repository = "https://github.com/tyrchen/simple-zanzibar"
@@ -28,6 +29,14 @@ blake3 = "1.8.5"
 pest = "2.8.0"
 pest_derive = "2.8.0"
 thiserror = "2.0.12"
+
+[features]
+default = ["std", "compat"]
+std = []
+serde = []
+tracing = []
+compat = []
+bench-internals = []
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }

@@ -4,8 +4,8 @@
 //! to implement a file permissions system with hierarchical access control.
 
 use simple_zanzibar::{
-    model::{Object, Relation, RelationTuple, User},
     ZanzibarService,
+    model::{Object, Relation, RelationTuple, User},
 };
 
 // The example is deliberately linear so readers can follow the complete workflow.

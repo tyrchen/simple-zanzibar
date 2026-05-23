@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
+use simple_zanzibar::ZanzibarService;
 use simple_zanzibar::domain::ObjectType;
 use simple_zanzibar::error::ZanzibarError;
 use simple_zanzibar::schema::{
     self, CompiledSchema, NamespaceDefinition, RelationDefinition, SchemaError, UsersetExpression,
 };
-use simple_zanzibar::ZanzibarService;
 
 const VALID_SCHEMA: &str = r#"
     namespace doc {
@@ -134,8 +134,8 @@ fn test_should_reject_missing_tuple_to_userset_target_relation() {
 }
 
 #[test]
-fn test_should_validate_tuple_to_userset_target_against_explicit_allowed_subjects(
-) -> Result<(), ZanzibarError> {
+fn test_should_validate_tuple_to_userset_target_against_explicit_allowed_subjects()
+-> Result<(), ZanzibarError> {
     let doc_type = ObjectType::try_from("doc")?;
     let folder_type = ObjectType::try_from("folder")?;
     let group_type = ObjectType::try_from("group")?;
@@ -180,8 +180,8 @@ fn test_should_validate_tuple_to_userset_target_against_explicit_allowed_subject
 }
 
 #[test]
-fn test_should_reject_tuple_to_userset_target_missing_on_explicit_allowed_subject(
-) -> Result<(), ZanzibarError> {
+fn test_should_reject_tuple_to_userset_target_missing_on_explicit_allowed_subject()
+-> Result<(), ZanzibarError> {
     let doc_type = ObjectType::try_from("doc")?;
     let folder_type = ObjectType::try_from("folder")?;
     let group_type = ObjectType::try_from("group")?;
@@ -227,8 +227,8 @@ fn test_should_reject_tuple_to_userset_target_missing_on_explicit_allowed_subjec
 }
 
 #[test]
-fn test_should_reject_relationship_with_unknown_userset_subject_relation(
-) -> Result<(), ZanzibarError> {
+fn test_should_reject_relationship_with_unknown_userset_subject_relation()
+-> Result<(), ZanzibarError> {
     let mut service = ZanzibarService::new();
     service.add_dsl(VALID_SCHEMA)?;
 
@@ -278,8 +278,8 @@ fn test_should_reject_empty_union() {
 }
 
 #[test]
-fn test_service_should_reject_invalid_schema_without_mutating_previous_schema(
-) -> Result<(), ZanzibarError> {
+fn test_service_should_reject_invalid_schema_without_mutating_previous_schema()
+-> Result<(), ZanzibarError> {
     let mut service = ZanzibarService::new();
     service.add_dsl(VALID_SCHEMA)?;
 

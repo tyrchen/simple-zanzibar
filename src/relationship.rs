@@ -1,6 +1,6 @@
 //! Indexed in-memory relationship store and mutation semantics.
 
-use std::collections::{btree_set, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, btree_set};
 use std::num::NonZeroUsize;
 
 use thiserror::Error;
@@ -355,10 +355,10 @@ impl IndexedRelationshipStore {
             }
         }
 
-        if mutations.len() == 1 {
-            if let Some(mutation) = mutations.pop() {
-                return self.apply_single_mutation(mutation);
-            }
+        if mutations.len() == 1
+            && let Some(mutation) = mutations.pop()
+        {
+            return self.apply_single_mutation(mutation);
         }
 
         let mut candidate = self.clone();

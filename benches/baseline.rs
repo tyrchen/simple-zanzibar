@@ -1,12 +1,12 @@
 //! Benchmarks for legacy scan and indexed direct-check paths.
 
 use criterion::{BatchSize, Criterion};
+use simple_zanzibar::ZanzibarService;
 use simple_zanzibar::eval::EvaluationLimits;
 use simple_zanzibar::model::{
     LookupResourcesRequest, NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User,
 };
 use simple_zanzibar::store::{InMemoryTupleStore, TupleStore};
-use simple_zanzibar::ZanzibarService;
 
 use std::collections::HashMap;
 use std::hint::black_box;

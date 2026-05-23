@@ -2,16 +2,25 @@
 
 use std::collections::HashMap;
 
-use pest::iterators::{Pair, Pairs};
 use pest::Parser;
-use pest_derive::Parser;
+use pest::iterators::{Pair, Pairs};
 
 use crate::error::ZanzibarError;
 use crate::model::{NamespaceConfig, Relation, RelationConfig, UsersetExpression};
 
-#[derive(Parser)]
-#[grammar = "grammar.pest"]
-struct ZanzibarParser;
+use generated::{Rule, ZanzibarParser};
+
+mod generated {
+    //! Generated `pest` parser bindings.
+
+    #![allow(missing_docs)]
+
+    use pest_derive::Parser;
+
+    #[derive(Parser)]
+    #[grammar = "grammar.pest"]
+    pub(super) struct ZanzibarParser;
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyNamespaceAst {

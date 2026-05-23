@@ -6,7 +6,9 @@ use std::hash::Hash;
 /// e.g., `doc:readme`, `folder:A`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Object {
+    /// Object namespace/type.
     pub namespace: String,
+    /// Object identifier within the namespace.
     pub id: String,
 }
 
@@ -31,8 +33,11 @@ pub enum User {
 /// e.g., `(doc:readme#owner@user:alice)`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelationTuple {
+    /// Relationship resource object.
     pub object: Object,
+    /// Relationship relation.
     pub relation: Relation,
+    /// Relationship subject.
     pub user: User,
 }
 
@@ -75,14 +80,18 @@ pub struct LookupSubjects {
 /// Defines the schema and policy rules for a particular namespace.
 #[derive(Debug, Clone, Default)]
 pub struct NamespaceConfig {
+    /// Namespace/type name.
     pub name: String,
+    /// Relation definitions keyed by relation name.
     pub relations: std::collections::HashMap<Relation, RelationConfig>,
 }
 
 /// Defines a specific relation within a namespace, including its rewrite rules.
 #[derive(Debug, Clone)]
 pub struct RelationConfig {
+    /// Relation name.
     pub name: Relation,
+    /// Optional userset rewrite for computed permissions.
     pub userset_rewrite: Option<UsersetExpression>,
 }
 
@@ -93,12 +102,17 @@ pub enum UsersetExpression {
     This,
     /// A set computed from another relation on the *same* object.
     /// e.g., an `editor` is also a `viewer`.
-    ComputedUserset { relation: Relation },
+    ComputedUserset {
+        /// Relation on the same object to compute.
+        relation: Relation,
+    },
     /// A set computed by first finding a related object via a `tupleset` relation,
     /// and then computing a userset from that related object.
     /// e.g., for `doc:readme`, find its `parent` folder, then take `viewers` of that folder.
     TupleToUserset {
+        /// Relation that points from the source object to intermediate objects.
         tupleset_relation: Relation,
+        /// Relation to evaluate on each intermediate object.
         computed_userset_relation: Relation,
     },
     /// The union of multiple sub-expressions.
@@ -107,7 +121,9 @@ pub enum UsersetExpression {
     Intersection(Vec<UsersetExpression>),
     /// The exclusion (or difference) of one set from another.
     Exclusion {
+        /// Base userset expression.
         base: Box<UsersetExpression>,
+        /// Userset expression to subtract from the base.
         exclude: Box<UsersetExpression>,
     },
 }
@@ -125,7 +141,9 @@ pub enum ExpandedUserset {
     Intersection(Vec<ExpandedUserset>),
     /// The exclusion of one expanded userset from another.
     Exclusion {
+        /// Base expanded userset.
         base: Box<ExpandedUserset>,
+        /// Expanded userset to subtract from the base.
         exclude: Box<ExpandedUserset>,
     },
 }

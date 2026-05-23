@@ -1,8 +1,8 @@
 //! Tests for the DSL parser.
 
+use simple_zanzibar::ZanzibarService;
 use simple_zanzibar::error::ZanzibarError;
 use simple_zanzibar::model::Relation;
-use simple_zanzibar::ZanzibarService;
 
 const TEST_DSL: &str = r#"
     // Defines a document namespace with hierarchical permissions.
@@ -51,18 +51,26 @@ fn test_parse_full_dsl() -> Result<(), ZanzibarError> {
         .find(|c| c.name == "doc")
         .ok_or_else(|| ZanzibarError::ParseError("doc namespace not found".to_string()))?;
     assert_eq!(doc_config.relations.len(), 4);
-    assert!(doc_config
-        .relations
-        .contains_key(&Relation("owner".to_string())));
-    assert!(doc_config
-        .relations
-        .contains_key(&Relation("parent".to_string())));
-    assert!(doc_config
-        .relations
-        .contains_key(&Relation("viewer".to_string())));
-    assert!(doc_config
-        .relations
-        .contains_key(&Relation("editor".to_string())));
+    assert!(
+        doc_config
+            .relations
+            .contains_key(&Relation("owner".to_string()))
+    );
+    assert!(
+        doc_config
+            .relations
+            .contains_key(&Relation("parent".to_string()))
+    );
+    assert!(
+        doc_config
+            .relations
+            .contains_key(&Relation("viewer".to_string()))
+    );
+    assert!(
+        doc_config
+            .relations
+            .contains_key(&Relation("editor".to_string()))
+    );
 
     let viewer_rewrite = doc_config
         .relations
@@ -78,9 +86,11 @@ fn test_parse_full_dsl() -> Result<(), ZanzibarError> {
         .find(|c| c.name == "folder")
         .ok_or_else(|| ZanzibarError::ParseError("folder namespace not found".to_string()))?;
     assert_eq!(folder_config.relations.len(), 1);
-    assert!(folder_config
-        .relations
-        .contains_key(&Relation("viewer".to_string())));
+    assert!(
+        folder_config
+            .relations
+            .contains_key(&Relation("viewer".to_string()))
+    );
 
     Ok(())
 }

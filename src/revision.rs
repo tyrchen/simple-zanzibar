@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
