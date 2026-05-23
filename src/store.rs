@@ -1,7 +1,8 @@
 //! Defines the storage abstraction for relation tuples.
 
-use crate::model::{Object, Relation, RelationTuple, User};
 use std::collections::HashSet;
+
+use crate::model::{Object, Relation, RelationTuple, User};
 
 /// A trait for abstracting the storage and retrieval of `RelationTuple`s.
 /// This allows the core logic to be decoupled from the specific storage backend.
@@ -29,6 +30,11 @@ pub trait TupleStore {
     /// # Returns
     ///
     /// `Ok(())` if the write was successful, or an error string if it failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the tuple cannot be written, such as attempting to create a
+    /// duplicate tuple in stores that enforce uniqueness.
     fn write_tuple(&mut self, tuple: RelationTuple) -> Result<(), String>;
 
     /// Deletes a single tuple from the store.
@@ -36,6 +42,10 @@ pub trait TupleStore {
     /// # Returns
     ///
     /// `Ok(())` if the delete was successful, or an error string if it failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the tuple cannot be deleted, such as when it does not exist.
     fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), String>;
 }
 

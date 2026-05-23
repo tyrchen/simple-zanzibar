@@ -1,0 +1,3 @@
+[submodule "vendors/spicedb"]
+	path = vendors/spicedb
+	url = https://github.com/authzed/spicedb

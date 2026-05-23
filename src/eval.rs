@@ -1,18 +1,23 @@
 //! Core evaluation logic for `check` and `expand` requests.
 
+use std::collections::HashSet;
+use std::hash::BuildHasher;
+
 use crate::error::ZanzibarError;
 use crate::model::{ExpandedUserset, NamespaceConfig, Object, Relation, User, UsersetExpression};
 use crate::store::TupleStore;
-use std::collections::HashSet;
 
-fn check_internal(
+fn check_internal<S>(
     object: &Object,
     relation: &Relation,
     user: &User,
     config: &NamespaceConfig,
     store: &(impl TupleStore + ?Sized),
-    visited: &mut HashSet<(Object, Relation, User)>,
-) -> Result<bool, ZanzibarError> {
+    visited: &mut HashSet<(Object, Relation, User), S>,
+) -> Result<bool, ZanzibarError>
+where
+    S: BuildHasher,
+{
     if !visited.insert((object.clone(), relation.clone(), user.clone())) {
         // We've already seen this exact check in this path, so we're in a cycle.
         return Ok(false);
@@ -36,15 +41,18 @@ fn check_internal(
     result
 }
 
-fn eval_expression(
+fn eval_expression<S>(
     object: &Object,
     relation: &Relation,
     user: &User,
     config: &NamespaceConfig,
     store: &(impl TupleStore + ?Sized),
-    visited: &mut HashSet<(Object, Relation, User)>,
+    visited: &mut HashSet<(Object, Relation, User), S>,
     expression: &UsersetExpression,
-) -> Result<bool, ZanzibarError> {
+) -> Result<bool, ZanzibarError>
+where
+    S: BuildHasher,
+{
     match expression {
         UsersetExpression::This => {
             // Direct check: see if the exact tuple exists.
@@ -126,18 +134,31 @@ fn eval_expression(
 }
 
 /// Evaluates a `check` request.
-pub fn check(
+///
+/// # Errors
+///
+/// Returns [`ZanzibarError::RelationNotFound`] when the requested relation is not defined in the
+/// supplied namespace config.
+pub fn check<S>(
     object: &Object,
     relation: &Relation,
     user: &User,
     config: &NamespaceConfig,
     store: &(impl TupleStore + ?Sized),
-    visited: &mut HashSet<(Object, Relation, User)>,
-) -> Result<bool, ZanzibarError> {
+    visited: &mut HashSet<(Object, Relation, User), S>,
+) -> Result<bool, ZanzibarError>
+where
+    S: BuildHasher,
+{
     check_internal(object, relation, user, config, store, visited)
 }
 
 /// Evaluates an `expand` request.
+///
+/// # Errors
+///
+/// Returns [`ZanzibarError::RelationNotFound`] when the requested relation is not defined in the
+/// supplied namespace config.
 pub fn expand(
     object: &Object,
     relation: &Relation,

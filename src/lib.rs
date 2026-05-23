@@ -6,10 +6,11 @@ pub mod model;
 pub mod parser;
 pub mod store;
 
+use std::collections::{HashMap, HashSet};
+
 use crate::error::ZanzibarError;
 use crate::model::{NamespaceConfig, Object, Relation, RelationTuple, User};
 use crate::store::{InMemoryTupleStore, TupleStore};
-use std::collections::{HashMap, HashSet};
 
 /// The main service for handling Zanzibar authorization checks.
 pub struct ZanzibarService {
@@ -25,6 +26,7 @@ impl Default for ZanzibarService {
 
 impl ZanzibarService {
     /// Creates a new service with an in-memory store.
+    #[must_use]
     pub fn new() -> Self {
         ZanzibarService {
             configs: HashMap::new(),
@@ -33,6 +35,10 @@ impl ZanzibarService {
     }
 
     /// Parses a DSL string and adds the resulting configurations to the service.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::ParseError`] when the DSL cannot be parsed.
     pub fn add_dsl(&mut self, dsl: &str) -> Result<(), ZanzibarError> {
         let configs = parser::parse_dsl(dsl)?;
         for config in configs {
@@ -47,6 +53,10 @@ impl ZanzibarService {
     }
 
     /// Writes a relation tuple to the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::StorageError`] when the underlying store rejects the write.
     pub fn write_tuple(&mut self, tuple: RelationTuple) -> Result<(), ZanzibarError> {
         self.store
             .write_tuple(tuple)
@@ -54,6 +64,10 @@ impl ZanzibarService {
     }
 
     /// Deletes a relation tuple from the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::StorageError`] when the underlying store rejects the delete.
     pub fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), ZanzibarError> {
         self.store
             .delete_tuple(tuple)
@@ -61,6 +75,12 @@ impl ZanzibarService {
     }
 
     /// Checks if a user has a specific relation to an object.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::NamespaceNotFound`] when the object's namespace has not been
+    /// configured, or [`ZanzibarError::RelationNotFound`] when the relation is missing from that
+    /// namespace.
     pub fn check(
         &self,
         object: &Object,
@@ -83,6 +103,12 @@ impl ZanzibarService {
     }
 
     /// Expands the userset for a given object and relation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::NamespaceNotFound`] when the object's namespace has not been
+    /// configured, or [`ZanzibarError::RelationNotFound`] when the relation is missing from that
+    /// namespace.
     pub fn expand(
         &self,
         object: &Object,
