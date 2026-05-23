@@ -6,6 +6,30 @@ check: build test fmt-check clippy
 test:
 	@cargo nextest run --all-features
 
+bench-baseline:
+	@cargo bench --bench baseline -- --sample-size 10
+
+bench-org:
+	@cargo bench --bench org_authorization -- --sample-size 10
+
+bench-org-memory:
+	@cargo bench --bench org_authorization --no-run
+	@target_dir=$${CARGO_TARGET_DIR:-$$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')}; \
+	bin=$$(find "$$target_dir/release/deps" -maxdepth 1 -type f -name 'org_authorization-*' | while IFS= read -r candidate; do \
+		if [ -x "$$candidate" ]; then printf '%s\n' "$$candidate"; fi; \
+	done | sort | tail -1); \
+	if [ -z "$$bin" ]; then echo "org_authorization benchmark binary not found"; exit 1; fi; \
+	for filter in \
+		building_blocks/relationship_parse \
+		org_authorization/1k_rules/check_direct_group_viewer \
+		org_authorization/100k_rules/check_direct_group_viewer \
+		org_authorization/1m_rules/check_direct_group_viewer; do \
+		echo "== $$filter =="; \
+		/usr/bin/time -l "$$bin" "$$filter" --bench --sample-size 10; \
+	done
+
+bench-all: bench-baseline bench-org
+
 fmt:
 	@cargo +nightly fmt
 
@@ -28,4 +52,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build check test fmt fmt-check clippy lint release update-submodule
+.PHONY: build check test bench-baseline bench-org bench-org-memory bench-all fmt fmt-check clippy lint release update-submodule

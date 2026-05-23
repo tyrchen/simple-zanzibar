@@ -3,6 +3,12 @@
 //! These tests capture the exact output format of key operations so that
 //! any unintentional changes to output structure are caught immediately.
 
+#![allow(
+    clippy::needless_raw_string_hashes,
+    clippy::unwrap_used,
+    reason = "snapshot fixtures are static test data and panics produce precise failing snapshots"
+)]
+
 use simple_zanzibar::{
     ZanzibarService,
     model::{ExpandedUserset, Object, Relation, RelationTuple, User},
@@ -324,7 +330,6 @@ fn collect_users_inner(expanded: &ExpandedUserset, out: &mut Vec<String>) {
             // Only collect from base — exclude is the subtracted set.
             collect_users_inner(base, out);
         }
-        _ => {}
     }
 }
 

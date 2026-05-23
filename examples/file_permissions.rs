@@ -8,6 +8,8 @@ use simple_zanzibar::{
     model::{Object, Relation, RelationTuple, User},
 };
 
+// The example is deliberately linear so readers can follow the complete workflow.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Simplified Zanzibar File Permissions Example");
     println!("=============================================\n");

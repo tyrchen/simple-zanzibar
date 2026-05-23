@@ -1,32 +1,27 @@
 //! Core data structures for the Zanzibar authorization system.
-//!
-//! This module defines the fundamental types used to represent objects,
-//! relations, users, relation tuples, and namespace configurations.
 
-use std::{collections::HashMap, hash::Hash};
+use std::hash::Hash;
 
-/// Represents a namespaced digital object (e.g., `doc:readme`, `folder:A`).
-///
-/// # Examples
-///
-/// ```
-/// use simple_zanzibar::model::Object;
-///
-/// let doc = Object::new("doc", "readme");
-/// assert_eq!(doc.namespace, "doc");
-/// assert_eq!(doc.id, "readme");
-/// ```
+use crate::revision::Consistency;
+
+/// Represents a namespaced digital object.
+/// e.g., `doc:readme`, `folder:A`
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub struct Object {
-    /// The namespace this object belongs to (e.g., "doc", "folder").
+    /// Object namespace/type.
     pub namespace: String,
-    /// The unique identifier within the namespace (e.g., "readme", "A").
+    /// Object identifier within the namespace.
     pub id: String,
 }
 
 impl Object {
-    /// Creates a new object with the given namespace and id.
+    /// Creates a namespaced object.
+    #[must_use]
     pub fn new(namespace: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             namespace: namespace.into(),
@@ -35,87 +30,71 @@ impl Object {
     }
 }
 
-/// Represents a relation or permission type on an object (e.g., `owner`, `editor`, `viewer`).
-///
-/// # Examples
-///
-/// ```
-/// use simple_zanzibar::model::Relation;
-///
-/// let rel = Relation::new("viewer");
-/// assert_eq!(rel.0, "viewer");
-/// ```
+/// Represents a relation or permission type on an object.
+/// e.g., `owner`, `editor`, `viewer`
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub struct Relation(pub String);
 
 impl Relation {
-    /// Creates a new relation with the given name.
+    /// Creates a relation or permission name.
+    #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
 }
 
 /// Represents either a specific user ID or a reference to a userset (e.g., a group).
-///
-/// # Examples
-///
-/// ```
-/// use simple_zanzibar::model::{Object, Relation, User};
-///
-/// let alice = User::user_id("alice");
-/// let group_members = User::userset(Object::new("group", "eng"), Relation::new("member"));
-/// ```
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", tag = "type", content = "value")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum User {
-    /// A specific user, identified by a unique string (e.g., `"alice@example.com"`).
+    /// A specific user, identified by a unique string.
+    /// e.g., `"10"`, `"alice@example.com"`
     UserId(String),
-    /// A set of users, identified by an object-relation pair (e.g., `group:eng#member`).
+    /// A set of users, identified by an object-relation pair.
+    /// e.g., `group:eng#member`
     Userset(Object, Relation),
 }
 
 impl User {
-    /// Creates a [`User::UserId`] variant.
+    /// Creates a direct user subject.
+    #[must_use]
     pub fn user_id(id: impl Into<String>) -> Self {
         Self::UserId(id.into())
     }
 
-    /// Creates a [`User::Userset`] variant.
+    /// Creates a userset subject.
+    #[must_use]
     pub fn userset(object: Object, relation: Relation) -> Self {
         Self::Userset(object, relation)
     }
 }
 
 /// The core relation tuple, representing a single permission assertion.
-///
-/// This is the atomic unit of authorization data
-/// (e.g., `doc:readme#owner@user:alice`).
-///
-/// # Examples
-///
-/// ```
-/// use simple_zanzibar::model::{Object, Relation, RelationTuple, User};
-///
-/// let tuple = RelationTuple::new(
-///     Object::new("doc", "readme"),
-///     Relation::new("owner"),
-///     User::user_id("alice"),
-/// );
-/// ```
+/// This is the atomic unit of authorization data.
+/// e.g., `(doc:readme#owner@user:alice)`
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub struct RelationTuple {
-    /// The object this tuple applies to.
+    /// Relationship resource object.
     pub object: Object,
-    /// The relation being asserted.
+    /// Relationship relation.
     pub relation: Relation,
-    /// The user (or userset) being granted the relation.
+    /// Relationship subject.
     pub user: User,
 }
 
 impl RelationTuple {
-    /// Creates a new relation tuple.
+    /// Creates a relationship tuple.
+    #[must_use]
     pub fn new(object: Object, relation: Relation, user: User) -> Self {
         Self {
             object,
@@ -125,104 +104,196 @@ impl RelationTuple {
     }
 }
 
-/// Defines the schema and policy rules for a particular namespace.
-///
-/// # Examples
-///
-/// ```
-/// use simple_zanzibar::model::{NamespaceConfig, Relation, RelationConfig, UsersetExpression};
-///
-/// let config = NamespaceConfig::new("doc")
-///     .with_relation(RelationConfig::new(Relation::new("owner")))
-///     .with_relation(
-///         RelationConfig::new(Relation::new("viewer"))
-///             .with_rewrite(UsersetExpression::Union(vec![
-///                 UsersetExpression::This,
-///                 UsersetExpression::ComputedUserset {
-///                     relation: Relation::new("owner"),
-///                 },
-///             ])),
-///     );
-/// ```
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct NamespaceConfig {
-    /// The name of the namespace.
-    pub name: String,
-    /// The relations defined in this namespace, keyed by relation.
-    pub relations: HashMap<Relation, RelationConfig>,
+/// Request for a check at a specified consistency level.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckRequest {
+    /// Protected object to evaluate.
+    pub object: Object,
+    /// Relation or permission to evaluate.
+    pub relation: Relation,
+    /// Subject whose membership is checked.
+    pub user: User,
+    /// Consistency selector for the read.
+    pub consistency: Consistency,
 }
 
-impl NamespaceConfig {
-    /// Creates a new namespace configuration with no relations.
-    pub fn new(name: impl Into<String>) -> Self {
+impl CheckRequest {
+    /// Creates a check request.
+    #[must_use]
+    pub fn new(object: Object, relation: Relation, user: User, consistency: Consistency) -> Self {
         Self {
-            name: name.into(),
-            relations: HashMap::new(),
+            object,
+            relation,
+            user,
+            consistency,
         }
     }
+}
 
-    /// Adds a relation configuration, returning self for chaining.
-    pub fn with_relation(mut self, config: RelationConfig) -> Self {
-        self.relations.insert(config.name.clone(), config);
-        self
+/// Response for a check request.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckResponse {
+    /// Whether the subject has the requested relation or permission.
+    pub allowed: bool,
+}
+
+/// Request for expanding an object relation or permission at a specified consistency level.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandRequest {
+    /// Protected object to expand.
+    pub object: Object,
+    /// Relation or permission to expand.
+    pub relation: Relation,
+    /// Consistency selector for the read.
+    pub consistency: Consistency,
+}
+
+impl ExpandRequest {
+    /// Creates an expand request.
+    #[must_use]
+    pub fn new(object: Object, relation: Relation, consistency: Consistency) -> Self {
+        Self {
+            object,
+            relation,
+            consistency,
+        }
     }
+}
+
+/// Response for an expand request.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandResponse {
+    /// Expanded userset tree.
+    pub expanded: ExpandedUserset,
+}
+
+/// Request for resources of one type that a subject can access through a permission.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupResourcesRequest {
+    /// Subject whose accessible resources are requested.
+    pub subject: User,
+    /// Permission or relation to check on each candidate resource.
+    pub permission: Relation,
+    /// Resource namespace/type to return.
+    pub resource_type: String,
+}
+
+/// Resources returned by a lookup request.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupResources {
+    /// De-duplicated resources that passed the shared check evaluator.
+    pub resources: Vec<Object>,
+}
+
+/// Request for subjects of one type that can access a resource through a permission.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupSubjectsRequest {
+    /// Protected resource to check.
+    pub resource: Object,
+    /// Permission or relation to evaluate on the resource.
+    pub permission: Relation,
+    /// Subject namespace/type to return.
+    pub subject_type: String,
+}
+
+/// Subjects returned by a lookup request.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupSubjects {
+    /// De-duplicated subjects that passed the shared check evaluator.
+    pub subjects: Vec<User>,
+}
+
+/// Defines the schema and policy rules for a particular namespace.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, Default)]
+pub struct NamespaceConfig {
+    /// Namespace/type name.
+    pub name: String,
+    /// Relation definitions keyed by relation name.
+    pub relations: std::collections::HashMap<Relation, RelationConfig>,
 }
 
 /// Defines a specific relation within a namespace, including its rewrite rules.
-///
-/// # Examples
-///
-/// ```
-/// use simple_zanzibar::model::{Relation, RelationConfig, UsersetExpression};
-///
-/// let config = RelationConfig::new(Relation::new("viewer"))
-///     .with_rewrite(UsersetExpression::This);
-/// ```
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct RelationConfig {
-    /// The name of this relation.
+    /// Relation name.
     pub name: Relation,
-    /// The optional userset rewrite expression for computing effective permissions.
+    /// Optional userset rewrite for computed permissions.
     pub userset_rewrite: Option<UsersetExpression>,
 }
 
-impl RelationConfig {
-    /// Creates a new relation configuration with no rewrite rule.
-    pub fn new(name: Relation) -> Self {
-        Self {
-            name,
-            userset_rewrite: None,
-        }
-    }
-
-    /// Sets the userset rewrite expression, returning self for chaining.
-    pub fn with_rewrite(mut self, rewrite: UsersetExpression) -> Self {
-        self.userset_rewrite = Some(rewrite);
-        self
-    }
-}
-
 /// Represents a tree of userset computations, forming the core of the policy language.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum UsersetExpression {
     /// `this` - The set of users directly granted this relation.
     This,
-    /// A set computed from another relation on the *same* object
-    /// (e.g., an `editor` is also a `viewer`).
+    /// A set computed from another relation on the *same* object.
+    /// e.g., an `editor` is also a `viewer`.
     ComputedUserset {
-        /// The relation to compute from.
+        /// Relation on the same object to compute.
         relation: Relation,
     },
     /// A set computed by first finding a related object via a `tupleset` relation,
-    /// and then computing a userset from that related object
-    /// (e.g., for `doc:readme`, find its `parent` folder, then take `viewers` of that folder).
+    /// and then computing a userset from that related object.
+    /// e.g., for `doc:readme`, find its `parent` folder, then take `viewers` of that folder.
     TupleToUserset {
-        /// The relation used to find the intermediate object.
+        /// Relation that points from the source object to intermediate objects.
         tupleset_relation: Relation,
-        /// The relation to compute on the intermediate object.
+        /// Relation to evaluate on each intermediate object.
         computed_userset_relation: Relation,
     },
     /// The union of multiple sub-expressions.
@@ -231,16 +302,20 @@ pub enum UsersetExpression {
     Intersection(Vec<UsersetExpression>),
     /// The exclusion (or difference) of one set from another.
     Exclusion {
-        /// The base set.
+        /// Base userset expression.
         base: Box<UsersetExpression>,
-        /// The set to exclude from the base.
+        /// Userset expression to subtract from the base.
         exclude: Box<UsersetExpression>,
     },
 }
 
 /// Represents the result of an `expand` operation, detailing the effective userset.
-#[derive(Debug, PartialEq)]
-#[non_exhaustive]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpandedUserset {
     /// A specific user who has the permission.
     User(String),
@@ -252,9 +327,9 @@ pub enum ExpandedUserset {
     Intersection(Vec<ExpandedUserset>),
     /// The exclusion of one expanded userset from another.
     Exclusion {
-        /// The base set.
+        /// Base expanded userset.
         base: Box<ExpandedUserset>,
-        /// The set excluded from the base.
+        /// Expanded userset to subtract from the base.
         exclude: Box<ExpandedUserset>,
     },
 }

@@ -2,4 +2,4 @@
 source: tests/snapshot_tests.rs
 expression: err.to_string()
 ---
-storage error: tuple already exists
+relationship already exists: doc:1#owner@user:alice

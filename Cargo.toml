@@ -3,6 +3,7 @@ name = "simple-zanzibar"
 version = "0.2.1"
 authors = ["Tyr Chen <tyr.chen@gmail.com>"]
 edition = "2024"
+rust-version = "1.95"
 license = "MIT"
 documentation = "https://docs.rs/simple-zanzibar"
 repository = "https://github.com/tyrchen/simple-zanzibar"
@@ -22,12 +23,37 @@ exclude = [
 ]
 
 [dependencies]
+arc-swap = { version = "1.9.1", default-features = false }
+blake3 = "1.8.5"
 pest = "2.8.6"
 pest_derive = "2.8.6"
+serde = { version = "1.0.228", features = ["derive"], optional = true }
 thiserror = "2.0.18"
+tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = ["std", "compat"]
+std = []
+serde = ["dep:serde"]
+tracing = ["dep:tracing"]
+compat = []
+bench-internals = []
 
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 insta = "1"
+proptest = "1.11.0"
+serde_json = "1.0.150"
+
+[[bench]]
+name = "baseline"
+harness = false
+test = false
+
+[[bench]]
+name = "org_authorization"
+harness = false
+test = false
 
 [[example]]
 name = "file_permissions"

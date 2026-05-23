@@ -1,91 +1,51 @@
-//! Defines custom error types for the Zanzibar authorization system.
-
-use std::fmt;
-
+//! Defines custom error types for the application.
 use thiserror::Error;
 
-/// Errors that can occur in storage operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum StoreError {
-    /// The tuple already exists in the store.
-    DuplicateTuple,
-    /// The tuple was not found in the store.
-    TupleNotFound,
-}
+use crate::{
+    domain::DomainError, eval::EvaluationError, relationship::StoreError,
+    revision::ConsistencyError, schema::SchemaError,
+};
 
-impl fmt::Display for StoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DuplicateTuple => write!(f, "tuple already exists"),
-            Self::TupleNotFound => write!(f, "tuple not found"),
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
-/// Errors that can occur in the Zanzibar authorization system.
-#[derive(Error, Debug)]
-#[non_exhaustive]
+/// Top-level error returned by the compatibility service and public helper APIs.
+#[derive(Error, Debug, PartialEq)]
 pub enum ZanzibarError {
-    /// The specified namespace was not found in the configuration.
-    #[error("namespace '{0}' not found")]
+    /// Requested namespace is not configured.
+    #[error("Namespace '{0}' not found")]
     NamespaceNotFound(String),
 
-    /// The specified relation was not found in the namespace.
-    #[error("relation '{0}' not found in namespace '{1}'")]
+    /// Requested relation is not configured in the namespace.
+    #[error("Relation '{0}' not found in namespace '{1}'")]
     RelationNotFound(String, String),
 
-    /// An error occurred while parsing the DSL input.
-    #[error("parsing error: {0}")]
+    /// DSL parsing failed.
+    #[error("Parsing error: {0}")]
     ParseError(String),
 
-    /// An error occurred in the storage backend.
-    #[error("storage error: {0}")]
-    StorageError(#[from] StoreError),
-}
+    /// Legacy tuple store operation failed.
+    #[error("Storage error: {0}")]
+    StorageError(String),
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    /// Operation requires a loaded schema snapshot.
+    #[error("Schema must be loaded before applying relationship batches")]
+    SchemaRequired,
 
-    #[test]
-    fn test_should_display_store_errors() {
-        assert_eq!(
-            StoreError::DuplicateTuple.to_string(),
-            "tuple already exists"
-        );
-        assert_eq!(StoreError::TupleNotFound.to_string(), "tuple not found");
-    }
+    /// Domain validation failed.
+    #[error(transparent)]
+    Domain(#[from] DomainError),
 
-    #[test]
-    fn test_should_display_zanzibar_errors() {
-        assert_eq!(
-            ZanzibarError::NamespaceNotFound("doc".into()).to_string(),
-            "namespace 'doc' not found"
-        );
-        assert_eq!(
-            ZanzibarError::RelationNotFound("viewer".into(), "doc".into()).to_string(),
-            "relation 'viewer' not found in namespace 'doc'"
-        );
-        assert_eq!(
-            ZanzibarError::ParseError("bad input".into()).to_string(),
-            "parsing error: bad input"
-        );
-        assert_eq!(
-            ZanzibarError::StorageError(StoreError::DuplicateTuple).to_string(),
-            "storage error: tuple already exists"
-        );
-    }
+    /// Schema compilation or validation failed.
+    #[error(transparent)]
+    Schema(#[from] SchemaError),
 
-    #[test]
-    fn test_should_convert_store_error_to_zanzibar_error() {
-        let store_err = StoreError::TupleNotFound;
-        let zanzibar_err: ZanzibarError = store_err.into();
-        assert!(matches!(
-            zanzibar_err,
-            ZanzibarError::StorageError(StoreError::TupleNotFound)
-        ));
-    }
+    /// Indexed relationship store operation failed.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+
+    /// Consistency token validation failed.
+    #[error(transparent)]
+    Consistency(#[from] ConsistencyError),
+
+    /// Graph evaluation failed.
+    #[error(transparent)]
+    Evaluation(#[from] EvaluationError),
 }

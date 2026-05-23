@@ -2,7 +2,7 @@
 source: tests/snapshot_tests.rs
 expression: err.to_string()
 ---
-parsing error:  --> 1:1
+Parsing error:  --> 1:1
   |
 1 | this is not valid DSL!!!
   | ^---
