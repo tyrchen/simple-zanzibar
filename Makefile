@@ -4,6 +4,9 @@ build:
 test:
 	@cargo nextest run --all-features
 
+bench-baseline:
+	@cargo bench --bench baseline -- --sample-size 10
+
 release:
 	@cargo release tag --execute
 	@git cliff -o CHANGELOG.md
@@ -14,4 +17,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test release update-submodule
+.PHONY: build test bench-baseline release update-submodule

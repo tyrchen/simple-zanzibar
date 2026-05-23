@@ -223,7 +223,7 @@ fn test_expand_functionality() -> Result<(), Box<dyn std::error::Error>> {
     // The expanded result should show the union structure
     // This is a basic test - in a real system you'd want more detailed assertions
     // about the structure of the expanded userset
-    println!("Expanded userset: {:?}", expanded);
+    println!("Expanded userset: {expanded:?}");
 
     Ok(())
 }
@@ -233,13 +233,13 @@ fn test_error_handling() {
     let mut service = ZanzibarService::new();
 
     // Test with invalid DSL
-    let invalid_dsl = r#"
+    let invalid_dsl = r"
         namespace invalid {
             relation bad_syntax {
                 rewrite unknown_operator(this)
             }
         }
-    "#;
+    ";
 
     // This should fail to parse
     assert!(service.add_dsl(invalid_dsl).is_err());
@@ -261,11 +261,11 @@ fn test_tuple_management() -> Result<(), Box<dyn std::error::Error>> {
     let mut service = ZanzibarService::new();
 
     // Simple namespace for testing
-    let simple_dsl = r#"
+    let simple_dsl = r"
         namespace test {
             relation viewer {}
         }
-    "#;
+    ";
 
     service.add_dsl(simple_dsl)?;
 

@@ -49,7 +49,7 @@ fn test_parse_full_dsl() -> Result<(), ZanzibarError> {
     let doc_config = configs
         .iter()
         .find(|c| c.name == "doc")
-        .expect("doc namespace not found");
+        .ok_or_else(|| ZanzibarError::ParseError("doc namespace not found".to_string()))?;
     assert_eq!(doc_config.relations.len(), 4);
     assert!(doc_config
         .relations
@@ -67,7 +67,7 @@ fn test_parse_full_dsl() -> Result<(), ZanzibarError> {
     let viewer_rewrite = doc_config
         .relations
         .get(&Relation("viewer".to_string()))
-        .unwrap()
+        .ok_or_else(|| ZanzibarError::ParseError("viewer relation not found".to_string()))?
         .userset_rewrite
         .as_ref();
     assert!(viewer_rewrite.is_some());
@@ -76,7 +76,7 @@ fn test_parse_full_dsl() -> Result<(), ZanzibarError> {
     let folder_config = configs
         .iter()
         .find(|c| c.name == "folder")
-        .expect("folder namespace not found");
+        .ok_or_else(|| ZanzibarError::ParseError("folder namespace not found".to_string()))?;
     assert_eq!(folder_config.relations.len(), 1);
     assert!(folder_config
         .relations

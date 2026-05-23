@@ -2,7 +2,7 @@ use simple_zanzibar::model::{Object, Relation, RelationTuple, User};
 use simple_zanzibar::store::{InMemoryTupleStore, TupleStore};
 
 #[test]
-fn test_write_and_read_tuple() {
+fn test_write_and_read_tuple() -> Result<(), &'static str> {
     let mut store = InMemoryTupleStore::default();
 
     let tuple = RelationTuple {
@@ -18,7 +18,8 @@ fn test_write_and_read_tuple() {
 
     let results = store.read_tuples(&tuple.object, Some(&tuple.relation), Some(&tuple.user));
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0], tuple);
+    assert_eq!(results.first().ok_or("tuple should be present")?, &tuple);
+    Ok(())
 }
 
 #[test]

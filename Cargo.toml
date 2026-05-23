@@ -28,7 +28,12 @@ pest_derive = "2.8.0"
 thiserror = "2.0.12"
 
 [dev-dependencies]
-# Add any development dependencies here if needed
+arc-swap = { version = "1.9.1", default-features = false }
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "baseline"
+harness = false
 
 [[example]]
 name = "file_permissions"

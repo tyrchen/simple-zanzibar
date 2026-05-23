@@ -7,7 +7,7 @@ use simple_zanzibar::model::{
 use simple_zanzibar::ZanzibarService;
 use std::collections::HashMap;
 
-/// Creates a ZanzibarService pre-populated with a common test configuration.
+/// Creates a `ZanzibarService` pre-populated with a common test configuration.
 fn create_test_service() -> ZanzibarService {
     let mut service = ZanzibarService::new();
 

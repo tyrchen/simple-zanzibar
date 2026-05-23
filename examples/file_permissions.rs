@@ -8,6 +8,8 @@ use simple_zanzibar::{
     ZanzibarService,
 };
 
+// The example is deliberately linear so readers can follow the complete workflow.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔐 Simplified Zanzibar File Permissions Example");
     println!("================================================\n");
@@ -231,7 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Expand the viewer userset for README file
     let expanded = service.expand(&readme_file, &viewer_rel)?;
-    println!("Users who can view README file: {:?}", expanded);
+    println!("Users who can view README file: {expanded:?}");
 
     println!("\n✨ Example completed successfully!");
     Ok(())
