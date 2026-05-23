@@ -1,9 +1,11 @@
 //! Benchmarks for large organization authorization scenarios.
 
 use std::{
+    collections::HashMap,
     fmt::Display,
     hint::black_box,
     num::{NonZeroU32, NonZeroUsize},
+    sync::Arc,
     time::Duration,
 };
 
@@ -11,12 +13,18 @@ use criterion::{BatchSize, Criterion};
 use simple_zanzibar::{
     ZanzibarService,
     domain::{RelationName, Relationship, SubjectId, SubjectRef, SubjectType},
-    eval::EvaluationLimits,
-    model::{LookupResourcesRequest, LookupSubjectsRequest, Object, Relation, RelationTuple, User},
+    eval::{
+        EvaluationLimits, check_with_snapshot, expand_with_snapshot,
+        lookup_resources_with_snapshot, lookup_subjects_with_snapshot,
+    },
+    model::{LookupResourcesRequest, LookupSubjectsRequest, Object, Relation, User},
+    parser,
     relationship::{
         IndexedRelationshipStore, QueryLimit, RelationshipFilter, RelationshipMutation,
         RelationshipReader, SubjectFilter,
     },
+    revision::{PublishedSnapshot, Revision, SchemaHash},
+    schema,
 };
 
 const ORG_RULE_SIZES: [usize; 3] = [1_000, 100_000, 1_000_000];
@@ -29,7 +37,8 @@ const OWNER_USER_ID: &str = "owner_user";
 
 #[derive(Debug)]
 struct OrgScenario {
-    service: ZanzibarService,
+    snapshot: Arc<PublishedSnapshot>,
+    limits: EvaluationLimits,
     direct_doc: Object,
     inherited_doc: Object,
     denied_doc: Object,
@@ -117,21 +126,20 @@ fn bench_building_blocks(criterion: &mut Criterion, filters: &[String]) {
             parse_relationship("doc:bulk_doc_099990#viewer@group:target_team#member");
         let filter = exact_relationship_filter(&relationship);
         criterion.bench_function(exact_query_name, |bencher| {
-            bencher.iter(|| {
-                black_box(must(
-                    store.any_resource_match(black_box(&filter)),
-                    "failed to query indexed relationship store",
-                ))
-            });
+            bencher.iter(|| black_box(store.any_resource_match(black_box(&filter))));
         });
     }
 
     if should_benchmark(reverse_query_name, filters) {
+        let reader = must(
+            store.materialized_reader(),
+            "failed to materialize indexed relationship store reader",
+        );
         let target_team_filter = userset_subject_filter("group", "target_team", "member");
         criterion.bench_function(reverse_query_name, |bencher| {
             bencher.iter(|| {
                 let count = must(
-                    store.reverse_query_relationships(black_box(&target_team_filter)),
+                    reader.reverse_query_relationships(black_box(&target_team_filter)),
                     "failed to reverse query indexed relationship store",
                 )
                 .count();
@@ -153,70 +161,80 @@ fn bench_org_authorization(criterion: &mut Criterion, filters: &[String]) {
 
         group.bench_function("check_direct_group_viewer", |bencher| {
             bencher.iter(|| {
-                black_box(scenario.service.check(
+                black_box(check_with_snapshot(
+                    &scenario.snapshot,
                     black_box(&scenario.direct_doc),
                     black_box(&scenario.can_view),
                     black_box(&scenario.target_user),
+                    black_box(scenario.limits),
                 ))
             });
         });
 
         group.bench_function("check_inherited_folder_viewer", |bencher| {
             bencher.iter(|| {
-                black_box(scenario.service.check(
+                black_box(check_with_snapshot(
+                    &scenario.snapshot,
                     black_box(&scenario.inherited_doc),
                     black_box(&scenario.can_view),
                     black_box(&scenario.target_user),
+                    black_box(scenario.limits),
                 ))
             });
         });
 
         group.bench_function("check_denied_exclusion", |bencher| {
             bencher.iter(|| {
-                black_box(scenario.service.check(
+                black_box(check_with_snapshot(
+                    &scenario.snapshot,
                     black_box(&scenario.denied_doc),
                     black_box(&scenario.can_view),
                     black_box(&scenario.target_user),
+                    black_box(scenario.limits),
                 ))
             });
         });
 
         group.bench_function("check_editor_can_edit", |bencher| {
             bencher.iter(|| {
-                black_box(scenario.service.check(
+                black_box(check_with_snapshot(
+                    &scenario.snapshot,
                     black_box(&scenario.edit_doc),
                     black_box(&scenario.can_edit),
                     black_box(&scenario.editor_user),
+                    black_box(scenario.limits),
                 ))
             });
         });
 
         group.bench_function("expand_direct_doc_viewers", |bencher| {
             bencher.iter(|| {
-                black_box(scenario.service.expand(
+                black_box(expand_with_snapshot(
+                    &scenario.snapshot,
                     black_box(&scenario.direct_doc),
                     black_box(&scenario.can_view),
+                    black_box(scenario.limits),
                 ))
             });
         });
 
         group.bench_function("lookup_resources_target_user", |bencher| {
             bencher.iter(|| {
-                black_box(
-                    scenario
-                        .service
-                        .lookup_resources(black_box(&scenario.lookup_resources_request)),
-                )
+                black_box(lookup_resources_with_snapshot(
+                    &scenario.snapshot,
+                    black_box(&scenario.lookup_resources_request),
+                    black_box(scenario.limits),
+                ))
             });
         });
 
         group.bench_function("lookup_subjects_direct_doc", |bencher| {
             bencher.iter(|| {
-                black_box(
-                    scenario
-                        .service
-                        .lookup_subjects(black_box(&scenario.lookup_subjects_request)),
-                )
+                black_box(lookup_subjects_with_snapshot(
+                    &scenario.snapshot,
+                    black_box(&scenario.lookup_subjects_request),
+                    black_box(scenario.limits),
+                ))
             });
         });
 
@@ -316,14 +334,12 @@ fn rule_label(rules: usize) -> &'static str {
 }
 
 fn build_org_scenario(rules: usize) -> OrgScenario {
-    let mut service = service_with_legacy_relationships(rules);
-    must(
-        service.add_dsl(org_schema()),
-        "failed to apply organization schema",
-    );
+    let limits = evaluation_limits();
+    let snapshot = build_org_snapshot(rules);
 
     let scenario = OrgScenario {
-        service,
+        snapshot,
+        limits,
         direct_doc: object("doc", "direct_doc"),
         inherited_doc: object("doc", "inherited_doc"),
         denied_doc: object("doc", "denied_doc"),
@@ -349,7 +365,8 @@ fn build_org_scenario(rules: usize) -> OrgScenario {
 }
 
 fn configured_service() -> ZanzibarService {
-    let mut service = empty_service();
+    let mut service = ZanzibarService::with_snapshot_retention(non_zero_usize(1))
+        .with_evaluation_limits(evaluation_limits());
     must(
         service.add_dsl(org_schema()),
         "failed to apply organization schema",
@@ -357,63 +374,36 @@ fn configured_service() -> ZanzibarService {
     service
 }
 
-fn empty_service() -> ZanzibarService {
-    ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
+fn evaluation_limits() -> EvaluationLimits {
+    EvaluationLimits {
         max_depth: non_zero_u32(50),
         max_fanout_per_step: non_zero_u32(100_000),
         max_lookup_results: non_zero_u32(1_000),
-    })
-}
-
-fn service_with_legacy_relationships(rules: usize) -> ZanzibarService {
-    let mut service = empty_service();
-
-    for relationship in fixed_relationships() {
-        write_legacy_tuple(&mut service, &relationship);
-    }
-
-    let generated = rules.saturating_sub(fixed_relationship_count());
-    for index in 0..generated {
-        let relationship = generated_relationship(index);
-        write_legacy_tuple(&mut service, &relationship);
-    }
-
-    service
-}
-
-fn write_legacy_tuple(service: &mut ZanzibarService, relationship: &Relationship) {
-    let tuple = relationship_tuple(relationship);
-    must(service.write_tuple(tuple), "failed to write legacy tuple");
-}
-
-fn relationship_tuple(relationship: &Relationship) -> RelationTuple {
-    RelationTuple {
-        object: Object {
-            namespace: relationship.resource().object_type().to_string(),
-            id: relationship.resource().object_id().to_string(),
-        },
-        relation: Relation(relationship.relation().to_string()),
-        user: legacy_user(relationship.subject()),
     }
 }
 
-fn legacy_user(subject: &SubjectRef) -> User {
-    match subject {
-        SubjectRef::Object(object) if object.object_type().as_str() == "user" => {
-            User::UserId(object.object_id().to_string())
-        }
-        SubjectRef::Object(object) => {
-            eprintln!("legacy tuple setup cannot represent direct non-user subject: {object}");
-            std::process::abort();
-        }
-        SubjectRef::Userset { object, relation } => User::Userset(
-            Object {
-                namespace: object.object_type().to_string(),
-                id: object.object_id().to_string(),
-            },
-            Relation(relation.to_string()),
-        ),
-    }
+fn build_org_snapshot(rules: usize) -> Arc<PublishedSnapshot> {
+    let configs = must(
+        parser::parse_dsl(org_schema()),
+        "failed to parse org schema",
+    );
+    let schema = must(
+        schema::compile_legacy_configs(configs.clone()),
+        "failed to compile org schema",
+    );
+    let mut relationships = IndexedRelationshipStore::default();
+    apply_generated_store_relationships(&mut relationships, rules);
+    let configs = configs
+        .into_iter()
+        .map(|config| (config.name.clone(), config))
+        .collect::<HashMap<_, _>>();
+    Arc::new(PublishedSnapshot::new(
+        Revision::first(),
+        SchemaHash::for_schema(&schema),
+        Arc::new(configs),
+        Arc::new(schema),
+        Arc::new(relationships),
+    ))
 }
 
 fn org_schema() -> &'static str {
@@ -468,7 +458,8 @@ fn org_schema() -> &'static str {
 
 fn validate_scenario(scenario: &OrgScenario) {
     ensure_check(
-        &scenario.service,
+        &scenario.snapshot,
+        scenario.limits,
         &scenario.direct_doc,
         &scenario.can_view,
         &scenario.target_user,
@@ -476,7 +467,8 @@ fn validate_scenario(scenario: &OrgScenario) {
         "direct group viewer check",
     );
     ensure_check(
-        &scenario.service,
+        &scenario.snapshot,
+        scenario.limits,
         &scenario.inherited_doc,
         &scenario.can_view,
         &scenario.target_user,
@@ -484,7 +476,8 @@ fn validate_scenario(scenario: &OrgScenario) {
         "inherited folder viewer check",
     );
     ensure_check(
-        &scenario.service,
+        &scenario.snapshot,
+        scenario.limits,
         &scenario.denied_doc,
         &scenario.can_view,
         &scenario.target_user,
@@ -492,7 +485,8 @@ fn validate_scenario(scenario: &OrgScenario) {
         "denied exclusion check",
     );
     ensure_check(
-        &scenario.service,
+        &scenario.snapshot,
+        scenario.limits,
         &scenario.edit_doc,
         &scenario.can_edit,
         &scenario.editor_user,
@@ -502,14 +496,19 @@ fn validate_scenario(scenario: &OrgScenario) {
 }
 
 fn ensure_check(
-    service: &ZanzibarService,
+    snapshot: &PublishedSnapshot,
+    limits: EvaluationLimits,
     object: &Object,
     relation: &Relation,
     user: &User,
     expected: bool,
     context: &str,
 ) {
-    let actual = must(service.check(object, relation, user), context);
+    let actual = must(
+        check_with_snapshot(snapshot, object, relation, user, limits),
+        context,
+    )
+    .is_allowed();
     if actual != expected {
         eprintln!("{context}: expected {expected}, got {actual}");
         std::process::abort();
@@ -530,6 +529,22 @@ fn apply_generated_relationships(service: &mut ZanzibarService, rules: usize) {
     }
 
     flush_relationships(service, &mut batch);
+}
+
+fn apply_generated_store_relationships(store: &mut IndexedRelationshipStore, rules: usize) {
+    let fixed_relationships = fixed_relationships();
+    let mut batch = Vec::with_capacity(MUTATION_BATCH_LIMIT);
+
+    for relationship in fixed_relationships {
+        push_store_relationship(store, &mut batch, relationship);
+    }
+
+    let generated = rules.saturating_sub(fixed_relationship_count());
+    for index in 0..generated {
+        push_store_relationship(store, &mut batch, generated_relationship(index));
+    }
+
+    flush_store_relationships(store, &mut batch);
 }
 
 fn push_relationship(
@@ -714,11 +729,15 @@ fn create_subject_id(value: &str) -> SubjectId {
 }
 
 fn query_limit(value: usize) -> QueryLimit {
-    QueryLimit::new(NonZeroUsize::new(value).unwrap_or(NonZeroUsize::MIN))
+    QueryLimit::new(non_zero_usize(value))
 }
 
 fn non_zero_u32(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).unwrap_or(NonZeroU32::MIN)
+}
+
+fn non_zero_usize(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).unwrap_or(NonZeroUsize::MIN)
 }
 
 fn must<T, E: Display>(result: Result<T, E>, context: &str) -> T {

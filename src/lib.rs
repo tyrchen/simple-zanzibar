@@ -112,7 +112,7 @@ use crate::{
 pub struct ZanzibarService {
     configs: HashMap<String, NamespaceConfig>,
     schema: Option<CompiledSchema>,
-    relationships: IndexedRelationshipStore,
+    relationships: Arc<IndexedRelationshipStore>,
     current_snapshot: ArcSwapOption<PublishedSnapshot>,
     snapshot_history: VecDeque<Arc<PublishedSnapshot>>,
     datastore_id: DatastoreId,
@@ -153,7 +153,7 @@ impl ZanzibarService {
         ZanzibarService {
             configs: HashMap::new(),
             schema: None,
-            relationships: IndexedRelationshipStore::default(),
+            relationships: Arc::new(IndexedRelationshipStore::default()),
             current_snapshot: ArcSwapOption::empty(),
             snapshot_history: VecDeque::new(),
             datastore_id: DatastoreId::new_unique(),
@@ -312,16 +312,9 @@ impl ZanzibarService {
             validate_precondition_filter(&schema, precondition)?;
         }
 
-        let mut candidate = self.relationships.clone();
+        let mut candidate = (*self.relationships).clone();
         candidate.apply_mutations(mutations, preconditions)?;
-        let tuples = candidate
-            .rows()
-            .iter()
-            .filter_map(legacy_relation_tuple_from_relationship)
-            .collect::<Vec<_>>();
-
-        self.store.replace_all(tuples);
-        self.publish_snapshot(self.configs.clone(), schema, candidate)
+        self.publish_snapshot(self.configs.clone(), schema, Arc::new(candidate))
     }
 
     /// Deletes a relation tuple from the store.
@@ -510,7 +503,7 @@ impl ZanzibarService {
     fn relationship_store_for_schema(
         &self,
         schema: &CompiledSchema,
-    ) -> Result<IndexedRelationshipStore, ZanzibarError> {
+    ) -> Result<Arc<IndexedRelationshipStore>, ZanzibarError> {
         if self.schema.is_some() {
             return self.revalidate_relationship_store(schema);
         }
@@ -520,34 +513,33 @@ impl ZanzibarService {
     fn revalidate_relationship_store(
         &self,
         schema: &CompiledSchema,
-    ) -> Result<IndexedRelationshipStore, ZanzibarError> {
+    ) -> Result<Arc<IndexedRelationshipStore>, ZanzibarError> {
         let mut relationships = IndexedRelationshipStore::default();
         for relationship in self.relationships.rows() {
-            schema.validate_relationship(relationship)?;
-            relationships
-                .apply_mutations([RelationshipMutation::Touch(relationship.clone())], [])?;
+            schema.validate_relationship(&relationship)?;
+            relationships.apply_mutations([RelationshipMutation::Touch(relationship)], [])?;
         }
-        Ok(relationships)
+        Ok(Arc::new(relationships))
     }
 
     fn rebuild_relationship_store_from_legacy_tuples(
         &self,
         schema: &CompiledSchema,
-    ) -> Result<IndexedRelationshipStore, ZanzibarError> {
+    ) -> Result<Arc<IndexedRelationshipStore>, ZanzibarError> {
         let mut relationships = IndexedRelationshipStore::default();
         for tuple in self.store.all_tuples() {
             let relationship = domain::Relationship::try_from(&tuple)?;
             schema.validate_relationship(&relationship)?;
             relationships.apply_mutations([RelationshipMutation::Touch(relationship)], [])?;
         }
-        Ok(relationships)
+        Ok(Arc::new(relationships))
     }
 
     fn publish_snapshot(
         &mut self,
         configs: HashMap<String, NamespaceConfig>,
         schema: CompiledSchema,
-        relationships: IndexedRelationshipStore,
+        relationships: Arc<IndexedRelationshipStore>,
     ) -> Result<ConsistencyToken, ZanzibarError> {
         let revision = self.next_revision()?;
         let schema_hash = SchemaHash::for_schema(&schema);
@@ -556,13 +548,14 @@ impl ZanzibarService {
             schema_hash,
             Arc::new(configs.clone()),
             Arc::new(schema.clone()),
-            Arc::new(relationships.clone()),
+            Arc::clone(&relationships),
         ));
         let token = ConsistencyToken::new(revision, schema_hash, self.datastore_id);
 
         self.configs = configs;
         self.schema = Some(schema);
         self.relationships = relationships;
+        self.store.replace_all(Vec::new());
         self.current_snapshot.store(Some(Arc::clone(&snapshot)));
         self.snapshot_history.push_back(snapshot);
         while self.snapshot_history.len() > self.retained_snapshots.get() {
@@ -665,36 +658,6 @@ fn validate_subject_filter(
         schema.resolver().relation(&object_type, relation)?;
     }
     Ok(())
-}
-
-fn legacy_relation_tuple_from_relationship(
-    relationship: &domain::Relationship,
-) -> Option<RelationTuple> {
-    let object = legacy_object_from_domain(relationship.resource());
-    let relation = Relation(relationship.relation().as_str().to_string());
-    let user = match relationship.subject() {
-        domain::SubjectRef::Object(subject) if subject.object_type().as_str() == "user" => {
-            User::UserId(subject.object_id().as_str().to_string())
-        }
-        domain::SubjectRef::Object(_) => return None,
-        domain::SubjectRef::Userset { object, relation } => User::Userset(
-            legacy_object_from_domain(object),
-            Relation(relation.as_str().to_string()),
-        ),
-    };
-
-    Some(RelationTuple {
-        object,
-        relation,
-        user,
-    })
-}
-
-fn legacy_object_from_domain(object: &domain::ObjectRef) -> Object {
-    Object {
-        namespace: object.object_type().as_str().to_string(),
-        id: object.object_id().as_str().to_string(),
-    }
 }
 
 #[cfg(test)]

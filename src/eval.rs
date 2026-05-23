@@ -9,17 +9,15 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    domain::{
-        ObjectRef as DomainObjectRef, ObjectType, RelationName, Relationship, SubjectRef,
-        SubjectType,
-    },
+    domain::{ObjectRef as DomainObjectRef, ObjectType, RelationName, SubjectType},
     error::ZanzibarError,
     model::{
         ExpandedUserset, LookupResources, LookupResourcesRequest, LookupSubjects,
         LookupSubjectsRequest, NamespaceConfig, Object, Relation, User, UsersetExpression,
     },
     relationship::{
-        IndexedRelationshipStore, QueryLimit, RelationshipFilter, RelationshipReader, SubjectFilter,
+        CompactRelationshipIter, IndexedRelationshipStore, QueryLimit, RelationshipFilter,
+        SubjectFilter,
     },
     revision::PublishedSnapshot,
     schema::UsersetExpression as SchemaUsersetExpression,
@@ -319,7 +317,7 @@ impl<'a> EvaluationContext<'a> {
         if self
             .snapshot
             .relationships()
-            .any_resource_match(&exact_filter)?
+            .any_resource_match(&exact_filter)
         {
             return Ok(Membership::Allowed);
         }
@@ -331,14 +329,8 @@ impl<'a> EvaluationContext<'a> {
             relation,
             unbounded_query_limit(),
         )? {
-            if let SubjectRef::Userset {
-                object: userset_object,
-                relation: userset_relation,
-            } = relationship.subject()
-            {
+            if let Some((nested_object, nested_relation)) = relationship.subject_userset_legacy() {
                 self.increment_fanout(&mut fanout)?;
-                let nested_object = legacy_object(userset_object);
-                let nested_relation = legacy_relation(userset_relation);
                 if self
                     .check(&nested_object, &nested_relation, user)?
                     .is_allowed()
@@ -365,13 +357,8 @@ impl<'a> EvaluationContext<'a> {
             tupleset_relation,
             unbounded_query_limit(),
         )? {
-            if let SubjectRef::Userset {
-                object: intermediate,
-                ..
-            } = relationship.subject()
-            {
+            if let Some((intermediate_object, _)) = relationship.subject_userset_legacy() {
                 self.increment_fanout(&mut fanout)?;
-                let intermediate_object = legacy_object(intermediate);
                 if self
                     .check(&intermediate_object, computed_userset_relation, user)?
                     .is_allowed()
@@ -457,14 +444,10 @@ impl<'a> EvaluationContext<'a> {
                     &legacy_relation(tupleset_relation),
                     unbounded_query_limit(),
                 )? {
-                    if let SubjectRef::Userset {
-                        object: intermediate,
-                        ..
-                    } = relationship.subject()
-                    {
+                    if let Some((intermediate_object, _)) = relationship.subject_userset_legacy() {
                         self.increment_fanout(&mut fanout)?;
                         users.push(self.expand(
-                            &legacy_object(intermediate),
+                            &intermediate_object,
                             &legacy_relation(computed_userset_relation),
                         )?);
                     }
@@ -510,7 +493,7 @@ impl<'a> EvaluationContext<'a> {
             self.fanout_query_limit(),
         )? {
             self.increment_fanout(&mut fanout)?;
-            users.push(expanded_subject(relationship.subject())?);
+            users.push(relationship.expanded_subject()?);
         }
         Ok(ExpandedUserset::Union(users))
     }
@@ -603,10 +586,10 @@ pub fn lookup_resources_with_snapshot(
         let subject_filter = SubjectFilter::try_from(&subject)?;
         for relationship in snapshot
             .relationships()
-            .reverse_query_relationships(&subject_filter)?
+            .reverse_query_compact_relationships(&subject_filter)
         {
-            let object = legacy_object(relationship.resource());
-            if relationship.resource().object_type() == &resource_type
+            let object = relationship.resource_object_legacy();
+            if relationship.resource_type_eq(&resource_type)
                 && seen.insert(object.clone())
                 && EvaluationContext::new(snapshot, limits)
                     .check(&object, &request.permission, &request.subject)?
@@ -618,7 +601,7 @@ pub fn lookup_resources_with_snapshot(
                 }
             }
 
-            let userset_subject = User::Userset(object, legacy_relation(relationship.relation()));
+            let userset_subject = User::Userset(object, relationship.relation_legacy());
             if visited_subjects.insert(userset_subject.clone()) {
                 frontier.push_back(userset_subject);
             }
@@ -834,7 +817,7 @@ fn indexed_resource_relation<'a>(
     object: &Object,
     relation: &Relation,
     limit: QueryLimit,
-) -> Result<impl Iterator<Item = &'a Relationship>, ZanzibarError> {
+) -> Result<CompactRelationshipIter<'a>, ZanzibarError> {
     let resource = DomainObjectRef::try_from(object)?;
     let relation_name = RelationName::try_from(relation)?;
     let filter = RelationshipFilter::new(
@@ -844,34 +827,11 @@ fn indexed_resource_relation<'a>(
         None,
         limit,
     );
-    Ok(relationships.query_relationships(&filter)?)
-}
-
-fn legacy_object(object: &DomainObjectRef) -> Object {
-    Object {
-        namespace: object.object_type().as_str().to_string(),
-        id: object.object_id().as_str().to_string(),
-    }
+    Ok(relationships.query_compact_relationships(&filter))
 }
 
 fn legacy_relation(relation: &RelationName) -> Relation {
     Relation(relation.as_str().to_string())
-}
-
-fn expanded_subject(subject: &SubjectRef) -> Result<ExpandedUserset, ZanzibarError> {
-    match subject {
-        SubjectRef::Object(object) if object.object_type().as_str() == "user" => Ok(
-            ExpandedUserset::User(object.object_id().as_str().to_string()),
-        ),
-        SubjectRef::Object(object) => Err(ZanzibarError::StorageError(format!(
-            "legacy expand cannot represent direct subject type '{}'",
-            object.object_type()
-        ))),
-        SubjectRef::Userset { object, relation } => Ok(ExpandedUserset::Userset(
-            legacy_object(object),
-            legacy_relation(relation),
-        )),
-    }
 }
 
 fn collect_lookup_subject_candidates(

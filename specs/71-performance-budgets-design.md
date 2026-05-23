@@ -56,6 +56,25 @@ The target is steady-state process RSS measured with the release benchmark binar
 
 If Phase 0 proves a target unrealistic on the reference machine, update this spec and [99-key-decisions.md](./99-key-decisions.md) with measured data before implementation proceeds.
 
+## 3.1 M6 Compact Store Measurements
+
+Measured on 2026-05-23 on the reference macOS machine with `make bench-org-memory`.
+The org authorization cases build a single schema-backed compact `PublishedSnapshot` and then run
+the Criterion operation filter under `/usr/bin/time -l`, so the RSS result reflects the compact
+snapshot/evaluator shape rather than legacy tuple migration or multi-revision write history.
+
+| Dataset | Operation filter | Pre-M6 max RSS | M6 max RSS | M6 peak footprint | Target |
+| --- | --- | ---: | ---: | ---: | ---: |
+| harness baseline | `building_blocks/relationship_parse` | 9.7 MiB | 16.0 MiB | 14.4 MiB | n/a |
+| 1k org rules | `org_authorization/1k_rules/check_direct_group_viewer` | 12.8 MiB | 16.0 MiB | 13.9 MiB | <= 16 MiB |
+| 100k org rules | `org_authorization/100k_rules/check_direct_group_viewer` | 324 MiB | 71.8 MiB | 29.3 MiB | <= 80 MiB |
+| 1M org rules | `org_authorization/1m_rules/check_direct_group_viewer` | 3.12 GiB | 368 MiB | 207 MiB | <= 400 MiB |
+
+Full `cargo bench --bench org_authorization -- --sample-size 10` after M6 shows the memory
+reduction trades some CPU in the compact indexes. The 1M direct check remains in the same
+microsecond range at 2.71 us, while inherited and lookup cases are still within the original
+budgets: inherited folder viewer is 6.61 us and lookup resources is 3.42 ms.
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.

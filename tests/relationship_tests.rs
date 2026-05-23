@@ -108,12 +108,7 @@ fn test_should_apply_batch_atomically() -> Result<(), Box<dyn std::error::Error>
     ));
 
     assert_eq!(store.rows(), &[existing]);
-    assert!(
-        store
-            .query_relationships(&exact_filter(&created.to_string())?)?
-            .next()
-            .is_none()
-    );
+    assert!(!store.any_resource_match(&exact_filter(&created.to_string())?));
     Ok(())
 }
 
@@ -158,8 +153,9 @@ fn test_should_query_resource_and_subject_indexes() -> Result<(), Box<dyn std::e
         None,
         QueryLimit::default(),
     );
+    let reader = store.materialized_reader()?;
     assert_eq!(
-        store
+        reader
             .query_relationships(&resource_filter)?
             .collect::<Vec<_>>()
             .len(),
@@ -169,7 +165,7 @@ fn test_should_query_resource_and_subject_indexes() -> Result<(), Box<dyn std::e
     let resource_type_filter =
         RelationshipFilter::new("doc".try_into()?, None, None, None, QueryLimit::default());
     assert_eq!(
-        store
+        reader
             .query_relationships(&resource_type_filter)?
             .collect::<Vec<_>>()
             .len(),
@@ -184,7 +180,7 @@ fn test_should_query_resource_and_subject_indexes() -> Result<(), Box<dyn std::e
         QueryLimit::default(),
     );
     assert_eq!(
-        store
+        reader
             .query_relationships(&resource_object_filter)?
             .collect::<Vec<_>>()
             .len(),
@@ -199,7 +195,7 @@ fn test_should_query_resource_and_subject_indexes() -> Result<(), Box<dyn std::e
         QueryLimit::default(),
     );
     assert_eq!(
-        store
+        reader
             .query_relationships(&resource_type_relation_filter)?
             .collect::<Vec<_>>()
             .len(),
@@ -212,7 +208,7 @@ fn test_should_query_resource_and_subject_indexes() -> Result<(), Box<dyn std::e
         Some("member".try_into()?),
     );
     assert_eq!(
-        store
+        reader
             .reverse_query_relationships(&subject_filter)?
             .collect::<Vec<_>>(),
         vec![&group]
@@ -220,7 +216,7 @@ fn test_should_query_resource_and_subject_indexes() -> Result<(), Box<dyn std::e
 
     let subject_type_filter = SubjectFilter::new("group".try_into()?, None, None);
     assert_eq!(
-        store
+        reader
             .reverse_query_relationships(&subject_type_filter)?
             .collect::<Vec<_>>(),
         vec![&group]
@@ -229,11 +225,45 @@ fn test_should_query_resource_and_subject_indexes() -> Result<(), Box<dyn std::e
     let subject_type_relation_filter =
         SubjectFilter::new("group".try_into()?, None, Some("member".try_into()?));
     assert_eq!(
-        store
+        reader
             .reverse_query_relationships(&subject_type_relation_filter)?
             .collect::<Vec<_>>(),
         vec![&group]
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_should_compact_tombstoned_rows_without_changing_query_results()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut store = IndexedRelationshipStore::default();
+    let relationships = (0..40)
+        .map(|index| relationship(&format!("doc:doc_{index}#viewer@user:user_{index}")))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for tuple in &relationships {
+        store.apply_mutations([RelationshipMutation::Touch(tuple.clone())], [])?;
+    }
+
+    for tuple in relationships.iter().take(24) {
+        store.apply_mutations([RelationshipMutation::Delete(tuple.clone())], [])?;
+    }
+
+    let rows = store.rows().into_iter().collect::<HashSet<_>>();
+    let expected = relationships
+        .iter()
+        .skip(24)
+        .cloned()
+        .collect::<HashSet<_>>();
+    assert_eq!(rows, expected);
+
+    for tuple in relationships.iter().take(24) {
+        assert!(!store.any_resource_match(&exact_filter(&tuple.to_string())?));
+    }
+    for tuple in relationships.iter().skip(24) {
+        assert!(store.any_resource_match(&exact_filter(&tuple.to_string())?));
+    }
 
     Ok(())
 }
@@ -261,9 +291,12 @@ proptest! {
 
             let rows = store.rows().iter().cloned().collect::<HashSet<_>>();
             prop_assert_eq!(rows, reference.clone());
+            let reader = store
+                .materialized_reader()
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
 
             for tuple in &universe {
-                let indexed_matches = store
+                let indexed_matches = reader
                     .query_relationships(&exact_filter(&tuple.to_string())
                         .map_err(|error| TestCaseError::fail(error.to_string()))?)
                     .map_err(|error| TestCaseError::fail(error.to_string()))?
@@ -278,7 +311,7 @@ proptest! {
             }
 
             for subject in subject_filters()? {
-                let indexed_matches = store
+                let indexed_matches = reader
                     .reverse_query_relationships(&subject)
                     .map_err(|error| TestCaseError::fail(error.to_string()))?
                     .cloned()
@@ -374,9 +407,12 @@ fn assert_index_equivalence(
     if rows != *reference {
         return Err(TestCaseError::fail("row set drifted from reference set"));
     }
+    let reader = store
+        .materialized_reader()
+        .map_err(|error| TestCaseError::fail(error.to_string()))?;
 
     for tuple in universe {
-        let indexed_matches = store
+        let indexed_matches = reader
             .query_relationships(
                 &exact_filter(&tuple.to_string())
                     .map_err(|error| TestCaseError::fail(error.to_string()))?,
@@ -397,7 +433,7 @@ fn assert_index_equivalence(
     }
 
     for filter in resource_filters().map_err(|error| TestCaseError::fail(error.to_string()))? {
-        let indexed_matches = store
+        let indexed_matches = reader
             .query_relationships(&filter)
             .map_err(|error| TestCaseError::fail(error.to_string()))?
             .cloned()
@@ -415,7 +451,7 @@ fn assert_index_equivalence(
     }
 
     for subject in subject_filters().map_err(|error| TestCaseError::fail(error.to_string()))? {
-        let indexed_matches = store
+        let indexed_matches = reader
             .reverse_query_relationships(&subject)
             .map_err(|error| TestCaseError::fail(error.to_string()))?
             .cloned()
