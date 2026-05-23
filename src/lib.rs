@@ -18,7 +18,10 @@ use arc_swap::ArcSwapOption;
 
 use crate::error::ZanzibarError;
 use crate::eval::EvaluationLimits;
-use crate::model::{NamespaceConfig, Object, Relation, RelationTuple, User};
+use crate::model::{
+    LookupResources, LookupResourcesRequest, LookupSubjects, LookupSubjectsRequest,
+    NamespaceConfig, Object, Relation, RelationTuple, User,
+};
 use crate::relationship::{
     IndexedRelationshipStore, Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter,
 };
@@ -306,6 +309,62 @@ impl ZanzibarService {
             return Err(ZanzibarError::NamespaceNotFound(object.namespace.clone()));
         }
         eval::expand_with_configs(object, relation, &self.configs, self.store.as_ref())
+    }
+
+    /// Looks up resources of a type that the request subject can access.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::SchemaRequired`] when no schema has been loaded, or typed
+    /// consistency, domain, schema, store, or evaluation errors when lookup cannot run.
+    pub fn lookup_resources(
+        &self,
+        request: &LookupResourcesRequest,
+    ) -> Result<LookupResources, ZanzibarError> {
+        self.lookup_resources_with_consistency(request, Consistency::Latest)
+    }
+
+    /// Looks up resources of a type at the requested consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::SchemaRequired`] when no schema has been loaded, or typed
+    /// consistency, domain, schema, store, or evaluation errors when lookup cannot run.
+    pub fn lookup_resources_with_consistency(
+        &self,
+        request: &LookupResourcesRequest,
+        consistency: Consistency,
+    ) -> Result<LookupResources, ZanzibarError> {
+        let snapshot = self.snapshot_for_consistency(consistency)?;
+        eval::lookup_resources_with_snapshot(&snapshot, request, self.evaluation_limits)
+    }
+
+    /// Looks up subjects of a type that can access the request resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::SchemaRequired`] when no schema has been loaded, or typed
+    /// consistency, domain, schema, store, or evaluation errors when lookup cannot run.
+    pub fn lookup_subjects(
+        &self,
+        request: &LookupSubjectsRequest,
+    ) -> Result<LookupSubjects, ZanzibarError> {
+        self.lookup_subjects_with_consistency(request, Consistency::Latest)
+    }
+
+    /// Looks up subjects of a type at the requested consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::SchemaRequired`] when no schema has been loaded, or typed
+    /// consistency, domain, schema, store, or evaluation errors when lookup cannot run.
+    pub fn lookup_subjects_with_consistency(
+        &self,
+        request: &LookupSubjectsRequest,
+        consistency: Consistency,
+    ) -> Result<LookupSubjects, ZanzibarError> {
+        let snapshot = self.snapshot_for_consistency(consistency)?;
+        eval::lookup_subjects_with_snapshot(&snapshot, request, self.evaluation_limits)
     }
 
     fn rebuild_relationship_store(

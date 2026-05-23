@@ -1,17 +1,20 @@
 //! Benchmarks for legacy scan and indexed direct-check paths.
 
 use criterion::{BatchSize, Criterion};
+use simple_zanzibar::eval::EvaluationLimits;
 use simple_zanzibar::model::{
-    NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User,
+    LookupResourcesRequest, NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User,
 };
 use simple_zanzibar::store::{InMemoryTupleStore, TupleStore};
 use simple_zanzibar::ZanzibarService;
 
 use std::collections::HashMap;
 use std::hint::black_box;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 const DATASET_RELATIONSHIPS: usize = 100_000;
+const LOOKUP_CANDIDATES: usize = 10_000;
 
 fn owner_relation() -> Relation {
     Relation("owner".to_string())
@@ -170,6 +173,31 @@ fn service_with_tuple_to_userset_relationships(count: usize) -> ZanzibarService 
     service
 }
 
+fn service_with_lookup_relationships(count: usize) -> ZanzibarService {
+    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
+        max_depth: non_zero_u32(50),
+        max_fanout_per_step: non_zero_u32(1_000),
+        max_lookup_results: non_zero_u32(u32::try_from(count).unwrap_or(u32::MAX)),
+    });
+    let viewer = Relation("viewer".to_string());
+    let user = User::UserId("lookup-user".to_string());
+    for index in 0..count {
+        if let Err(error) = service.write_tuple(RelationTuple {
+            object: object_at(index),
+            relation: viewer.clone(),
+            user: user.clone(),
+        }) {
+            eprintln!("failed to build lookup benchmark dataset: {error}");
+            std::process::abort();
+        }
+    }
+    if let Err(error) = service.add_dsl(graph_schema()) {
+        eprintln!("failed to build lookup benchmark schema: {error}");
+        std::process::abort();
+    }
+    service
+}
+
 fn store_with_relationships(count: usize) -> InMemoryTupleStore {
     let mut store = InMemoryTupleStore::default();
     for index in 0..count {
@@ -240,6 +268,22 @@ fn bench_tuple_to_userset_check(c: &mut Criterion) {
     });
 }
 
+fn bench_lookup_resources(c: &mut Criterion) {
+    for count in [100_usize, 1_000, LOOKUP_CANDIDATES] {
+        let service = service_with_lookup_relationships(count);
+        let request = LookupResourcesRequest {
+            subject: User::UserId("lookup-user".to_string()),
+            permission: Relation("viewer".to_string()),
+            resource_type: "doc".to_string(),
+        };
+        let name = format!("lookup_resources_{count}_candidates");
+
+        c.bench_function(&name, |b| {
+            b.iter(|| black_box(service.lookup_resources(black_box(&request))));
+        });
+    }
+}
+
 fn main() {
     if cfg!(debug_assertions) {
         return;
@@ -253,6 +297,11 @@ fn main() {
     bench_indexed_direct_check(&mut criterion);
     bench_one_hop_userset_check(&mut criterion);
     bench_tuple_to_userset_check(&mut criterion);
+    bench_lookup_resources(&mut criterion);
     bench_legacy_store_scan(&mut criterion);
     criterion.final_summary();
+}
+
+fn non_zero_u32(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).unwrap_or(NonZeroU32::MIN)
 }

@@ -36,6 +36,42 @@ pub struct RelationTuple {
     pub user: User,
 }
 
+/// Request for resources of one type that a subject can access through a permission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupResourcesRequest {
+    /// Subject whose accessible resources are requested.
+    pub subject: User,
+    /// Permission or relation to check on each candidate resource.
+    pub permission: Relation,
+    /// Resource namespace/type to return.
+    pub resource_type: String,
+}
+
+/// Resources returned by a lookup request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupResources {
+    /// De-duplicated resources that passed the shared check evaluator.
+    pub resources: Vec<Object>,
+}
+
+/// Request for subjects of one type that can access a resource through a permission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupSubjectsRequest {
+    /// Protected resource to check.
+    pub resource: Object,
+    /// Permission or relation to evaluate on the resource.
+    pub permission: Relation,
+    /// Subject namespace/type to return.
+    pub subject_type: String,
+}
+
+/// Subjects returned by a lookup request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupSubjects {
+    /// De-duplicated subjects that passed the shared check evaluator.
+    pub subjects: Vec<User>,
+}
+
 /// Defines the schema and policy rules for a particular namespace.
 #[derive(Debug, Clone, Default)]
 pub struct NamespaceConfig {

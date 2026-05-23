@@ -1,16 +1,19 @@
 //! Core evaluation logic for `check` and `expand` requests.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use thiserror::Error;
 
 use crate::domain::{
-    ObjectRef as DomainObjectRef, ObjectType, RelationName, Relationship, SubjectRef,
+    ObjectRef as DomainObjectRef, ObjectType, RelationName, Relationship, SubjectRef, SubjectType,
 };
 use crate::error::ZanzibarError;
-use crate::model::{ExpandedUserset, NamespaceConfig, Object, Relation, User, UsersetExpression};
+use crate::model::{
+    ExpandedUserset, LookupResources, LookupResourcesRequest, LookupSubjects,
+    LookupSubjectsRequest, NamespaceConfig, Object, Relation, User, UsersetExpression,
+};
 use crate::relationship::{
     IndexedRelationshipStore, QueryLimit, RelationshipFilter, RelationshipReader, SubjectFilter,
 };
@@ -569,6 +572,111 @@ pub fn expand_with_snapshot(
     EvaluationContext::new(snapshot, limits).expand(object, relation)
 }
 
+/// Looks up resources of the requested type that pass the shared snapshot-backed check evaluator.
+///
+/// # Errors
+///
+/// Returns [`ZanzibarError`] when request validation, store access, or evaluation fails.
+pub fn lookup_resources_with_snapshot(
+    snapshot: &PublishedSnapshot,
+    request: &LookupResourcesRequest,
+    limits: EvaluationLimits,
+) -> Result<LookupResources, ZanzibarError> {
+    let resource_type = ObjectType::try_from(request.resource_type.as_str())?;
+    let permission = RelationName::try_from(&request.permission)?;
+    snapshot
+        .schema()
+        .resolver()
+        .relation(&resource_type, &permission)?;
+
+    let mut frontier = VecDeque::from([request.subject.clone()]);
+    let mut visited_subjects = HashSet::from([request.subject.clone()]);
+    let mut seen = HashSet::new();
+    let mut resources = Vec::new();
+
+    while let Some(subject) = frontier.pop_front() {
+        let subject_filter = SubjectFilter::try_from(&subject)?;
+        for relationship in snapshot
+            .relationships()
+            .reverse_query_relationships(&subject_filter)?
+        {
+            let object = legacy_object(relationship.resource());
+            if relationship.resource().object_type() == &resource_type
+                && seen.insert(object.clone())
+                && EvaluationContext::new(snapshot, limits)
+                    .check(&object, &request.permission, &request.subject)?
+                    .is_allowed()
+            {
+                resources.push(object.clone());
+                if lookup_result_limit_reached(resources.len(), limits) {
+                    return Ok(LookupResources { resources });
+                }
+            }
+
+            let userset_subject = User::Userset(object, legacy_relation(relationship.relation()));
+            if visited_subjects.insert(userset_subject.clone()) {
+                frontier.push_back(userset_subject);
+            }
+        }
+    }
+
+    Ok(LookupResources { resources })
+}
+
+/// Looks up subjects of the requested type that pass the shared snapshot-backed check evaluator.
+///
+/// # Errors
+///
+/// Returns [`ZanzibarError`] when request validation, store access, or evaluation fails.
+pub fn lookup_subjects_with_snapshot(
+    snapshot: &PublishedSnapshot,
+    request: &LookupSubjectsRequest,
+    limits: EvaluationLimits,
+) -> Result<LookupSubjects, ZanzibarError> {
+    let resource = DomainObjectRef::try_from(&request.resource)?;
+    let permission = RelationName::try_from(&request.permission)?;
+    snapshot
+        .schema()
+        .resolver()
+        .relation(resource.object_type(), &permission)?;
+
+    let subject_type = SubjectType::try_from(request.subject_type.as_str())?;
+    if subject_type.as_str() != "user" {
+        let object_type = ObjectType::try_from(subject_type.as_str())?;
+        snapshot.schema().resolver().namespace(&object_type)?;
+    }
+
+    let expanded =
+        EvaluationContext::new(snapshot, limits).expand(&request.resource, &request.permission)?;
+    let mut seen = HashSet::new();
+    let mut seen_usersets = HashSet::new();
+    let mut candidates = Vec::new();
+    collect_lookup_subject_candidates(
+        snapshot,
+        &expanded,
+        &subject_type,
+        limits,
+        &mut seen,
+        &mut seen_usersets,
+        &mut candidates,
+    )?;
+
+    let mut subjects = Vec::new();
+    for subject in candidates {
+        if EvaluationContext::new(snapshot, limits)
+            .check(&request.resource, &request.permission, &subject)?
+            .is_allowed()
+        {
+            subjects.push(subject);
+            if lookup_result_limit_reached(subjects.len(), limits) {
+                break;
+            }
+        }
+    }
+
+    Ok(LookupSubjects { subjects })
+}
+
 fn check_internal<S, C>(
     object: &Object,
     relation: &Relation,
@@ -997,6 +1105,78 @@ fn expanded_subject(subject: &SubjectRef) -> Result<ExpandedUserset, ZanzibarErr
     }
 }
 
+fn collect_lookup_subject_candidates(
+    snapshot: &PublishedSnapshot,
+    expanded: &ExpandedUserset,
+    subject_type: &SubjectType,
+    limits: EvaluationLimits,
+    seen_subjects: &mut HashSet<User>,
+    seen_usersets: &mut HashSet<(Object, Relation)>,
+    candidates: &mut Vec<User>,
+) -> Result<(), ZanzibarError> {
+    match expanded {
+        ExpandedUserset::User(id) if subject_type.as_str() == "user" => {
+            let subject = User::UserId(id.clone());
+            if seen_subjects.insert(subject.clone()) {
+                candidates.push(subject);
+            }
+        }
+        ExpandedUserset::User(_) => {}
+        ExpandedUserset::Userset(object, relation) => {
+            let userset = User::Userset(object.clone(), relation.clone());
+            if object.namespace == subject_type.as_str() && seen_subjects.insert(userset.clone()) {
+                candidates.push(userset);
+            }
+            if seen_usersets.insert((object.clone(), relation.clone())) {
+                let nested = EvaluationContext::new(snapshot, limits).expand(object, relation)?;
+                collect_lookup_subject_candidates(
+                    snapshot,
+                    &nested,
+                    subject_type,
+                    limits,
+                    seen_subjects,
+                    seen_usersets,
+                    candidates,
+                )?;
+            }
+        }
+        ExpandedUserset::Union(children) | ExpandedUserset::Intersection(children) => {
+            for child in children {
+                collect_lookup_subject_candidates(
+                    snapshot,
+                    child,
+                    subject_type,
+                    limits,
+                    seen_subjects,
+                    seen_usersets,
+                    candidates,
+                )?;
+            }
+        }
+        ExpandedUserset::Exclusion { base, exclude } => {
+            collect_lookup_subject_candidates(
+                snapshot,
+                base,
+                subject_type,
+                limits,
+                seen_subjects,
+                seen_usersets,
+                candidates,
+            )?;
+            collect_lookup_subject_candidates(
+                snapshot,
+                exclude,
+                subject_type,
+                limits,
+                seen_subjects,
+                seen_usersets,
+                candidates,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn non_zero_u32(value: u32) -> NonZeroU32 {
     match NonZeroU32::new(value) {
         Some(value) => value,
@@ -1006,6 +1186,14 @@ fn non_zero_u32(value: u32) -> NonZeroU32 {
 
 fn unbounded_query_limit() -> QueryLimit {
     QueryLimit::new(NonZeroUsize::MAX)
+}
+
+fn lookup_result_limit_reached(current_len: usize, limits: EvaluationLimits) -> bool {
+    let limit = match usize::try_from(limits.max_lookup_results.get()) {
+        Ok(limit) => limit,
+        Err(_) => usize::MAX,
+    };
+    current_len >= limit
 }
 
 /// Evaluates an `expand` request.

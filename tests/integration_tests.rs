@@ -5,8 +5,10 @@ use std::str::FromStr;
 
 use simple_zanzibar::{
     domain::{DomainError, Relationship},
-    model::{Object, Relation, RelationTuple, User},
+    eval::EvaluationLimits,
+    model::{LookupResourcesRequest, LookupSubjectsRequest, Object, Relation, RelationTuple, User},
     relationship::{Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter},
+    revision::Consistency,
     ZanzibarService,
 };
 
@@ -394,6 +396,236 @@ fn test_relationship_batch_should_require_schema() -> Result<(), Box<dyn std::er
         .is_err());
 
     Ok(())
+}
+
+#[test]
+fn test_lookup_resources_should_reuse_check_semantics_and_deduplicate(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut service = ZanzibarService::new();
+    service.add_dsl(
+        r#"
+        namespace doc {
+            relation owner {}
+            relation viewer {
+                rewrite union(
+                    this,
+                    computed_userset(relation: "owner")
+                )
+            }
+        }
+
+        namespace group {
+            relation member {}
+        }
+        "#,
+    )?;
+
+    let doc1 = object("doc", "one");
+    let doc2 = object("doc", "two");
+    let group = object("group", "eng");
+    let owner = Relation("owner".to_string());
+    let viewer = Relation("viewer".to_string());
+    let member = Relation("member".to_string());
+    let alice = User::UserId("alice".to_string());
+
+    service.write_tuple(tuple(doc1.clone(), owner, alice.clone()))?;
+    service.write_tuple(tuple(doc1.clone(), viewer.clone(), alice.clone()))?;
+    service.write_tuple(tuple(
+        doc2.clone(),
+        viewer.clone(),
+        User::Userset(group.clone(), member.clone()),
+    ))?;
+    service.write_tuple(tuple(group, member, alice.clone()))?;
+
+    let result = service.lookup_resources(&LookupResourcesRequest {
+        subject: alice,
+        permission: viewer,
+        resource_type: "doc".to_string(),
+    })?;
+
+    assert_eq!(result.resources, vec![doc1, doc2]);
+    Ok(())
+}
+
+#[test]
+fn test_lookup_resources_should_enforce_result_limit() -> Result<(), Box<dyn std::error::Error>> {
+    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
+        max_depth: non_zero(50),
+        max_fanout_per_step: non_zero(100),
+        max_lookup_results: std::num::NonZeroU32::MIN,
+    });
+    service.add_dsl(
+        r"
+        namespace doc {
+            relation viewer {}
+        }
+        ",
+    )?;
+    let viewer = Relation("viewer".to_string());
+    let alice = User::UserId("alice".to_string());
+    for id in ["one", "two"] {
+        service.write_tuple(tuple(object("doc", id), viewer.clone(), alice.clone()))?;
+    }
+
+    let result = service.lookup_resources(&LookupResourcesRequest {
+        subject: alice,
+        permission: viewer,
+        resource_type: "doc".to_string(),
+    })?;
+
+    assert_eq!(result.resources.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn test_lookup_subjects_should_reuse_check_semantics() -> Result<(), Box<dyn std::error::Error>> {
+    let mut service = ZanzibarService::new();
+    service.add_dsl(
+        r"
+        namespace doc {
+            relation viewer {}
+        }
+
+        namespace group {
+            relation member {}
+        }
+        ",
+    )?;
+    let doc = object("doc", "one");
+    let group = object("group", "eng");
+    let viewer = Relation("viewer".to_string());
+    let member = Relation("member".to_string());
+    let alice = User::UserId("alice".to_string());
+    service.write_tuple(tuple(
+        doc.clone(),
+        viewer.clone(),
+        User::Userset(group.clone(), member.clone()),
+    ))?;
+    service.write_tuple(tuple(group, member, alice.clone()))?;
+
+    let result = service.lookup_subjects(&LookupSubjectsRequest {
+        resource: doc,
+        permission: viewer,
+        subject_type: "user".to_string(),
+    })?;
+
+    assert_eq!(result.subjects, vec![alice]);
+    Ok(())
+}
+
+#[test]
+fn test_lookup_subjects_should_return_userset_subjects() -> Result<(), Box<dyn std::error::Error>> {
+    let mut service = ZanzibarService::new();
+    service.add_dsl(
+        r"
+        namespace doc {
+            relation viewer {}
+        }
+
+        namespace group {
+            relation member {}
+        }
+        ",
+    )?;
+    let doc = object("doc", "one");
+    let group = object("group", "eng");
+    let viewer = Relation("viewer".to_string());
+    let member = Relation("member".to_string());
+    service.write_tuple(tuple(
+        doc.clone(),
+        viewer.clone(),
+        User::Userset(group.clone(), member.clone()),
+    ))?;
+
+    let result = service.lookup_subjects(&LookupSubjectsRequest {
+        resource: doc,
+        permission: viewer,
+        subject_type: "group".to_string(),
+    })?;
+
+    assert_eq!(result.subjects, vec![User::Userset(group, member)]);
+    Ok(())
+}
+
+#[test]
+fn test_lookup_subjects_should_reject_unknown_subject_namespace(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut service = ZanzibarService::new();
+    service.add_dsl(
+        r"
+        namespace doc {
+            relation viewer {}
+        }
+        ",
+    )?;
+
+    let result = service.lookup_subjects(&LookupSubjectsRequest {
+        resource: object("doc", "one"),
+        permission: Relation("viewer".to_string()),
+        subject_type: "group".to_string(),
+    });
+
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_lookup_resources_should_honor_exact_consistency() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut service = ZanzibarService::new();
+    let schema_token = service.add_dsl_with_token(
+        r"
+        namespace doc {
+            relation viewer {}
+        }
+        ",
+    )?;
+    let viewer = Relation("viewer".to_string());
+    let alice = User::UserId("alice".to_string());
+    let first_doc = object("doc", "one");
+    let write_token =
+        service.write_tuple_with_token(&tuple(first_doc.clone(), viewer.clone(), alice.clone()))?;
+    service.write_tuple(tuple(object("doc", "two"), viewer.clone(), alice.clone()))?;
+
+    let before_writes = service.lookup_resources_with_consistency(
+        &LookupResourcesRequest {
+            subject: alice.clone(),
+            permission: viewer.clone(),
+            resource_type: "doc".to_string(),
+        },
+        Consistency::Exact(schema_token),
+    )?;
+    let after_first_write = service.lookup_resources_with_consistency(
+        &LookupResourcesRequest {
+            subject: alice,
+            permission: viewer,
+            resource_type: "doc".to_string(),
+        },
+        Consistency::Exact(write_token),
+    )?;
+
+    assert!(before_writes.resources.is_empty());
+    assert_eq!(after_first_write.resources, vec![first_doc]);
+    Ok(())
+}
+
+fn object(namespace: &str, id: &str) -> Object {
+    Object {
+        namespace: namespace.to_string(),
+        id: id.to_string(),
+    }
+}
+
+fn tuple(object: Object, relation: Relation, user: User) -> RelationTuple {
+    RelationTuple {
+        object,
+        relation,
+        user,
+    }
+}
+
+fn non_zero(value: u32) -> std::num::NonZeroU32 {
+    std::num::NonZeroU32::new(value).unwrap_or(std::num::NonZeroU32::MIN)
 }
 
 fn relationship(value: &str) -> Result<Relationship, DomainError> {
