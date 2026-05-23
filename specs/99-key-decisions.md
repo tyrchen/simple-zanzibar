@@ -113,3 +113,12 @@ Each decision is load-bearing. Supersede with a new decision entry rather than s
 - Why: direct check and lookup need fast iteration over candidate rows, not general set algebra over posting lists. Contiguous vectors are simpler, smaller, and likely faster. Roaring remains a future option if measured sparse-posting workloads need it.
 - Pinned by: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md), [72-testing-verification-plan.md](./72-testing-verification-plan.md)
 - Date: 2026-05-23
+
+## D13 - Serialize compact snapshots as stable sectioned artifacts
+
+- Context: After M6, 1M-rule steady-state RSS meets the compact-store target, but cold startup still has to construct the compact shape from logical relationships unless a prebuilt artifact exists. The latest 1M filtered benchmark takes about 2.32 s end to end, but that is not pure load time because it includes process startup, schema parse/compile, generated relationship construction, compact snapshot construction, validation, Criterion warmup, measurement, and analysis.
+- Alternatives considered: keep rebuilding from text/domain relationships; serialize Rust structs with `serde`/`bincode`; serialize runtime `HashMap` internals; define a stable sectioned compact snapshot format.
+- Decision: define a versioned `.szsnap` artifact with explicit header, section directory, schema, byte-arena symbols, compact rows, stable sorted index sections, posting ranges, and a checksum footer.
+- Why: stable sectioned bytes can be loaded with checked parsing and minimal per-relationship allocation, while avoiding unstable Rust collection internals and preserving future format evolution. The first implementation prioritizes load speed and bounded load-time RSS; compression and mmap are deferred until benchmark evidence justifies their complexity and safety tradeoffs.
+- Pinned by: [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
+- Date: 2026-05-23

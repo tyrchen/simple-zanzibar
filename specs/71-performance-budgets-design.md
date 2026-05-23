@@ -75,6 +75,27 @@ reduction trades some CPU in the compact indexes. The 1M direct check remains in
 microsecond range at 2.71 us, while inherited and lookup cases are still within the original
 budgets: inherited folder viewer is 6.61 us and lookup resources is 3.42 ms.
 
+## 3.2 Compact Snapshot Load Targets
+
+After [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md) lands,
+the benchmark matrix expands from steady-state query latency to cold-load behavior.
+
+| Operation | Dataset | Initial target |
+| --- | --- | ---: |
+| save uncompressed compact snapshot | 1M org rules | p95 <= 1.5 s |
+| load uncompressed compact snapshot, fast-load profile | 1M org rules | p95 <= 500 ms |
+| load-time max RSS | 1M org rules | <= 1.25x loaded steady-state RSS |
+| uncompressed snapshot file size | 1M org rules | <= 2x loaded steady-state RSS |
+| direct check after load | 1M org rules | p95 <= 10 us |
+| inherited check after load | 1M org rules | p95 <= 25 us |
+| lookup resources after load | 1M org rules | p95 <= 10 ms |
+
+The current 1M `org_authorization/1m_rules/check_direct_group_viewer` wall time of roughly
+2.32 s is not a load benchmark. It includes process startup, schema parse/compile, generated
+relationship construction, compact snapshot construction, scenario validation, Criterion warmup,
+measurement, and analysis. Phase M7 must add pure load benchmarks before claiming a load-speed
+improvement.
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.

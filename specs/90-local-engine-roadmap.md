@@ -104,6 +104,22 @@ Exit criteria:
 - 1M-rule org authorization benchmark max RSS <= 400 MiB
 - direct and inherited check latency budgets in [71](./71-performance-budgets-design.md) still pass
 
+### M7 - Fast Compact Snapshot Load
+
+User-visible outcome: applications can ship a prebuilt local authorization snapshot and load it quickly at startup without parsing relationship text or rebuilding all compact indexes from domain objects.
+
+Specs touched: [13](./13-revision-consistency-design.md), [16](./16-compact-relationship-store-design.md), [17](./17-compact-snapshot-format-design.md), [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- compact snapshots can be saved to a versioned `.szsnap` artifact
+- snapshot files are treated as untrusted input and reject corrupt headers, sections, checksums, symbol ids, and posting ranges
+- loaded snapshots produce equivalent check, expand, lookup, and exact consistency behavior to build-from-relationships snapshots
+- pure 1M snapshot load benchmark is measured separately from relationship generation and Criterion harness time
+- 1M uncompressed fast-load p95 <= 500 ms or the target is recalibrated with measured evidence
+- 1M load-time max RSS <= 1.25x loaded steady-state RSS
+- loaded 1M direct, inherited, and lookup latency budgets in [71](./71-performance-budgets-design.md) pass
+
 ## 3. Calendar Shape
 
 One experienced Rust developer:
@@ -115,10 +131,13 @@ One experienced Rust developer:
 - M4: 1.5 to 2 weeks
 - M5: 1 week
 - M6: 2 to 3 weeks
+- M7: 2 to 3 weeks
 
 Total through M5: 8.5 to 11 weeks, assuming no persistent backend and no caveats.
 
 Total through M6: 10.5 to 14 weeks.
+
+Total through M7: 12.5 to 17 weeks.
 
 ## 4. Cross-References
 

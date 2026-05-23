@@ -153,7 +153,28 @@ Exit criteria:
 - Existing public API, compatibility, exact snapshot, lookup, expand, and property tests remain green.
 - `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`, `cargo +nightly fmt --check`, strict clippy, `cargo audit`, and `cargo deny check` pass.
 
-## 11. Correctness of the Order
+## 11. Phase 8 - Compact Snapshot File Format
+
+Closes M7.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 8.1 | Add pure snapshot build/save/load benchmarks and `bench-snapshot` / `bench-snapshot-memory` Makefile targets. | [17](./17-compact-snapshot-format-design.md), [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+| 8.2 | Implement deterministic uncompressed `.szsnap` writer with header, section directory, schema, symbols, rows, indexes, and BLAKE3 footer. | [17](./17-compact-snapshot-format-design.md), [60](./60-crates-features-design.md), [70](./70-security-design.md) | 3 days |
+| 8.3 | Implement safe checked loader for fast-load sorted-array indexes; reject malformed untrusted files without panics. | [17](./17-compact-snapshot-format-design.md), [70](./70-security-design.md) | 4 days |
+| 8.4 | Add equivalence tests, corrupt fixture tests, golden snapshot fixture, and exact-consistency tests after load and subsequent writes. | [13](./13-revision-consistency-design.md), [17](./17-compact-snapshot-format-design.md), [72](./72-testing-verification-plan.md) | 2 days |
+| 8.5 | Add public `save_snapshot` / `load_snapshot` APIs and docs for artifact versioning, trust boundary, and token semantics. | [15](./15-public-api-design.md), [17](./17-compact-snapshot-format-design.md) | 1.5 days |
+| 8.6 | Run 1k/100k/1M load, file-size, load-RSS, and loaded-query benchmarks; update performance evidence and recalibrate only with measured data. | [17](./17-compact-snapshot-format-design.md), [71](./71-performance-budgets-design.md) | 1 day |
+
+Exit criteria:
+
+- M7 roadmap criteria pass.
+- Loaded snapshots are behaviorally equivalent to build-from-relationships snapshots for check, expand, lookup, and exact consistency.
+- Corrupt snapshot files are rejected with typed errors and no panics.
+- `snapshot_load_compact/1m` p95 <= 500 ms or target recalibration is documented with benchmark evidence.
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`, `cargo +nightly fmt --check`, strict clippy including boundary lints, `cargo audit`, and `cargo deny check` pass.
+
+## 12. Correctness of the Order
 
 The order is correct because:
 
@@ -163,10 +184,12 @@ The order is correct because:
 - membership algebra blocks shared check/expand/lookup semantics
 - benchmark gates are meaningful only after indexed store and evaluator exist
 - compact storage is valuable only after the full indexed/snapshot/evaluator path exists and benchmark evidence identifies memory as the limiting resource
+- compact snapshot serialization is valuable only after the in-memory compact representation is stable and memory evidence identifies cold load as the next bottleneck
 
-## 12. Cross-References
+## 13. Cross-References
 
 - Stakeholder roadmap: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md)
 - Key decisions: [99-key-decisions.md](./99-key-decisions.md)
 - Verification gates: [72-testing-verification-plan.md](./72-testing-verification-plan.md)
 - Compact store design: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
+- Compact snapshot format: [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md)

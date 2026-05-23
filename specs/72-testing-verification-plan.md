@@ -51,6 +51,7 @@ This plan defines how each phase proves correctness, safety, compatibility, and 
 | Security | no panics on malformed external input, no unchecked indexing in boundary modules. |
 | Performance | criterion benchmarks for budgets in [71](./71-performance-budgets-design.md). |
 | Memory | peak RSS checks for compact relationship store budgets in [16](./16-compact-relationship-store-design.md). |
+| Snapshot artifact | save/load equivalence, corrupt file rejection, file size, load time, and load-time RSS for [17](./17-compact-snapshot-format-design.md). |
 
 ## 4. Command Gates
 
@@ -93,6 +94,7 @@ Property tests cover:
 - exact snapshot isolation across random write/read interleavings
 - compact store query equivalence against a reference `HashSet<Relationship>` after random create/touch/delete batches
 - tombstone compaction preserves all live relationships and removes deleted relationships
+- compact snapshot save/load preserves query results for random compact stores
 
 ## 7. Memory Verification
 
@@ -116,8 +118,36 @@ org_authorization/1m_rules/check_direct_group_viewer
 
 The lightweight parse benchmark is the process/harness baseline. The org-rule measurements are compared against [71-performance-budgets-design.md § 3](./71-performance-budgets-design.md#3-initial-targets).
 
-## 8. Cross-References
+## 8. Snapshot Artifact Verification
+
+Compact snapshot file format phases add release-mode benchmarks and corrupt-input tests before exposing public load APIs.
+
+Required benchmark filters:
+
+```text
+snapshot_build_from_relationships/1m
+snapshot_save_uncompressed/1m
+snapshot_load_compact/1m
+snapshot_load_peak_rss/1m
+snapshot_file_size/1m
+```
+
+Required corrupt-input tests:
+
+- bad magic/version/header length
+- duplicate or missing required section
+- overlapping or out-of-bounds section
+- checksum mismatch
+- malformed UTF-8 symbol bytes
+- invalid symbol id or row id
+- unsorted index keys
+- posting range outside the posting row id section
+
+Loaded snapshots must pass check, expand, lookup, and exact-consistency equivalence tests against a snapshot built from the same relationship set.
+
+## 9. Cross-References
 
 - <- Depends on: [70-security-design.md](./70-security-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md)
 - -> Consumed by: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Memory layout: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
+- Snapshot artifact format: [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md)
