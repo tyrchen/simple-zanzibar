@@ -17,7 +17,7 @@ This spec defines a versioned compact snapshot artifact that is close to the fin
 
 | # | Goal | Measure |
 | --- | --- | --- |
-| G1 | Load a 1M-rule compact snapshot substantially faster than rebuilding from logical rules. | `snapshot_load_compact/1m` p95 <= 500 ms on the reference machine after the file is already on local SSD. |
+| G1 | Load a 1M-rule compact snapshot substantially faster than rebuilding from logical rules. | `snapshot_load_compact/1m` Criterion upper estimate <= 700 ms on the reference machine after the file is already on local SSD. |
 | G2 | Keep load-time peak RSS close to final steady-state RSS. | `snapshot_load_compact/1m` max RSS <= 1.25x the loaded snapshot RSS. |
 | G3 | Keep disk size practical without slowing the fast path. | Uncompressed 1M snapshot artifact <= 2x final steady-state compact RSS; compressed artifact is optional and benchmark-gated. |
 | G4 | Preserve correctness and compatibility. | Loaded snapshots produce identical check, expand, lookup, and exact consistency behavior to snapshots built from relationships. |
@@ -428,14 +428,14 @@ Initial targets on the reference machine:
 
 | Operation | Dataset | Target |
 | --- | --- | ---: |
-| build compact snapshot from generated relationships | 1M | p95 recorded, not gate for first phase |
-| save uncompressed snapshot | 1M | p95 <= 1.5 s |
-| load fast-load uncompressed snapshot | 1M | p95 <= 500 ms |
+| build compact snapshot from generated relationships | 1M | Criterion estimate recorded, not gate for first phase |
+| save uncompressed snapshot | 1M | Criterion upper estimate <= 1.5 s |
+| load fast-load uncompressed snapshot | 1M | Criterion upper estimate <= 700 ms |
 | load-time max RSS | 1M | <= 1.25x loaded steady-state RSS |
 | file size uncompressed | 1M | <= 2x loaded steady-state RSS |
-| direct check after load | 1M | p95 <= 10 us |
-| inherited check after load | 1M | p95 <= 25 us |
-| lookup resources after load | 1M | p95 <= 10 ms |
+| direct check after load | 1M | Criterion upper estimate <= 10 us |
+| inherited check after load | 1M | Criterion upper estimate <= 25 us |
+| lookup resources after load | 1M | Criterion upper estimate <= 10 ms |
 
 If the first measured build shows a different bottleneck, update this spec and [71-performance-budgets-design.md](./71-performance-budgets-design.md) with evidence before changing the format.
 
@@ -488,7 +488,9 @@ Exit: loaded tiny and medium fixtures pass check/expand/lookup equivalence.
 - Tune sorted index layout only with benchmark evidence.
 - Add optional latency-profile reindexing only if fast-load misses check budgets.
 
-Exit: 1M load <= 500 ms or documented target recalibration with evidence; loaded query budgets pass.
+Exit: 1M load Criterion upper estimate <= 700 ms after the 2026-05-23 target recalibration in
+[71-performance-budgets-design.md § 3.3](./71-performance-budgets-design.md#33-m7-compact-snapshot-measurements);
+loaded query budgets pass.
 
 ### M7.5 - Public API and Docs
 

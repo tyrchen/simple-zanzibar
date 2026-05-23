@@ -72,18 +72,26 @@ pub mod parser;
 pub mod relationship;
 pub mod revision;
 pub mod schema;
+pub mod snapshot;
 pub mod store;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt,
     num::NonZeroUsize,
+    path::Path,
     sync::Arc,
 };
 
 use arc_swap::ArcSwapOption;
 
-pub use crate::api::{EngineError, ZanzibarEngine, ZanzibarEngineBuilder};
+pub use crate::{
+    api::{EngineError, ZanzibarEngine, ZanzibarEngineBuilder},
+    snapshot::{
+        SnapshotCompression, SnapshotIoError, SnapshotLoadOptions, SnapshotLoadProfile,
+        SnapshotSaveOptions,
+    },
+};
 use crate::{
     error::ZanzibarError,
     eval::EvaluationLimits,
@@ -498,6 +506,63 @@ impl ZanzibarService {
     ) -> Result<LookupSubjects, ZanzibarError> {
         let snapshot = self.snapshot_for_consistency(consistency)?;
         eval::lookup_subjects_with_snapshot(&snapshot, request, self.evaluation_limits)
+    }
+
+    /// Saves the latest published snapshot to a versioned `.szsnap` artifact.
+    ///
+    /// Snapshot artifacts are deterministic for the same published snapshot and are intended for
+    /// trusted build pipelines to ship prebuilt local authorization data. The loader still treats
+    /// the file as untrusted input and validates every section before publishing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotIoError`] when no schema snapshot is loaded, the selected options are not
+    /// supported by format version 1, or the file cannot be written.
+    pub fn save_snapshot(
+        &self,
+        path: impl AsRef<Path>,
+        options: SnapshotSaveOptions,
+    ) -> Result<(), SnapshotIoError> {
+        let snapshot = self
+            .current_snapshot
+            .load_full()
+            .ok_or(SnapshotIoError::Format {
+                reason: "schema snapshot is required before saving",
+            })?;
+        snapshot::save_snapshot_file(path.as_ref(), &snapshot, options)
+    }
+
+    /// Loads a versioned `.szsnap` artifact into a new service instance.
+    ///
+    /// The loaded service receives a new datastore id, so consistency tokens from the writer
+    /// process are intentionally rejected. The artifact revision becomes the loaded service's
+    /// latest revision, and the exact-snapshot history contains only that one snapshot until later
+    /// writes publish new revisions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotIoError`] when the file cannot be read, exceeds the configured byte cap,
+    /// fails format validation, has a bad checksum, or contains invalid schema/relationship data.
+    pub fn load_snapshot(
+        path: impl AsRef<Path>,
+        options: SnapshotLoadOptions,
+    ) -> Result<Self, SnapshotIoError> {
+        let loaded = snapshot::load_snapshot_file(path.as_ref(), options)?;
+        let snapshot = Arc::new(PublishedSnapshot::new(
+            loaded.revision,
+            loaded.schema_hash,
+            Arc::new(loaded.configs.clone()),
+            Arc::new(loaded.schema.clone()),
+            Arc::clone(&loaded.relationships),
+        ));
+        let mut service = Self::with_snapshot_retention(snapshot::one_snapshot_retention());
+        service.configs = loaded.configs;
+        service.schema = Some(loaded.schema);
+        service.relationships = loaded.relationships;
+        service.current_snapshot.store(Some(Arc::clone(&snapshot)));
+        service.snapshot_history.push_back(snapshot);
+        service.last_revision = Some(loaded.revision);
+        Ok(service)
     }
 
     fn relationship_store_for_schema(

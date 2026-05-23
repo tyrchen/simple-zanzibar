@@ -2,6 +2,7 @@
 
 use std::{
     num::NonZeroUsize,
+    path::Path,
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
@@ -19,6 +20,7 @@ use crate::{
     relationship::{Precondition, RelationshipMutation, StoreError},
     revision::{ConsistencyError, ConsistencyToken, default_retained_snapshots},
     schema::{SchemaError, SchemaSource},
+    snapshot::{SnapshotIoError, SnapshotLoadOptions, SnapshotSaveOptions},
 };
 
 macro_rules! enter_api_span {
@@ -249,6 +251,48 @@ impl ZanzibarEngine {
         enter_api_span!("apply_schema");
         let mut service = self.write_service("apply_schema")?;
         Ok(service.add_dsl_with_token(source.text)?)
+    }
+
+    /// Saves the latest published snapshot to a versioned `.szsnap` artifact.
+    ///
+    /// This writes a deterministic deployment artifact for trusted build or release pipelines.
+    /// The artifact does not preserve the engine's datastore id; consistency tokens issued before
+    /// saving remain scoped to the writer engine and are not accepted by later loaded engines.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotIoError`] when no schema is loaded, the save options are unsupported, or
+    /// the artifact cannot be written.
+    pub fn save_snapshot(
+        &self,
+        path: impl AsRef<Path>,
+        options: SnapshotSaveOptions,
+    ) -> Result<(), SnapshotIoError> {
+        enter_api_span!("save_snapshot");
+        let service = self.service.read().map_err(|_| SnapshotIoError::Format {
+            reason: "engine lock poisoned during snapshot save",
+        })?;
+        service.save_snapshot(path, options)
+    }
+
+    /// Loads a versioned `.szsnap` artifact into a new engine.
+    ///
+    /// Snapshot files are treated as untrusted input: the loader validates the envelope, section
+    /// directory, checksum, schema, relationships, and indexes before publishing the snapshot. The
+    /// loaded engine receives a fresh datastore id, so exact consistency tokens from the writer
+    /// process are rejected by design.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotIoError`] when the artifact cannot be read or fails validation.
+    pub fn load_snapshot(
+        path: impl AsRef<Path>,
+        options: SnapshotLoadOptions,
+    ) -> Result<Self, SnapshotIoError> {
+        enter_api_span!("load_snapshot");
+        Ok(Self {
+            service: RwLock::new(ZanzibarService::load_snapshot(path, options)?),
+        })
     }
 
     fn read_service(

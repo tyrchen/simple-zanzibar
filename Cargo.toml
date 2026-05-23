@@ -55,6 +55,11 @@ name = "org_authorization"
 harness = false
 test = false
 
+[[bench]]
+name = "snapshot"
+harness = false
+test = false
+
 [[example]]
 name = "file_permissions"
 path = "examples/file_permissions.rs"

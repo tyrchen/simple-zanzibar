@@ -2,7 +2,7 @@
 
 use std::{
     collections::{
-        HashMap, HashSet,
+        BTreeMap, HashMap, HashSet,
         hash_map::{DefaultHasher, Entry},
     },
     hash::{Hash, Hasher},
@@ -19,12 +19,25 @@ use crate::{
     },
     error::ZanzibarError,
     model::User,
+    snapshot::{
+        BinaryCursor, SectionKind, SnapshotIoError, SnapshotLoadProfile, SnapshotReader,
+        SnapshotSectionWriter, checked_add_usize, checked_mul_usize, checked_u32_from_usize,
+        checked_usize_from_u32, checked_usize_from_u64, insert_unique,
+    },
 };
 
 const DEFAULT_QUERY_LIMIT: usize = 1_000;
 const MAX_MUTATIONS_PER_BATCH: usize = 10_000;
 const MAX_PRECONDITIONS_PER_BATCH: usize = 100;
 const COMPACT_DEAD_ROWS: usize = 100_000;
+const DISK_SYMBOL_LEN: usize = 8;
+const DISK_RELATIONSHIP_ROW_LEN: usize = 24;
+const DISK_INDEX_DIRECTORY_LEN: usize = 20;
+const DISK_INDEX_KEY_LEN: usize = 12;
+const DISK_POSTING_RANGE_LEN: usize = 12;
+const DISK_ROW_ID_LEN: usize = 4;
+const SNAPSHOT_INDEX_KIND_COUNT: usize = 7;
+const SNAPSHOT_INDEX_KIND_COUNT_U64: u64 = SNAPSHOT_INDEX_KIND_COUNT as u64;
 
 /// Errors produced by the indexed relationship store.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -561,6 +574,117 @@ impl IndexedRelationshipStore {
             .collect()
     }
 
+    pub(crate) fn encode_snapshot_sections(
+        &self,
+        writer: &mut SnapshotSectionWriter,
+    ) -> Result<(), SnapshotIoError> {
+        let mut symbol_table = Vec::with_capacity(
+            self.interner
+                .entries
+                .len()
+                .checked_mul(DISK_SYMBOL_LEN)
+                .ok_or(SnapshotIoError::Format {
+                    reason: "symbol table length overflowed",
+                })?,
+        );
+        for entry in &self.interner.entries {
+            symbol_table.extend_from_slice(&entry.start.to_le_bytes());
+            symbol_table.extend_from_slice(&entry.len.to_le_bytes());
+        }
+        writer.add_section(
+            SectionKind::SymbolBytes,
+            self.interner.bytes.clone(),
+            u64::try_from(self.interner.bytes.len()).map_err(|_| {
+                SnapshotIoError::LimitExceeded {
+                    component: "symbol bytes",
+                }
+            })?,
+        )?;
+        writer.add_section(
+            SectionKind::SymbolTable,
+            symbol_table,
+            u64::try_from(self.interner.entries.len()).map_err(|_| {
+                SnapshotIoError::LimitExceeded {
+                    component: "symbol table",
+                }
+            })?,
+        )?;
+
+        let disk_rows = self.live_disk_rows();
+        let mut rows = Vec::with_capacity(
+            disk_rows
+                .len()
+                .checked_mul(DISK_RELATIONSHIP_ROW_LEN)
+                .ok_or(SnapshotIoError::Format {
+                    reason: "relationship rows length overflowed",
+                })?,
+        );
+        for row in &disk_rows {
+            row.encode(&mut rows);
+        }
+        writer.add_section(
+            SectionKind::RelationshipRows,
+            rows,
+            u64::try_from(disk_rows.len()).map_err(|_| SnapshotIoError::LimitExceeded {
+                component: "relationship rows",
+            })?,
+        )?;
+
+        let indexes = EncodedSnapshotIndexes::from_rows(&disk_rows)?;
+        writer.add_section(
+            SectionKind::IndexDirectory,
+            indexes.directory,
+            SNAPSHOT_INDEX_KIND_COUNT_U64,
+        )?;
+        writer.add_section(SectionKind::IndexKeys, indexes.keys, indexes.key_count)?;
+        writer.add_section(
+            SectionKind::PostingRanges,
+            indexes.ranges,
+            indexes.range_count,
+        )?;
+        writer.add_section(
+            SectionKind::PostingRowIds,
+            indexes.posting_row_ids,
+            indexes.posting_row_id_count,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn decode_snapshot_sections(
+        reader: &SnapshotReader<'_>,
+        profile: SnapshotLoadProfile,
+    ) -> Result<Self, SnapshotIoError> {
+        let interner = IdentifierInterner::decode_snapshot_sections(reader)?;
+        let (rows, live_rows, uniqueness) = decode_snapshot_rows(reader, &interner)?;
+        let decoded_indexes = DecodedSnapshotIndexes::decode(reader, &rows, profile)?;
+        Ok(Self {
+            interner,
+            rows,
+            live_rows,
+            dead_row_count: 0,
+            uniqueness,
+            by_resource: decoded_indexes.resource,
+            by_resource_object: decoded_indexes.resource_object,
+            by_resource_type_relation: decoded_indexes.resource_type_relation,
+            by_resource_type: decoded_indexes.resource_type,
+            by_subject: decoded_indexes.subject,
+            by_subject_type_relation: decoded_indexes.subject_type_relation,
+            by_subject_type: decoded_indexes.subject_type,
+        })
+    }
+
+    fn live_disk_rows(&self) -> Vec<DiskRelationshipRow> {
+        let mut rows = Vec::with_capacity(self.rows.len().saturating_sub(self.dead_row_count));
+        for row in self
+            .rows
+            .iter()
+            .filter(|row| self.live_rows.contains(row.row_id))
+        {
+            rows.push(DiskRelationshipRow::from(row));
+        }
+        rows
+    }
+
     pub(crate) fn query_compact_relationships(
         &self,
         filter: &RelationshipFilter,
@@ -1088,14 +1212,21 @@ impl Iterator for CandidateRowIds<'_> {
 }
 
 #[derive(Debug, Clone)]
-struct PostingIndex<K> {
-    primary: HashMap<K, RowId>,
-    overflow: HashMap<K, Vec<RowId>>,
+enum PostingIndex<K> {
+    Hash {
+        primary: HashMap<K, RowId>,
+        overflow: HashMap<K, Vec<RowId>>,
+    },
+    Sorted {
+        keys: Vec<K>,
+        ranges: Vec<RuntimePostingRange>,
+        overflow: Vec<RowId>,
+    },
 }
 
 impl<K> Default for PostingIndex<K> {
     fn default() -> Self {
-        Self {
+        Self::Hash {
             primary: HashMap::new(),
             overflow: HashMap::new(),
         }
@@ -1104,29 +1235,106 @@ impl<K> Default for PostingIndex<K> {
 
 impl<K> PostingIndex<K>
 where
-    K: Copy + Eq + Hash,
+    K: Copy + Eq + Hash + Ord,
 {
+    fn from_sorted(keys: Vec<K>, ranges: Vec<RuntimePostingRange>, overflow: Vec<RowId>) -> Self {
+        Self::Sorted {
+            keys,
+            ranges,
+            overflow,
+        }
+    }
+
     fn insert(&mut self, key: K, row_id: RowId) {
-        match self.primary.entry(key) {
-            Entry::Vacant(entry) => {
-                entry.insert(row_id);
-            }
-            Entry::Occupied(_) => {
-                self.overflow.entry(key).or_default().push(row_id);
+        self.ensure_hash_profile();
+        if let Self::Hash { primary, overflow } = self {
+            match primary.entry(key) {
+                Entry::Vacant(entry) => {
+                    entry.insert(row_id);
+                }
+                Entry::Occupied(_) => {
+                    overflow.entry(key).or_default().push(row_id);
+                }
             }
         }
     }
 
     fn candidates(&self, key: &K) -> CandidateRowIds<'_> {
-        match (self.primary.get(key).copied(), self.overflow.get(key)) {
-            (Some(row_id), Some(row_ids)) => CandidateRowIds::OneThenSlice {
-                first: Some(row_id),
+        match self {
+            Self::Hash { primary, overflow } => {
+                match (primary.get(key).copied(), overflow.get(key)) {
+                    (Some(row_id), Some(row_ids)) => CandidateRowIds::OneThenSlice {
+                        first: Some(row_id),
+                        rest: row_ids.iter(),
+                    },
+                    (Some(row_id), None) => CandidateRowIds::One(Some(row_id)),
+                    (None, Some(row_ids)) => CandidateRowIds::Slice(row_ids.iter()),
+                    (None, None) => CandidateRowIds::Empty,
+                }
+            }
+            Self::Sorted {
+                keys,
+                ranges,
+                overflow,
+            } => match keys.binary_search(key) {
+                Ok(index) => ranges
+                    .get(index)
+                    .map_or(CandidateRowIds::Empty, |range| range.candidates(overflow)),
+                Err(_) => CandidateRowIds::Empty,
+            },
+        }
+    }
+
+    fn ensure_hash_profile(&mut self) {
+        let Self::Sorted {
+            keys,
+            ranges,
+            overflow,
+        } = self
+        else {
+            return;
+        };
+        let mut primary = HashMap::with_capacity(keys.len());
+        let mut overflow_map = HashMap::new();
+        for (key, range) in keys.iter().copied().zip(ranges.iter().copied()) {
+            primary.insert(key, range.first_row_id);
+            if let Some(row_ids) = range.overflow_slice(overflow) {
+                overflow_map.insert(key, row_ids.to_vec());
+            }
+        }
+        *self = Self::Hash {
+            primary,
+            overflow: overflow_map,
+        };
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimePostingRange {
+    first_row_id: RowId,
+    overflow_start: u32,
+    overflow_len: u32,
+}
+
+impl RuntimePostingRange {
+    fn candidates<'a>(&self, overflow: &'a [RowId]) -> CandidateRowIds<'a> {
+        match self.overflow_slice(overflow) {
+            Some(row_ids) => CandidateRowIds::OneThenSlice {
+                first: Some(self.first_row_id),
                 rest: row_ids.iter(),
             },
-            (Some(row_id), None) => CandidateRowIds::One(Some(row_id)),
-            (None, Some(row_ids)) => CandidateRowIds::Slice(row_ids.iter()),
-            (None, None) => CandidateRowIds::Empty,
+            None => CandidateRowIds::One(Some(self.first_row_id)),
         }
+    }
+
+    fn overflow_slice<'a>(&self, overflow: &'a [RowId]) -> Option<&'a [RowId]> {
+        if self.overflow_len == 0 {
+            return None;
+        }
+        let start = usize::try_from(self.overflow_start).ok()?;
+        let len = usize::try_from(self.overflow_len).ok()?;
+        let end = start.checked_add(len)?;
+        overflow.get(start..end)
     }
 }
 
@@ -1173,6 +1381,22 @@ impl SymbolId {
         Ok(Self(value))
     }
 
+    fn from_snapshot_raw(value: u32, symbol_count: u32) -> Result<Self, SnapshotIoError> {
+        let value = NonZeroU32::new(value).ok_or(SnapshotIoError::Format {
+            reason: "symbol id must be non-zero",
+        })?;
+        if value.get() > symbol_count {
+            return Err(SnapshotIoError::Format {
+                reason: "symbol id is out of bounds",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    fn get(self) -> u32 {
+        self.0.get()
+    }
+
     fn index(self) -> usize {
         usize::try_from(self.0.get().saturating_sub(1)).unwrap_or(usize::MAX)
     }
@@ -1208,6 +1432,18 @@ impl RowId {
         Ok(Self(value))
     }
 
+    fn from_snapshot_raw(value: u32, row_count: u32) -> Result<Self, SnapshotIoError> {
+        let value = NonZeroU32::new(value).ok_or(SnapshotIoError::Format {
+            reason: "row id must be non-zero",
+        })?;
+        if value.get() > row_count {
+            return Err(SnapshotIoError::Format {
+                reason: "row id is out of bounds",
+            });
+        }
+        Ok(Self(value))
+    }
+
     fn index(self) -> usize {
         usize::try_from(self.0.get().saturating_sub(1)).unwrap_or(usize::MAX)
     }
@@ -1222,6 +1458,102 @@ struct IdentifierInterner {
 }
 
 impl IdentifierInterner {
+    fn decode_snapshot_sections(reader: &SnapshotReader<'_>) -> Result<Self, SnapshotIoError> {
+        let header = reader.header();
+        let bytes = reader.section(SectionKind::SymbolBytes)?;
+        let table = reader.section(SectionKind::SymbolTable)?;
+        let symbol_count = checked_usize_from_u32(header.symbol_count)?;
+        if table.row_count() != u64::from(header.symbol_count) {
+            return Err(SnapshotIoError::Format {
+                reason: "symbol table row count does not match header",
+            });
+        }
+        let expected_len = checked_mul_usize(symbol_count, DISK_SYMBOL_LEN)?;
+        if table.bytes().len() != expected_len {
+            return Err(SnapshotIoError::Format {
+                reason: "symbol table length does not match symbol count",
+            });
+        }
+
+        let mut cursor = BinaryCursor::new(table.bytes());
+        let mut entries = Vec::with_capacity(symbol_count);
+        for _ in 0..symbol_count {
+            let start = cursor.read_u32()?;
+            let len = cursor.read_u32()?;
+            let start_usize = checked_usize_from_u32(start)?;
+            let len_usize = checked_usize_from_u32(len)?;
+            let end = checked_add_usize(start_usize, len_usize)?;
+            let symbol_bytes =
+                bytes
+                    .bytes()
+                    .get(start_usize..end)
+                    .ok_or(SnapshotIoError::Format {
+                        reason: "symbol byte range is out of bounds",
+                    })?;
+            str::from_utf8(symbol_bytes).map_err(|_| SnapshotIoError::Format {
+                reason: "symbol bytes are not valid utf-8",
+            })?;
+            entries.push(InternedString { start, len });
+        }
+        if !cursor.is_empty() {
+            return Err(SnapshotIoError::Format {
+                reason: "symbol table has trailing bytes",
+            });
+        }
+        Self::from_snapshot_parts(bytes.bytes().to_vec(), entries)
+    }
+
+    fn from_snapshot_parts(
+        bytes: Vec<u8>,
+        entries: Vec<InternedString>,
+    ) -> Result<Self, SnapshotIoError> {
+        let mut interner = Self {
+            bytes,
+            entries,
+            ids_by_hash: HashMap::new(),
+            hash_collisions: HashMap::new(),
+        };
+        for index in 0..interner.entries.len() {
+            let id = SymbolId::from_index(index)?;
+            let (hash, hash_exists, duplicate) = {
+                let value = interner.resolve(id)?;
+                let hash = hash_value(value);
+                (
+                    hash,
+                    interner.ids_by_hash.contains_key(&hash),
+                    interner.has_symbol_value(hash, value)?,
+                )
+            };
+            if duplicate {
+                return Err(SnapshotIoError::Format {
+                    reason: "duplicate symbol in snapshot",
+                });
+            }
+            if hash_exists {
+                interner.hash_collisions.entry(hash).or_default().push(id);
+            } else {
+                interner.ids_by_hash.insert(hash, id);
+            }
+        }
+        Ok(interner)
+    }
+
+    fn has_symbol_value(&self, hash: u64, value: &str) -> Result<bool, StoreError> {
+        if let Some(id) = self.ids_by_hash.get(&hash).copied()
+            && self.resolve(id)? == value
+        {
+            return Ok(true);
+        }
+        if let Some(ids) = self.hash_collisions.get(&hash) {
+            for id in ids {
+                if self.resolve(*id)? == value {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     fn intern(&mut self, value: &str) -> Result<SymbolId, StoreError> {
         if let Some(id) = self.lookup(value) {
             return Ok(id);
@@ -1523,7 +1855,7 @@ impl RelationshipRow {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ResourceIndexKey {
     object_type: ObjectTypeId,
     object_id: ObjectIdId,
@@ -1540,7 +1872,7 @@ impl From<&RelationshipRow> for ResourceIndexKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ResourceObjectIndexKey {
     object_type: ObjectTypeId,
     object_id: ObjectIdId,
@@ -1555,7 +1887,7 @@ impl From<&RelationshipRow> for ResourceObjectIndexKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ResourceTypeRelationIndexKey {
     object_type: ObjectTypeId,
     relation: RelationId,
@@ -1570,7 +1902,7 @@ impl From<&RelationshipRow> for ResourceTypeRelationIndexKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct SubjectIndexKey {
     subject_type: SubjectTypeId,
     subject_id: SubjectIdId,
@@ -1601,7 +1933,7 @@ impl SubjectIndexKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct SubjectTypeRelationIndexKey {
     subject_type: SubjectTypeId,
     relation: RelationId,
@@ -1614,6 +1946,980 @@ impl SubjectTypeRelationIndexKey {
             relation,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct DiskRelationshipRow {
+    resource_type: u32,
+    resource_id: u32,
+    relation: u32,
+    subject_type: u32,
+    subject_id: u32,
+    subject_relation: u32,
+}
+
+impl DiskRelationshipRow {
+    fn encode(&self, target: &mut Vec<u8>) {
+        target.extend_from_slice(&self.resource_type.to_le_bytes());
+        target.extend_from_slice(&self.resource_id.to_le_bytes());
+        target.extend_from_slice(&self.relation.to_le_bytes());
+        target.extend_from_slice(&self.subject_type.to_le_bytes());
+        target.extend_from_slice(&self.subject_id.to_le_bytes());
+        target.extend_from_slice(&self.subject_relation.to_le_bytes());
+    }
+}
+
+impl From<&RelationshipRow> for DiskRelationshipRow {
+    fn from(value: &RelationshipRow) -> Self {
+        Self {
+            resource_type: value.resource_type.0.get(),
+            resource_id: value.resource_id.0.get(),
+            relation: value.relation.0.get(),
+            subject_type: value.subject_type.0.get(),
+            subject_id: value.subject_id.0.get(),
+            subject_relation: value
+                .subject_relation
+                .map_or(0, |relation| relation.0.get()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct DiskIndexKey {
+    first: u32,
+    second: u32,
+    third: u32,
+}
+
+impl DiskIndexKey {
+    fn encode(&self, target: &mut Vec<u8>) {
+        target.extend_from_slice(&self.first.to_le_bytes());
+        target.extend_from_slice(&self.second.to_le_bytes());
+        target.extend_from_slice(&self.third.to_le_bytes());
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DiskPostingRange {
+    first_row_id: u32,
+    overflow_start: u32,
+    overflow_len: u32,
+}
+
+impl DiskPostingRange {
+    fn encode(&self, target: &mut Vec<u8>) {
+        target.extend_from_slice(&self.first_row_id.to_le_bytes());
+        target.extend_from_slice(&self.overflow_start.to_le_bytes());
+        target.extend_from_slice(&self.overflow_len.to_le_bytes());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum SnapshotIndexKind {
+    Resource = 1,
+    ResourceObject = 2,
+    ResourceTypeRelation = 3,
+    ResourceType = 4,
+    Subject = 5,
+    SubjectTypeRelation = 6,
+    SubjectType = 7,
+}
+
+impl SnapshotIndexKind {
+    const ALL: [Self; SNAPSHOT_INDEX_KIND_COUNT] = [
+        Self::Resource,
+        Self::ResourceObject,
+        Self::ResourceTypeRelation,
+        Self::ResourceType,
+        Self::Subject,
+        Self::SubjectTypeRelation,
+        Self::SubjectType,
+    ];
+
+    fn from_raw(value: u16) -> Result<Self, SnapshotIoError> {
+        match value {
+            1 => Ok(Self::Resource),
+            2 => Ok(Self::ResourceObject),
+            3 => Ok(Self::ResourceTypeRelation),
+            4 => Ok(Self::ResourceType),
+            5 => Ok(Self::Subject),
+            6 => Ok(Self::SubjectTypeRelation),
+            7 => Ok(Self::SubjectType),
+            _ => Err(SnapshotIoError::Format {
+                reason: "unknown snapshot index kind",
+            }),
+        }
+    }
+
+    const fn raw(self) -> u16 {
+        self as u16
+    }
+}
+
+#[derive(Debug)]
+struct EncodedSnapshotIndexes {
+    directory: Vec<u8>,
+    keys: Vec<u8>,
+    ranges: Vec<u8>,
+    posting_row_ids: Vec<u8>,
+    key_count: u64,
+    range_count: u64,
+    posting_row_id_count: u64,
+}
+
+impl EncodedSnapshotIndexes {
+    fn from_rows(rows: &[DiskRelationshipRow]) -> Result<Self, SnapshotIoError> {
+        let mut groups = SnapshotIndexGroups::default();
+        for (index, row) in rows.iter().copied().enumerate() {
+            let row_id =
+                checked_u32_from_usize(index.checked_add(1).ok_or(SnapshotIoError::Format {
+                    reason: "row id overflowed",
+                })?)?;
+            groups.insert_row(row, row_id);
+        }
+
+        let mut directory = Vec::with_capacity(
+            SNAPSHOT_INDEX_KIND_COUNT
+                .checked_mul(DISK_INDEX_DIRECTORY_LEN)
+                .ok_or(SnapshotIoError::Format {
+                    reason: "index directory length overflowed",
+                })?,
+        );
+        let mut keys = Vec::new();
+        let mut ranges = Vec::new();
+        let mut posting_row_ids = Vec::new();
+        let mut key_count = 0_u32;
+        let mut range_count = 0_u32;
+        let mut posting_row_id_count = 0_u32;
+
+        for kind in SnapshotIndexKind::ALL {
+            let group = groups.group(kind);
+            let key_start = key_count;
+            let range_start = range_count;
+            for (key, row_ids) in group {
+                key.encode(&mut keys);
+                let range = encode_posting_range(row_ids, &mut posting_row_ids)?;
+                range.encode(&mut ranges);
+                key_count = key_count.checked_add(1).ok_or(SnapshotIoError::Format {
+                    reason: "index key count overflowed",
+                })?;
+                range_count = range_count.checked_add(1).ok_or(SnapshotIoError::Format {
+                    reason: "posting range count overflowed",
+                })?;
+                posting_row_id_count =
+                    u32::try_from(posting_row_ids.len().checked_div(DISK_ROW_ID_LEN).ok_or(
+                        SnapshotIoError::Format {
+                            reason: "posting row id length overflowed",
+                        },
+                    )?)
+                    .map_err(|_| SnapshotIoError::LimitExceeded {
+                        component: "posting row ids",
+                    })?;
+            }
+            let group_len = checked_u32_from_usize(group.len())?;
+            directory.extend_from_slice(&kind.raw().to_le_bytes());
+            directory.extend_from_slice(&0_u16.to_le_bytes());
+            directory.extend_from_slice(&key_start.to_le_bytes());
+            directory.extend_from_slice(&group_len.to_le_bytes());
+            directory.extend_from_slice(&range_start.to_le_bytes());
+            directory.extend_from_slice(&group_len.to_le_bytes());
+        }
+
+        Ok(Self {
+            directory,
+            keys,
+            ranges,
+            posting_row_ids,
+            key_count: u64::from(key_count),
+            range_count: u64::from(range_count),
+            posting_row_id_count: u64::from(posting_row_id_count),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct SnapshotIndexGroups {
+    resource: BTreeMap<DiskIndexKey, Vec<u32>>,
+    resource_object: BTreeMap<DiskIndexKey, Vec<u32>>,
+    resource_type_relation: BTreeMap<DiskIndexKey, Vec<u32>>,
+    resource_type: BTreeMap<DiskIndexKey, Vec<u32>>,
+    subject: BTreeMap<DiskIndexKey, Vec<u32>>,
+    subject_type_relation: BTreeMap<DiskIndexKey, Vec<u32>>,
+    subject_type: BTreeMap<DiskIndexKey, Vec<u32>>,
+}
+
+impl SnapshotIndexGroups {
+    fn insert_row(&mut self, row: DiskRelationshipRow, row_id: u32) {
+        self.resource
+            .entry(DiskIndexKey {
+                first: row.resource_type,
+                second: row.resource_id,
+                third: row.relation,
+            })
+            .or_default()
+            .push(row_id);
+        self.resource_object
+            .entry(DiskIndexKey {
+                first: row.resource_type,
+                second: row.resource_id,
+                third: 0,
+            })
+            .or_default()
+            .push(row_id);
+        self.resource_type_relation
+            .entry(DiskIndexKey {
+                first: row.resource_type,
+                second: row.relation,
+                third: 0,
+            })
+            .or_default()
+            .push(row_id);
+        self.resource_type
+            .entry(DiskIndexKey {
+                first: row.resource_type,
+                second: 0,
+                third: 0,
+            })
+            .or_default()
+            .push(row_id);
+        self.subject
+            .entry(DiskIndexKey {
+                first: row.subject_type,
+                second: row.subject_id,
+                third: row.subject_relation,
+            })
+            .or_default()
+            .push(row_id);
+        if row.subject_relation != 0 {
+            self.subject
+                .entry(DiskIndexKey {
+                    first: row.subject_type,
+                    second: row.subject_id,
+                    third: 0,
+                })
+                .or_default()
+                .push(row_id);
+            self.subject_type_relation
+                .entry(DiskIndexKey {
+                    first: row.subject_type,
+                    second: row.subject_relation,
+                    third: 0,
+                })
+                .or_default()
+                .push(row_id);
+        }
+        self.subject_type
+            .entry(DiskIndexKey {
+                first: row.subject_type,
+                second: 0,
+                third: 0,
+            })
+            .or_default()
+            .push(row_id);
+    }
+
+    fn group(&self, kind: SnapshotIndexKind) -> &BTreeMap<DiskIndexKey, Vec<u32>> {
+        match kind {
+            SnapshotIndexKind::Resource => &self.resource,
+            SnapshotIndexKind::ResourceObject => &self.resource_object,
+            SnapshotIndexKind::ResourceTypeRelation => &self.resource_type_relation,
+            SnapshotIndexKind::ResourceType => &self.resource_type,
+            SnapshotIndexKind::Subject => &self.subject,
+            SnapshotIndexKind::SubjectTypeRelation => &self.subject_type_relation,
+            SnapshotIndexKind::SubjectType => &self.subject_type,
+        }
+    }
+}
+
+fn encode_posting_range(
+    row_ids: &[u32],
+    posting_row_ids: &mut Vec<u8>,
+) -> Result<DiskPostingRange, SnapshotIoError> {
+    let (first, rest) = row_ids.split_first().ok_or(SnapshotIoError::Format {
+        reason: "empty posting list",
+    })?;
+    let overflow_start =
+        checked_u32_from_usize(posting_row_ids.len().checked_div(DISK_ROW_ID_LEN).ok_or(
+            SnapshotIoError::Format {
+                reason: "posting row id length overflowed",
+            },
+        )?)?;
+    let overflow_len = checked_u32_from_usize(rest.len())?;
+    for row_id in rest {
+        posting_row_ids.extend_from_slice(&row_id.to_le_bytes());
+    }
+    Ok(DiskPostingRange {
+        first_row_id: *first,
+        overflow_start,
+        overflow_len,
+    })
+}
+
+#[derive(Debug)]
+struct DecodedSnapshotIndexes {
+    resource: PostingIndex<ResourceIndexKey>,
+    resource_object: PostingIndex<ResourceObjectIndexKey>,
+    resource_type_relation: PostingIndex<ResourceTypeRelationIndexKey>,
+    resource_type: PostingIndex<ObjectTypeId>,
+    subject: PostingIndex<SubjectIndexKey>,
+    subject_type_relation: PostingIndex<SubjectTypeRelationIndexKey>,
+    subject_type: PostingIndex<SubjectTypeId>,
+}
+
+impl DecodedSnapshotIndexes {
+    fn decode(
+        reader: &SnapshotReader<'_>,
+        rows: &[RelationshipRow],
+        profile: SnapshotLoadProfile,
+    ) -> Result<Self, SnapshotIoError> {
+        let directory = decode_index_directory(reader)?;
+        let keys = decode_index_keys(reader)?;
+        let ranges = decode_posting_ranges(reader)?;
+        let posting_row_ids = decode_posting_row_ids(reader)?;
+        let row_count = reader.header().relationship_count;
+        let input = SnapshotIndexDecodeInput {
+            directory: &directory,
+            keys: &keys,
+            ranges: &ranges,
+            posting_row_ids: &posting_row_ids,
+            rows,
+            row_count,
+            profile,
+        };
+
+        Ok(Self {
+            resource: decode_index(
+                &input,
+                &SnapshotIndexDecoder {
+                    kind: SnapshotIndexKind::Resource,
+                    key_from_disk: resource_key_from_disk,
+                    row_matches_key: row_matches_resource_key,
+                    coverage_bit: simple_index_coverage_bit,
+                    expected_mask: |_| 1,
+                },
+            )?,
+            resource_object: decode_index(
+                &input,
+                &SnapshotIndexDecoder {
+                    kind: SnapshotIndexKind::ResourceObject,
+                    key_from_disk: resource_object_key_from_disk,
+                    row_matches_key: row_matches_resource_object_key,
+                    coverage_bit: simple_index_coverage_bit,
+                    expected_mask: |_| 1,
+                },
+            )?,
+            resource_type_relation: decode_index(
+                &input,
+                &SnapshotIndexDecoder {
+                    kind: SnapshotIndexKind::ResourceTypeRelation,
+                    key_from_disk: resource_type_relation_key_from_disk,
+                    row_matches_key: row_matches_resource_type_relation_key,
+                    coverage_bit: simple_index_coverage_bit,
+                    expected_mask: |_| 1,
+                },
+            )?,
+            resource_type: decode_index(
+                &input,
+                &SnapshotIndexDecoder {
+                    kind: SnapshotIndexKind::ResourceType,
+                    key_from_disk: resource_type_key_from_disk,
+                    row_matches_key: row_matches_resource_type_key,
+                    coverage_bit: simple_index_coverage_bit,
+                    expected_mask: |_| 1,
+                },
+            )?,
+            subject: decode_index(
+                &input,
+                &SnapshotIndexDecoder {
+                    kind: SnapshotIndexKind::Subject,
+                    key_from_disk: subject_key_from_disk,
+                    row_matches_key: row_matches_subject_key,
+                    coverage_bit: subject_index_coverage_bit,
+                    expected_mask: |row| if row.subject_relation.is_some() { 3 } else { 1 },
+                },
+            )?,
+            subject_type_relation: decode_index(
+                &input,
+                &SnapshotIndexDecoder {
+                    kind: SnapshotIndexKind::SubjectTypeRelation,
+                    key_from_disk: subject_type_relation_key_from_disk,
+                    row_matches_key: row_matches_subject_type_relation_key,
+                    coverage_bit: simple_index_coverage_bit,
+                    expected_mask: |row| u8::from(row.subject_relation.is_some()),
+                },
+            )?,
+            subject_type: decode_index(
+                &input,
+                &SnapshotIndexDecoder {
+                    kind: SnapshotIndexKind::SubjectType,
+                    key_from_disk: subject_type_key_from_disk,
+                    row_matches_key: row_matches_subject_type_key,
+                    coverage_bit: simple_index_coverage_bit,
+                    expected_mask: |_| 1,
+                },
+            )?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DiskIndexDirectoryEntry {
+    kind: SnapshotIndexKind,
+    key_start: u32,
+    key_count: u32,
+    posting_range_start: u32,
+    posting_range_count: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SnapshotIndexDecodeInput<'a> {
+    directory: &'a [DiskIndexDirectoryEntry],
+    keys: &'a [DiskIndexKey],
+    ranges: &'a [DiskPostingRange],
+    posting_row_ids: &'a [RowId],
+    rows: &'a [RelationshipRow],
+    row_count: u32,
+    profile: SnapshotLoadProfile,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SnapshotIndexSlices<'a> {
+    keys: &'a [DiskIndexKey],
+    ranges: &'a [DiskPostingRange],
+}
+
+struct SnapshotIndexDecoder<K> {
+    kind: SnapshotIndexKind,
+    key_from_disk: fn(DiskIndexKey) -> Result<K, SnapshotIoError>,
+    row_matches_key: fn(&RelationshipRow, DiskIndexKey) -> bool,
+    coverage_bit: fn(&RelationshipRow, DiskIndexKey) -> u8,
+    expected_mask: fn(&RelationshipRow) -> u8,
+}
+
+fn decode_index_directory(
+    reader: &SnapshotReader<'_>,
+) -> Result<Vec<DiskIndexDirectoryEntry>, SnapshotIoError> {
+    let section = reader.section(SectionKind::IndexDirectory)?;
+    if section.row_count() != SNAPSHOT_INDEX_KIND_COUNT_U64 {
+        return Err(SnapshotIoError::Format {
+            reason: "index directory row count is invalid",
+        });
+    }
+    let expected_len = checked_mul_usize(SNAPSHOT_INDEX_KIND_COUNT, DISK_INDEX_DIRECTORY_LEN)?;
+    if section.bytes().len() != expected_len {
+        return Err(SnapshotIoError::Format {
+            reason: "index directory length is invalid",
+        });
+    }
+    let mut cursor = BinaryCursor::new(section.bytes());
+    let mut entries = Vec::with_capacity(SNAPSHOT_INDEX_KIND_COUNT);
+    let mut seen = HashSet::with_capacity(SNAPSHOT_INDEX_KIND_COUNT);
+    for _ in 0..SNAPSHOT_INDEX_KIND_COUNT {
+        let kind = SnapshotIndexKind::from_raw(cursor.read_u16()?)?;
+        let flags = cursor.read_u16()?;
+        if flags != 0 {
+            return Err(SnapshotIoError::Format {
+                reason: "index directory flags are unsupported",
+            });
+        }
+        insert_unique(&mut seen, kind, "duplicate snapshot index kind")?;
+        entries.push(DiskIndexDirectoryEntry {
+            kind,
+            key_start: cursor.read_u32()?,
+            key_count: cursor.read_u32()?,
+            posting_range_start: cursor.read_u32()?,
+            posting_range_count: cursor.read_u32()?,
+        });
+    }
+    Ok(entries)
+}
+
+fn decode_index_keys(reader: &SnapshotReader<'_>) -> Result<Vec<DiskIndexKey>, SnapshotIoError> {
+    let section = reader.section(SectionKind::IndexKeys)?;
+    let row_count = checked_usize_from_u64(section.row_count())?;
+    let expected_len = checked_mul_usize(row_count, DISK_INDEX_KEY_LEN)?;
+    if section.bytes().len() != expected_len {
+        return Err(SnapshotIoError::Format {
+            reason: "index key length does not match row count",
+        });
+    }
+    let mut cursor = BinaryCursor::new(section.bytes());
+    let mut keys = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        keys.push(DiskIndexKey {
+            first: cursor.read_u32()?,
+            second: cursor.read_u32()?,
+            third: cursor.read_u32()?,
+        });
+    }
+    Ok(keys)
+}
+
+fn decode_posting_ranges(
+    reader: &SnapshotReader<'_>,
+) -> Result<Vec<DiskPostingRange>, SnapshotIoError> {
+    let section = reader.section(SectionKind::PostingRanges)?;
+    let row_count = checked_usize_from_u64(section.row_count())?;
+    let expected_len = checked_mul_usize(row_count, DISK_POSTING_RANGE_LEN)?;
+    if section.bytes().len() != expected_len {
+        return Err(SnapshotIoError::Format {
+            reason: "posting range length does not match row count",
+        });
+    }
+    let mut cursor = BinaryCursor::new(section.bytes());
+    let mut ranges = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        ranges.push(DiskPostingRange {
+            first_row_id: cursor.read_u32()?,
+            overflow_start: cursor.read_u32()?,
+            overflow_len: cursor.read_u32()?,
+        });
+    }
+    Ok(ranges)
+}
+
+fn decode_posting_row_ids(reader: &SnapshotReader<'_>) -> Result<Vec<RowId>, SnapshotIoError> {
+    let section = reader.section(SectionKind::PostingRowIds)?;
+    let row_count = checked_usize_from_u64(section.row_count())?;
+    let expected_len = checked_mul_usize(row_count, DISK_ROW_ID_LEN)?;
+    if section.bytes().len() != expected_len {
+        return Err(SnapshotIoError::Format {
+            reason: "posting row id length does not match row count",
+        });
+    }
+    let total_rows = reader.header().relationship_count;
+    let mut cursor = BinaryCursor::new(section.bytes());
+    let mut row_ids = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        row_ids.push(RowId::from_snapshot_raw(cursor.read_u32()?, total_rows)?);
+    }
+    Ok(row_ids)
+}
+
+fn decode_index<K>(
+    input: &SnapshotIndexDecodeInput<'_>,
+    decoder: &SnapshotIndexDecoder<K>,
+) -> Result<PostingIndex<K>, SnapshotIoError>
+where
+    K: Copy + Eq + Hash + Ord,
+{
+    let slices = snapshot_index_slices(input, decoder.kind)?;
+
+    let mut coverage = vec![0_u8; input.rows.len()];
+    let mut sorted_keys = Vec::with_capacity(slices.keys.len());
+    let mut sorted_ranges = Vec::with_capacity(slices.ranges.len());
+    let mut sorted_overflow = Vec::new();
+    let mut latency_index = PostingIndex::default();
+
+    for (disk_key, range) in slices
+        .keys
+        .iter()
+        .copied()
+        .zip(slices.ranges.iter().copied())
+    {
+        let typed_key = (decoder.key_from_disk)(disk_key)?;
+        let row_ids = posting_row_id_iter(range, input.posting_row_ids, input.row_count)?;
+        let overflow_start = checked_u32_from_usize(sorted_overflow.len())?;
+        let mut overflow_len = 0_u32;
+        let mut first = None;
+        for row_id in row_ids {
+            let row = input
+                .rows
+                .get(row_id.index())
+                .ok_or(SnapshotIoError::Format {
+                    reason: "posting row id points outside relationship rows",
+                })?;
+            if !(decoder.row_matches_key)(row, disk_key) {
+                return Err(SnapshotIoError::Format {
+                    reason: "posting row does not match index key",
+                });
+            }
+            let bit = (decoder.coverage_bit)(row, disk_key);
+            if bit == 0 {
+                return Err(SnapshotIoError::Format {
+                    reason: "index coverage bit is invalid",
+                });
+            }
+            let mask = coverage
+                .get_mut(row_id.index())
+                .ok_or(SnapshotIoError::Format {
+                    reason: "index coverage row id is out of bounds",
+                })?;
+            if *mask & bit != 0 {
+                return Err(SnapshotIoError::Format {
+                    reason: "duplicate posting row id in index",
+                });
+            }
+            *mask |= bit;
+            if first.is_none() {
+                first = Some(row_id);
+            } else {
+                sorted_overflow.push(row_id);
+                overflow_len = overflow_len.checked_add(1).ok_or(SnapshotIoError::Format {
+                    reason: "posting overflow length overflowed",
+                })?;
+            }
+            if matches!(input.profile, SnapshotLoadProfile::Latency) {
+                latency_index.insert(typed_key, row_id);
+            }
+        }
+        let first_row_id = first.ok_or(SnapshotIoError::Format {
+            reason: "empty posting range",
+        })?;
+        sorted_keys.push(typed_key);
+        sorted_ranges.push(RuntimePostingRange {
+            first_row_id,
+            overflow_start,
+            overflow_len,
+        });
+    }
+
+    for (row, actual) in input.rows.iter().zip(coverage.iter().copied()) {
+        if actual != (decoder.expected_mask)(row) {
+            return Err(SnapshotIoError::Format {
+                reason: "index does not cover every required row",
+            });
+        }
+    }
+
+    match input.profile {
+        SnapshotLoadProfile::FastLoad => Ok(PostingIndex::from_sorted(
+            sorted_keys,
+            sorted_ranges,
+            sorted_overflow,
+        )),
+        SnapshotLoadProfile::Latency => Ok(latency_index),
+    }
+}
+
+fn snapshot_index_slices<'a>(
+    input: &'a SnapshotIndexDecodeInput<'_>,
+    kind: SnapshotIndexKind,
+) -> Result<SnapshotIndexSlices<'a>, SnapshotIoError> {
+    let entry = input
+        .directory
+        .iter()
+        .find(|entry| entry.kind == kind)
+        .copied()
+        .ok_or(SnapshotIoError::Format {
+            reason: "missing snapshot index kind",
+        })?;
+    if entry.key_count != entry.posting_range_count {
+        return Err(SnapshotIoError::Format {
+            reason: "index key count does not match posting range count",
+        });
+    }
+    let key_start = checked_usize_from_u32(entry.key_start)?;
+    let key_count = checked_usize_from_u32(entry.key_count)?;
+    let key_end = checked_add_usize(key_start, key_count)?;
+    let range_start = checked_usize_from_u32(entry.posting_range_start)?;
+    let range_count = checked_usize_from_u32(entry.posting_range_count)?;
+    let range_end = checked_add_usize(range_start, range_count)?;
+    let keys = input
+        .keys
+        .get(key_start..key_end)
+        .ok_or(SnapshotIoError::Format {
+            reason: "index key range is out of bounds",
+        })?;
+    let ranges = input
+        .ranges
+        .get(range_start..range_end)
+        .ok_or(SnapshotIoError::Format {
+            reason: "posting range span is out of bounds",
+        })?;
+    validate_sorted_keys(keys)?;
+    Ok(SnapshotIndexSlices { keys, ranges })
+}
+
+fn validate_sorted_keys(keys: &[DiskIndexKey]) -> Result<(), SnapshotIoError> {
+    if keys.windows(2).any(|window| {
+        window
+            .first()
+            .zip(window.get(1))
+            .is_some_and(|(left, right)| left >= right)
+    }) {
+        return Err(SnapshotIoError::Format {
+            reason: "index keys are not strictly sorted",
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum SnapshotPostingRowIds<'a> {
+    One {
+        first: Option<RowId>,
+    },
+    Many {
+        first: Option<RowId>,
+        rest: std::slice::Iter<'a, RowId>,
+    },
+}
+
+impl Iterator for SnapshotPostingRowIds<'_> {
+    type Item = RowId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::One { first } => first.take(),
+            Self::Many { first, rest } => first.take().or_else(|| rest.next().copied()),
+        }
+    }
+}
+
+fn posting_row_id_iter(
+    range: DiskPostingRange,
+    posting_row_ids: &[RowId],
+    row_count: u32,
+) -> Result<SnapshotPostingRowIds<'_>, SnapshotIoError> {
+    let first = RowId::from_snapshot_raw(range.first_row_id, row_count)?;
+    if range.overflow_len == 0 {
+        return Ok(SnapshotPostingRowIds::One { first: Some(first) });
+    }
+    let start = checked_usize_from_u32(range.overflow_start)?;
+    let len = checked_usize_from_u32(range.overflow_len)?;
+    let end = checked_add_usize(start, len)?;
+    let overflow = posting_row_ids
+        .get(start..end)
+        .ok_or(SnapshotIoError::Format {
+            reason: "posting range points outside posting row ids",
+        })?;
+    Ok(SnapshotPostingRowIds::Many {
+        first: Some(first),
+        rest: overflow.iter(),
+    })
+}
+
+fn resource_key_from_disk(key: DiskIndexKey) -> Result<ResourceIndexKey, SnapshotIoError> {
+    Ok(ResourceIndexKey {
+        object_type: ObjectTypeId(SymbolId::from_snapshot_raw(key.first, u32::MAX)?),
+        object_id: ObjectIdId(SymbolId::from_snapshot_raw(key.second, u32::MAX)?),
+        relation: RelationId(SymbolId::from_snapshot_raw(key.third, u32::MAX)?),
+    })
+}
+
+fn resource_object_key_from_disk(
+    key: DiskIndexKey,
+) -> Result<ResourceObjectIndexKey, SnapshotIoError> {
+    ensure_zero(
+        key.third,
+        "resource object index third key field must be zero",
+    )?;
+    Ok(ResourceObjectIndexKey {
+        object_type: ObjectTypeId(SymbolId::from_snapshot_raw(key.first, u32::MAX)?),
+        object_id: ObjectIdId(SymbolId::from_snapshot_raw(key.second, u32::MAX)?),
+    })
+}
+
+fn resource_type_relation_key_from_disk(
+    key: DiskIndexKey,
+) -> Result<ResourceTypeRelationIndexKey, SnapshotIoError> {
+    ensure_zero(
+        key.third,
+        "resource type relation index third key field must be zero",
+    )?;
+    Ok(ResourceTypeRelationIndexKey {
+        object_type: ObjectTypeId(SymbolId::from_snapshot_raw(key.first, u32::MAX)?),
+        relation: RelationId(SymbolId::from_snapshot_raw(key.second, u32::MAX)?),
+    })
+}
+
+fn resource_type_key_from_disk(key: DiskIndexKey) -> Result<ObjectTypeId, SnapshotIoError> {
+    ensure_zero(
+        key.second,
+        "resource type index second key field must be zero",
+    )?;
+    ensure_zero(
+        key.third,
+        "resource type index third key field must be zero",
+    )?;
+    Ok(ObjectTypeId(SymbolId::from_snapshot_raw(
+        key.first,
+        u32::MAX,
+    )?))
+}
+
+fn subject_key_from_disk(key: DiskIndexKey) -> Result<SubjectIndexKey, SnapshotIoError> {
+    let relation = if key.third == 0 {
+        None
+    } else {
+        Some(RelationId(SymbolId::from_snapshot_raw(
+            key.third,
+            u32::MAX,
+        )?))
+    };
+    Ok(SubjectIndexKey {
+        subject_type: SubjectTypeId(SymbolId::from_snapshot_raw(key.first, u32::MAX)?),
+        subject_id: SubjectIdId(SymbolId::from_snapshot_raw(key.second, u32::MAX)?),
+        relation,
+    })
+}
+
+fn subject_type_relation_key_from_disk(
+    key: DiskIndexKey,
+) -> Result<SubjectTypeRelationIndexKey, SnapshotIoError> {
+    ensure_zero(
+        key.third,
+        "subject type relation index third key field must be zero",
+    )?;
+    Ok(SubjectTypeRelationIndexKey {
+        subject_type: SubjectTypeId(SymbolId::from_snapshot_raw(key.first, u32::MAX)?),
+        relation: RelationId(SymbolId::from_snapshot_raw(key.second, u32::MAX)?),
+    })
+}
+
+fn subject_type_key_from_disk(key: DiskIndexKey) -> Result<SubjectTypeId, SnapshotIoError> {
+    ensure_zero(
+        key.second,
+        "subject type index second key field must be zero",
+    )?;
+    ensure_zero(key.third, "subject type index third key field must be zero")?;
+    Ok(SubjectTypeId(SymbolId::from_snapshot_raw(
+        key.first,
+        u32::MAX,
+    )?))
+}
+
+fn ensure_zero(value: u32, reason: &'static str) -> Result<(), SnapshotIoError> {
+    if value == 0 {
+        Ok(())
+    } else {
+        Err(SnapshotIoError::Format { reason })
+    }
+}
+
+fn row_matches_resource_key(row: &RelationshipRow, key: DiskIndexKey) -> bool {
+    row.resource_type.0.get() == key.first
+        && row.resource_id.0.get() == key.second
+        && row.relation.0.get() == key.third
+}
+
+fn row_matches_resource_object_key(row: &RelationshipRow, key: DiskIndexKey) -> bool {
+    row.resource_type.0.get() == key.first
+        && row.resource_id.0.get() == key.second
+        && key.third == 0
+}
+
+fn row_matches_resource_type_relation_key(row: &RelationshipRow, key: DiskIndexKey) -> bool {
+    row.resource_type.0.get() == key.first && row.relation.0.get() == key.second && key.third == 0
+}
+
+fn row_matches_resource_type_key(row: &RelationshipRow, key: DiskIndexKey) -> bool {
+    row.resource_type.0.get() == key.first && key.second == 0 && key.third == 0
+}
+
+fn row_matches_subject_key(row: &RelationshipRow, key: DiskIndexKey) -> bool {
+    row.subject_type.0.get() == key.first
+        && row.subject_id.0.get() == key.second
+        && row.subject_relation.map_or(key.third == 0, |relation| {
+            key.third == 0 || relation.0.get() == key.third
+        })
+}
+
+fn row_matches_subject_type_relation_key(row: &RelationshipRow, key: DiskIndexKey) -> bool {
+    row.subject_type.0.get() == key.first
+        && row
+            .subject_relation
+            .is_some_and(|relation| relation.0.get() == key.second)
+        && key.third == 0
+}
+
+fn row_matches_subject_type_key(row: &RelationshipRow, key: DiskIndexKey) -> bool {
+    row.subject_type.0.get() == key.first && key.second == 0 && key.third == 0
+}
+
+fn simple_index_coverage_bit(_row: &RelationshipRow, _key: DiskIndexKey) -> u8 {
+    1
+}
+
+fn subject_index_coverage_bit(row: &RelationshipRow, key: DiskIndexKey) -> u8 {
+    match (row.subject_relation, key.third) {
+        (_, 0) => 1,
+        (Some(relation), value) if relation.0.get() == value => 2,
+        _ => 0,
+    }
+}
+
+fn decode_snapshot_rows(
+    reader: &SnapshotReader<'_>,
+    interner: &IdentifierInterner,
+) -> Result<(Vec<RelationshipRow>, LiveRows, RelationshipIdentityIndex), SnapshotIoError> {
+    let header = reader.header();
+    let section = reader.section(SectionKind::RelationshipRows)?;
+    let row_count = checked_usize_from_u32(header.relationship_count)?;
+    if section.row_count() != u64::from(header.relationship_count) {
+        return Err(SnapshotIoError::Format {
+            reason: "relationship row count does not match header",
+        });
+    }
+    let expected_len = checked_mul_usize(row_count, DISK_RELATIONSHIP_ROW_LEN)?;
+    if section.bytes().len() != expected_len {
+        return Err(SnapshotIoError::Format {
+            reason: "relationship row length does not match row count",
+        });
+    }
+    let mut cursor = BinaryCursor::new(section.bytes());
+    let mut rows = Vec::with_capacity(row_count);
+    let mut live_rows = LiveRows::default();
+    let mut uniqueness = RelationshipIdentityIndex::default();
+    for index in 0..row_count {
+        let row_id = RowId::from_len(index)?;
+        let row = RelationshipRow {
+            row_id,
+            resource_type: ObjectTypeId(SymbolId::from_snapshot_raw(
+                cursor.read_u32()?,
+                header.symbol_count,
+            )?),
+            resource_id: ObjectIdId(SymbolId::from_snapshot_raw(
+                cursor.read_u32()?,
+                header.symbol_count,
+            )?),
+            relation: RelationId(SymbolId::from_snapshot_raw(
+                cursor.read_u32()?,
+                header.symbol_count,
+            )?),
+            subject_type: SubjectTypeId(SymbolId::from_snapshot_raw(
+                cursor.read_u32()?,
+                header.symbol_count,
+            )?),
+            subject_id: SubjectIdId(SymbolId::from_snapshot_raw(
+                cursor.read_u32()?,
+                header.symbol_count,
+            )?),
+            subject_relation: match cursor.read_u32()? {
+                0 => None,
+                value => Some(RelationId(SymbolId::from_snapshot_raw(
+                    value,
+                    header.symbol_count,
+                )?)),
+            },
+        };
+        validate_row_domains(interner, &row)?;
+        if uniqueness.find(&rows, &row).is_some() {
+            return Err(SnapshotIoError::Format {
+                reason: "duplicate relationship row in snapshot",
+            });
+        }
+        uniqueness.insert(&rows, row_id, &row);
+        rows.push(row);
+        live_rows.insert(row_id);
+    }
+    Ok((rows, live_rows, uniqueness))
+}
+
+fn validate_row_domains(
+    interner: &IdentifierInterner,
+    row: &RelationshipRow,
+) -> Result<(), SnapshotIoError> {
+    ObjectType::try_from(interner.resolve(row.resource_type.0)?)?;
+    ObjectId::try_from(interner.resolve(row.resource_id.0)?)?;
+    RelationName::try_from(interner.resolve(row.relation.0)?)?;
+    SubjectType::try_from(interner.resolve(row.subject_type.0)?)?;
+    SubjectId::try_from(interner.resolve(row.subject_id.0)?)?;
+    if let Some(relation) = row.subject_relation {
+        RelationName::try_from(interner.resolve(relation.0)?)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
