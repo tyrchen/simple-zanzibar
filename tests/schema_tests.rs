@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
-use simple_zanzibar::ZanzibarService;
-use simple_zanzibar::domain::ObjectType;
-use simple_zanzibar::error::ZanzibarError;
-use simple_zanzibar::schema::{
-    self, CompiledSchema, NamespaceDefinition, RelationDefinition, SchemaError, UsersetExpression,
+use simple_zanzibar::{
+    ZanzibarService,
+    domain::ObjectType,
+    error::ZanzibarError,
+    schema::{
+        self, CompiledSchema, NamespaceDefinition, RelationDefinition, SchemaError,
+        UsersetExpression,
+    },
 };
 
 const VALID_SCHEMA: &str = r#"

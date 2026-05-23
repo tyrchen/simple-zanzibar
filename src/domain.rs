@@ -1,7 +1,6 @@
 //! Validated domain primitives for the local Zanzibar engine.
 
-use std::fmt;
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use crate::model::{Object, Relation, RelationTuple, User};
 

@@ -1,14 +1,16 @@
 //! Tests for the core evaluation logic.
 
-use simple_zanzibar::ZanzibarService;
-use simple_zanzibar::error::ZanzibarError;
-use simple_zanzibar::eval::{EvaluationError, EvaluationLimits, Membership};
-use simple_zanzibar::model::{
-    ExpandedUserset, NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User,
-    UsersetExpression,
+use std::{collections::HashMap, num::NonZeroU32};
+
+use simple_zanzibar::{
+    ZanzibarService,
+    error::ZanzibarError,
+    eval::{EvaluationError, EvaluationLimits, Membership},
+    model::{
+        ExpandedUserset, NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User,
+        UsersetExpression,
+    },
 };
-use std::collections::HashMap;
-use std::num::NonZeroU32;
 
 /// Creates a `ZanzibarService` pre-populated with a common test configuration.
 fn create_test_service() -> Result<ZanzibarService, ZanzibarError> {

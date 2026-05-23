@@ -3,6 +3,32 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.2.0](https://github.com/compare/v0.1.0..v0.2.0) - 2026-03-30
+
+### Miscellaneous Chores
+
+- fix category for publish - ([b24045d](https://github.com/commit/b24045de3357282f08e677f3e99879cdfd191e2e)) - Tyr Chen
+- fix format - ([0597932](https://github.com/commit/05979322e529848015d5430903c142ec7eab85a0)) - Tyr Chen
+- remove unused ui directory - ([9191e35](https://github.com/commit/9191e35642267fee6f9d3ac0f9ce1d397371dfb8)) - Tyr Chen
+- bump version - ([0af0e0d](https://github.com/commit/0af0e0d34474fc6fb70b587ca8ad9f1da0650e2d)) - Tyr Chen
+
+### Other
+
+- Update CHANGELOG.md - ([c425e8d](https://github.com/commit/c425e8dc3a29a095859cb6e461c6571166f4317c)) - Tyr Chen
+- update GitHub Actions to latest versions - ([c3f5cb6](https://github.com/commit/c3f5cb6fa3888f553861410a3efe26346eb90e5b)) - Tyr Chen
+- Merge pull request #8 from tyrchen/refactor/code-review-fixes
+
+refactor: fix cross-namespace bug, improve safety and API design - ([c4b829a](https://github.com/commit/c4b829a91743335145b98068836e89ed6342afdf)) - Tyr Chen
+
+### Refactoring
+
+- fix cross-namespace bug, improve safety and API design - ([4b15b93](https://github.com/commit/4b15b9361e2b1e27ee73bb15f986435c3a1315f1)) - Tyr Chen
+
+### Tests
+
+- comprehensive test coverage across unit, snapshot, and integration levels - ([ee7e067](https://github.com/commit/ee7e0671a0ed4ff21c4c054555f0c33173a3a9d0)) - Tyr Chen
+
+---
 ## [0.1.0] - 2025-06-15
 
 ### Features

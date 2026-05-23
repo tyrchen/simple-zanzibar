@@ -1,25 +1,30 @@
 //! Core evaluation logic for `check` and `expand` requests.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::BuildHasher;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    hash::BuildHasher,
+    num::{NonZeroU32, NonZeroUsize},
+};
 
 use thiserror::Error;
 
-use crate::domain::{
-    ObjectRef as DomainObjectRef, ObjectType, RelationName, Relationship, SubjectRef, SubjectType,
+use crate::{
+    domain::{
+        ObjectRef as DomainObjectRef, ObjectType, RelationName, Relationship, SubjectRef,
+        SubjectType,
+    },
+    error::ZanzibarError,
+    model::{
+        ExpandedUserset, LookupResources, LookupResourcesRequest, LookupSubjects,
+        LookupSubjectsRequest, NamespaceConfig, Object, Relation, User, UsersetExpression,
+    },
+    relationship::{
+        IndexedRelationshipStore, QueryLimit, RelationshipFilter, RelationshipReader, SubjectFilter,
+    },
+    revision::PublishedSnapshot,
+    schema::UsersetExpression as SchemaUsersetExpression,
+    store::TupleStore,
 };
-use crate::error::ZanzibarError;
-use crate::model::{
-    ExpandedUserset, LookupResources, LookupResourcesRequest, LookupSubjects,
-    LookupSubjectsRequest, NamespaceConfig, Object, Relation, User, UsersetExpression,
-};
-use crate::relationship::{
-    IndexedRelationshipStore, QueryLimit, RelationshipFilter, RelationshipReader, SubjectFilter,
-};
-use crate::revision::PublishedSnapshot;
-use crate::schema::UsersetExpression as SchemaUsersetExpression;
-use crate::store::TupleStore;
 
 const DEFAULT_MAX_DEPTH: u32 = 50;
 const DEFAULT_MAX_FANOUT_PER_STEP: u32 = 1_000;

@@ -1,11 +1,12 @@
-use std::collections::HashSet;
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 use proptest::prelude::*;
-use simple_zanzibar::domain::{DomainError, Relationship};
-use simple_zanzibar::relationship::{
-    IndexedRelationshipStore, Precondition, QueryLimit, RelationshipFilter, RelationshipMutation,
-    RelationshipReader, StoreError, SubjectFilter,
+use simple_zanzibar::{
+    domain::{DomainError, Relationship},
+    relationship::{
+        IndexedRelationshipStore, Precondition, QueryLimit, RelationshipFilter,
+        RelationshipMutation, RelationshipReader, StoreError, SubjectFilter,
+    },
 };
 
 fn relationship(value: &str) -> Result<Relationship, DomainError> {

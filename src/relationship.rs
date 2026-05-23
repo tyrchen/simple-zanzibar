@@ -1,15 +1,20 @@
 //! Indexed in-memory relationship store and mutation semantics.
 
-use std::collections::{BTreeSet, HashMap, HashSet, btree_set};
-use std::num::NonZeroUsize;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet, btree_set},
+    num::NonZeroUsize,
+};
 
 use thiserror::Error;
 
-use crate::domain::{
-    ObjectId, ObjectRef, ObjectType, RelationName, Relationship, SubjectId, SubjectRef, SubjectType,
+use crate::{
+    domain::{
+        ObjectId, ObjectRef, ObjectType, RelationName, Relationship, SubjectId, SubjectRef,
+        SubjectType,
+    },
+    error::ZanzibarError,
+    model::User,
 };
-use crate::error::ZanzibarError;
-use crate::model::User;
 
 const DEFAULT_QUERY_LIMIT: usize = 1_000;
 const MAX_MUTATIONS_PER_BATCH: usize = 10_000;

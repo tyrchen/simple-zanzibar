@@ -74,30 +74,34 @@ pub mod revision;
 pub mod schema;
 pub mod store;
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt;
-use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fmt,
+    num::NonZeroUsize,
+    sync::Arc,
+};
 
 use arc_swap::ArcSwapOption;
 
-use crate::error::ZanzibarError;
-use crate::eval::EvaluationLimits;
-use crate::model::{
-    LookupResources, LookupResourcesRequest, LookupSubjects, LookupSubjectsRequest,
-    NamespaceConfig, Object, Relation, RelationTuple, User,
-};
-use crate::relationship::{
-    IndexedRelationshipStore, Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter,
-};
-use crate::revision::{
-    Consistency, ConsistencyError, ConsistencyToken, DatastoreId, PublishedSnapshot, Revision,
-    SchemaHash, default_retained_snapshots,
-};
-use crate::schema::CompiledSchema;
-use crate::store::{InMemoryTupleStore, TupleStore};
-
 pub use crate::api::{EngineError, ZanzibarEngine, ZanzibarEngineBuilder};
+use crate::{
+    error::ZanzibarError,
+    eval::EvaluationLimits,
+    model::{
+        LookupResources, LookupResourcesRequest, LookupSubjects, LookupSubjectsRequest,
+        NamespaceConfig, Object, Relation, RelationTuple, User,
+    },
+    relationship::{
+        IndexedRelationshipStore, Precondition, RelationshipFilter, RelationshipMutation,
+        SubjectFilter,
+    },
+    revision::{
+        Consistency, ConsistencyError, ConsistencyToken, DatastoreId, PublishedSnapshot, Revision,
+        SchemaHash, default_retained_snapshots,
+    },
+    schema::CompiledSchema,
+    store::{InMemoryTupleStore, TupleStore},
+};
 
 /// Compatibility facade for the local Zanzibar engine.
 ///

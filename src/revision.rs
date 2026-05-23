@@ -1,19 +1,26 @@
 //! Revision, consistency token, and published snapshot types.
 
-use std::collections::HashMap;
-use std::fmt;
-use std::num::{NonZeroU64, NonZeroUsize};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    fmt,
+    num::{NonZeroU64, NonZeroUsize},
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use thiserror::Error;
 
-use crate::model::NamespaceConfig;
-use crate::relationship::IndexedRelationshipStore;
-use crate::schema::{
-    AllowedSubjectTypes, CompiledSchema, NamespaceDefinition, RelationDefinition, UsersetExpression,
+use crate::{
+    model::NamespaceConfig,
+    relationship::IndexedRelationshipStore,
+    schema::{
+        AllowedSubjectTypes, CompiledSchema, NamespaceDefinition, RelationDefinition,
+        UsersetExpression,
+    },
 };
 
 const TOKEN_VERSION: &str = "sz1";

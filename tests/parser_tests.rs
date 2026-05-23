@@ -1,8 +1,6 @@
 //! Tests for the DSL parser.
 
-use simple_zanzibar::ZanzibarService;
-use simple_zanzibar::error::ZanzibarError;
-use simple_zanzibar::model::Relation;
+use simple_zanzibar::{ZanzibarService, error::ZanzibarError, model::Relation};
 
 const TEST_DSL: &str = r#"
     // Defines a document namespace with hierarchical permissions.

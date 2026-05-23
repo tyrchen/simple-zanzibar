@@ -1,7 +1,6 @@
 //! Phase 0 risk-retirement tests for dependency API shape.
 
-use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 
 use arc_swap::ArcSwap;
 

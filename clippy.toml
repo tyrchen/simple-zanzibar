@@ -1,0 +1,2 @@
+# Clippy configuration for simple-zanzibar
+# This is a synchronous library — no async-specific rules needed.

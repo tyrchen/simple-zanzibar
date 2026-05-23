@@ -1,0 +1,28 @@
+---
+source: tests/snapshot_tests.rs
+expression: "&viewer.userset_rewrite"
+---
+Some(
+    Exclusion {
+        base: Union(
+            [
+                This,
+                ComputedUserset {
+                    relation: Relation(
+                        "owner",
+                    ),
+                },
+                ComputedUserset {
+                    relation: Relation(
+                        "editor",
+                    ),
+                },
+            ],
+        ),
+        exclude: ComputedUserset {
+            relation: Relation(
+                "banned",
+            ),
+        },
+    },
+)

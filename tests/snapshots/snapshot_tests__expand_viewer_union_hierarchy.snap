@@ -1,0 +1,40 @@
+---
+source: tests/snapshot_tests.rs
+expression: expanded
+---
+Union(
+    [
+        Union(
+            [
+                User(
+                    "charlie",
+                ),
+            ],
+        ),
+        Union(
+            [
+                User(
+                    "alice",
+                ),
+            ],
+        ),
+        Union(
+            [
+                User(
+                    "bob",
+                ),
+            ],
+        ),
+        Union(
+            [
+                Union(
+                    [
+                        User(
+                            "dave",
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ],
+)

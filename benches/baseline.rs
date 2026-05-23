@@ -1,17 +1,17 @@
 //! Benchmarks for legacy scan and indexed direct-check paths.
 
-use criterion::{BatchSize, Criterion};
-use simple_zanzibar::ZanzibarService;
-use simple_zanzibar::eval::EvaluationLimits;
-use simple_zanzibar::model::{
-    LookupResourcesRequest, NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User,
-};
-use simple_zanzibar::store::{InMemoryTupleStore, TupleStore};
+use std::{collections::HashMap, hint::black_box, num::NonZeroU32, time::Duration};
 
-use std::collections::HashMap;
-use std::hint::black_box;
-use std::num::NonZeroU32;
-use std::time::Duration;
+use criterion::{BatchSize, Criterion};
+use simple_zanzibar::{
+    ZanzibarService,
+    eval::EvaluationLimits,
+    model::{
+        LookupResourcesRequest, NamespaceConfig, Object, Relation, RelationConfig, RelationTuple,
+        User,
+    },
+    store::{InMemoryTupleStore, TupleStore},
+};
 
 const DATASET_RELATIONSHIPS: usize = 100_000;
 const LOOKUP_CANDIDATES: usize = 10_000;

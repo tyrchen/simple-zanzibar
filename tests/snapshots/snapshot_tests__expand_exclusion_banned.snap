@@ -1,0 +1,23 @@
+---
+source: tests/snapshot_tests.rs
+expression: expanded
+---
+Exclusion {
+    base: Union(
+        [
+            User(
+                "alice",
+            ),
+            User(
+                "bob",
+            ),
+        ],
+    ),
+    exclude: Union(
+        [
+            User(
+                "bob",
+            ),
+        ],
+    ),
+}

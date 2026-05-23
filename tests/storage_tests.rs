@@ -1,5 +1,7 @@
-use simple_zanzibar::model::{Object, Relation, RelationTuple, User};
-use simple_zanzibar::store::{InMemoryTupleStore, TupleStore};
+use simple_zanzibar::{
+    model::{Object, Relation, RelationTuple, User},
+    store::{InMemoryTupleStore, TupleStore},
+};
 
 #[test]
 fn test_write_and_read_tuple() -> Result<(), &'static str> {

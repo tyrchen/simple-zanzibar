@@ -1,11 +1,10 @@
 //! Defines custom error types for the application.
 use thiserror::Error;
 
-use crate::domain::DomainError;
-use crate::eval::EvaluationError;
-use crate::relationship::StoreError;
-use crate::revision::ConsistencyError;
-use crate::schema::SchemaError;
+use crate::{
+    domain::DomainError, eval::EvaluationError, relationship::StoreError,
+    revision::ConsistencyError, schema::SchemaError,
+};
 
 /// Top-level error returned by the compatibility service and public helper APIs.
 #[derive(Error, Debug, PartialEq)]

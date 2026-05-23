@@ -1,11 +1,25 @@
 build:
 	@cargo build
 
+check: build test fmt-check clippy
+
 test:
 	@cargo nextest run --all-features
 
 bench-baseline:
 	@cargo bench --bench baseline -- --sample-size 10
+
+fmt:
+	@cargo +nightly fmt
+
+fmt-check:
+	@cargo +nightly fmt --check
+
+clippy:
+	@cargo clippy -- -D warnings
+
+lint:
+	@cargo clippy -- -D warnings -W clippy::pedantic
 
 release:
 	@cargo release tag --execute
@@ -17,4 +31,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test bench-baseline release update-submodule
+.PHONY: build check test bench-baseline fmt fmt-check clippy lint release update-submodule

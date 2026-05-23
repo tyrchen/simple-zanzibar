@@ -1,12 +1,11 @@
-use std::num::NonZeroUsize;
-use std::str::FromStr;
+use std::{num::NonZeroUsize, str::FromStr};
 
-use simple_zanzibar::ZanzibarService;
-use simple_zanzibar::error::ZanzibarError;
-use simple_zanzibar::model::{
-    NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User,
+use simple_zanzibar::{
+    ZanzibarService,
+    error::ZanzibarError,
+    model::{NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User},
+    revision::{Consistency, ConsistencyError, ConsistencyToken},
 };
-use simple_zanzibar::revision::{Consistency, ConsistencyError, ConsistencyToken};
 
 const DOC_SCHEMA: &str = r"
     namespace doc {

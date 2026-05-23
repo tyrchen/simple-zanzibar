@@ -2,13 +2,16 @@
 
 use std::collections::HashMap;
 
-use pest::Parser;
-use pest::iterators::{Pair, Pairs};
-
-use crate::error::ZanzibarError;
-use crate::model::{NamespaceConfig, Relation, RelationConfig, UsersetExpression};
-
 use generated::{Rule, ZanzibarParser};
+use pest::{
+    Parser,
+    iterators::{Pair, Pairs},
+};
+
+use crate::{
+    error::ZanzibarError,
+    model::{NamespaceConfig, Relation, RelationConfig, UsersetExpression},
+};
 
 mod generated {
     //! Generated `pest` parser bindings.
@@ -163,7 +166,8 @@ fn parse_expression(pair: Pair<Rule>) -> Result<UsersetExpression, ZanzibarError
         }
         Rule::tuple_to_userset_expr => {
             let mut inner = pair.into_inner();
-            // Based on the grammar, we should have: TUPLE_TO_USERSET, STRING_LITERAL, STRING_LITERAL
+            // Based on the grammar, we should have: TUPLE_TO_USERSET, STRING_LITERAL,
+            // STRING_LITERAL
             let _keyword = next_pair(&mut inner, "tuple_to_userset keyword")?;
             let tupleset_pair = next_pair(&mut inner, "tuple_to_userset tupleset relation")?;
             let computed_pair = next_pair(&mut inner, "tuple_to_userset computed relation")?;

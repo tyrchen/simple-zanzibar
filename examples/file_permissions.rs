@@ -11,10 +11,9 @@ use simple_zanzibar::{
 // The example is deliberately linear so readers can follow the complete workflow.
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔐 Simplified Zanzibar File Permissions Example");
-    println!("================================================\n");
+    println!("Simplified Zanzibar File Permissions Example");
+    println!("=============================================\n");
 
-    // Initialize the Zanzibar service
     let mut service = ZanzibarService::new();
 
     // Define the policy using DSL
@@ -58,83 +57,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     "#;
 
-    // Load the policy
-    println!("📋 Loading authorization policy...");
+    println!("Loading authorization policy...");
     service.add_dsl(policy_dsl)?;
-    println!("✅ Policy loaded successfully\n");
+    println!("Policy loaded successfully\n");
 
     // Create objects
-    let root_folder = Object {
-        namespace: "folder".to_string(),
-        id: "root".to_string(),
-    };
-    let docs_folder = Object {
-        namespace: "folder".to_string(),
-        id: "docs".to_string(),
-    };
-    let readme_file = Object {
-        namespace: "file".to_string(),
-        id: "readme.md".to_string(),
-    };
-    let secret_file = Object {
-        namespace: "file".to_string(),
-        id: "secret.txt".to_string(),
-    };
+    let root_folder = Object::new("folder", "root");
+    let docs_folder = Object::new("folder", "docs");
+    let readme_file = Object::new("file", "readme.md");
+    let secret_file = Object::new("file", "secret.txt");
 
     // Create relations
-    let owner_rel = Relation("owner".to_string());
-    let viewer_rel = Relation("viewer".to_string());
-    let editor_rel = Relation("editor".to_string());
-    let parent_rel = Relation("parent".to_string());
+    let owner_rel = Relation::new("owner");
+    let viewer_rel = Relation::new("viewer");
+    let editor_rel = Relation::new("editor");
+    let parent_rel = Relation::new("parent");
 
     // Create users
-    let alice = User::UserId("alice".to_string());
-    let bob = User::UserId("bob".to_string());
-    let charlie = User::UserId("charlie".to_string());
+    let alice = User::user_id("alice");
+    let bob = User::user_id("bob");
+    let charlie = User::user_id("charlie");
 
-    println!("👥 Setting up users and permissions...");
+    println!("Setting up users and permissions...");
 
     // Alice owns the root folder
-    service.write_tuple(RelationTuple {
-        object: root_folder.clone(),
-        relation: owner_rel.clone(),
-        user: alice.clone(),
-    })?;
-    println!("   Alice owns root folder");
+    service.write_tuple(RelationTuple::new(
+        root_folder.clone(),
+        owner_rel.clone(),
+        alice.clone(),
+    ))?;
+    println!("  Alice owns root folder");
 
     // Docs folder is a child of root folder
-    service.write_tuple(RelationTuple {
-        object: docs_folder.clone(),
-        relation: parent_rel.clone(),
-        user: User::Userset(root_folder.clone(), viewer_rel.clone()),
-    })?;
-    println!("   Docs folder inherits from root folder");
+    service.write_tuple(RelationTuple::new(
+        docs_folder.clone(),
+        parent_rel.clone(),
+        User::userset(root_folder.clone(), viewer_rel.clone()),
+    ))?;
+    println!("  Docs folder inherits from root folder");
 
     // README file is in docs folder
-    service.write_tuple(RelationTuple {
-        object: readme_file.clone(),
-        relation: parent_rel.clone(),
-        user: User::Userset(docs_folder.clone(), viewer_rel.clone()),
-    })?;
-    println!("   README file is in docs folder");
+    service.write_tuple(RelationTuple::new(
+        readme_file.clone(),
+        parent_rel.clone(),
+        User::userset(docs_folder.clone(), viewer_rel.clone()),
+    ))?;
+    println!("  README file is in docs folder");
 
     // Bob can edit the README file
-    service.write_tuple(RelationTuple {
-        object: readme_file.clone(),
-        relation: editor_rel.clone(),
-        user: bob.clone(),
-    })?;
-    println!("   Bob can edit README file");
+    service.write_tuple(RelationTuple::new(
+        readme_file.clone(),
+        editor_rel.clone(),
+        bob.clone(),
+    ))?;
+    println!("  Bob can edit README file");
 
     // Charlie can view the secret file directly
-    service.write_tuple(RelationTuple {
-        object: secret_file.clone(),
-        relation: viewer_rel.clone(),
-        user: charlie.clone(),
-    })?;
-    println!("   Charlie can view secret file");
+    service.write_tuple(RelationTuple::new(
+        secret_file.clone(),
+        viewer_rel.clone(),
+        charlie.clone(),
+    ))?;
+    println!("  Charlie can view secret file");
 
-    println!("\n🔍 Testing authorization checks...\n");
+    println!("\nTesting authorization checks...\n");
 
     // Test Alice's permissions (owner of root, should inherit everywhere)
     println!("Alice's permissions:");
@@ -191,15 +177,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         service.check(&secret_file, &viewer_rel, &charlie)?
     );
 
-    println!("\n🔄 Testing dynamic permission changes...\n");
+    println!("\nTesting dynamic permission changes...\n");
 
     // Grant Bob viewer access to root folder
-    service.write_tuple(RelationTuple {
-        object: root_folder.clone(),
-        relation: viewer_rel.clone(),
-        user: bob.clone(),
-    })?;
-    println!("✅ Granted Bob viewer access to root folder");
+    service.write_tuple(RelationTuple::new(
+        root_folder.clone(),
+        viewer_rel.clone(),
+        bob.clone(),
+    ))?;
+    println!("Granted Bob viewer access to root folder");
 
     println!("Bob's updated permissions:");
     println!(
@@ -212,12 +198,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Revoke Bob's editor access to README
-    service.delete_tuple(&RelationTuple {
-        object: readme_file.clone(),
-        relation: editor_rel.clone(),
-        user: bob.clone(),
-    })?;
-    println!("\n❌ Revoked Bob's editor access to README file");
+    service.delete_tuple(&RelationTuple::new(
+        readme_file.clone(),
+        editor_rel.clone(),
+        bob.clone(),
+    ))?;
+    println!("\nRevoked Bob's editor access to README file");
 
     println!("Bob's permissions after revocation:");
     println!(
@@ -229,12 +215,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         service.check(&readme_file, &editor_rel, &bob)?
     );
 
-    println!("\n🌳 Testing expand functionality...\n");
+    println!("\nTesting expand functionality...\n");
 
-    // Expand the viewer userset for README file
     let expanded = service.expand(&readme_file, &viewer_rel)?;
     println!("Users who can view README file: {expanded:?}");
 
-    println!("\n✨ Example completed successfully!");
+    println!("\nExample completed successfully!");
     Ok(())
 }

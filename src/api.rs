@@ -1,22 +1,25 @@
 //! Public request/response engine API.
 
-use std::num::NonZeroUsize;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::{
+    num::NonZeroUsize,
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+};
 
 use thiserror::Error;
 
-use crate::ZanzibarService;
-use crate::domain::DomainError;
-use crate::error::ZanzibarError;
-use crate::eval::{EvaluationError, EvaluationLimits};
-use crate::model::{
-    CheckRequest, CheckResponse, ExpandRequest, ExpandResponse, LookupResources,
-    LookupResourcesRequest, LookupSubjects, LookupSubjectsRequest,
+use crate::{
+    ZanzibarService,
+    domain::DomainError,
+    error::ZanzibarError,
+    eval::{EvaluationError, EvaluationLimits},
+    model::{
+        CheckRequest, CheckResponse, ExpandRequest, ExpandResponse, LookupResources,
+        LookupResourcesRequest, LookupSubjects, LookupSubjectsRequest,
+    },
+    relationship::{Precondition, RelationshipMutation, StoreError},
+    revision::{ConsistencyError, ConsistencyToken, default_retained_snapshots},
+    schema::{SchemaError, SchemaSource},
 };
-use crate::relationship::{Precondition, RelationshipMutation, StoreError};
-use crate::revision::ConsistencyError;
-use crate::revision::{ConsistencyToken, default_retained_snapshots};
-use crate::schema::{SchemaError, SchemaSource};
 
 macro_rules! enter_api_span {
     ($operation:literal) => {
@@ -28,8 +31,8 @@ macro_rules! enter_api_span {
 /// Public local Zanzibar engine.
 ///
 /// The engine owns the in-memory schema, relationship indexes, retained revision snapshots, and a
-/// writer gate. All public reads acquire one coherent published snapshot, while writes publish a new
-/// snapshot atomically.
+/// writer gate. All public reads acquire one coherent published snapshot, while writes publish a
+/// new snapshot atomically.
 ///
 /// ```
 /// use simple_zanzibar::domain::Relationship;
@@ -176,7 +179,8 @@ impl ZanzibarEngine {
     /// Returns [`EngineError`] when request validation, store access, or evaluation fails.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "public API follows the request/response ownership contract in specs/15-public-api-design.md"
+        reason = "public API follows the request/response ownership contract in \
+                  specs/15-public-api-design.md"
     )]
     pub fn lookup_resources(
         &self,
@@ -194,7 +198,8 @@ impl ZanzibarEngine {
     /// Returns [`EngineError`] when request validation, store access, or evaluation fails.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "public API follows the request/response ownership contract in specs/15-public-api-design.md"
+        reason = "public API follows the request/response ownership contract in \
+                  specs/15-public-api-design.md"
     )]
     pub fn lookup_subjects(
         &self,
@@ -209,8 +214,8 @@ impl ZanzibarEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError`] when no schema is loaded, validation fails, or mutation semantics are
-    /// invalid.
+    /// Returns [`EngineError`] when no schema is loaded, validation fails, or mutation semantics
+    /// are invalid.
     pub fn write_relationships(
         &self,
         mutations: impl IntoIterator<Item = RelationshipMutation>,

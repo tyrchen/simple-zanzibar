@@ -1,18 +1,20 @@
-use std::io;
-use std::sync::{Arc, Barrier};
-use std::thread;
+use std::{
+    io,
+    sync::{Arc, Barrier},
+    thread,
+};
 
-use simple_zanzibar::ZanzibarEngine;
-use simple_zanzibar::domain::Relationship;
-use simple_zanzibar::model::{
-    CheckRequest, ExpandRequest, ExpandedUserset, LookupResourcesRequest, LookupSubjectsRequest,
-    Object, Relation, User,
+use simple_zanzibar::{
+    ZanzibarEngine,
+    domain::Relationship,
+    model::{
+        CheckRequest, ExpandRequest, ExpandedUserset, LookupResourcesRequest,
+        LookupSubjectsRequest, Object, Relation, User,
+    },
+    relationship::{Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter},
+    revision::Consistency,
+    schema::SchemaSource,
 };
-use simple_zanzibar::relationship::{
-    Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter,
-};
-use simple_zanzibar::revision::Consistency;
-use simple_zanzibar::schema::SchemaSource;
 
 const DOC_SCHEMA: &str = r"
     namespace doc {

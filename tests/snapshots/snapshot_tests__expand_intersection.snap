@@ -1,0 +1,25 @@
+---
+source: tests/snapshot_tests.rs
+expression: expanded
+---
+Intersection(
+    [
+        Union(
+            [
+                User(
+                    "alice",
+                ),
+            ],
+        ),
+        Union(
+            [
+                User(
+                    "alice",
+                ),
+                User(
+                    "bob",
+                ),
+            ],
+        ),
+    ],
+)

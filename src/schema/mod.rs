@@ -1,14 +1,18 @@
 //! Typed schema IR, resolver, compiler, and validator.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use thiserror::Error;
 
-use crate::domain::{ObjectType, RelationName, Relationship, SubjectRef};
-use crate::error::ZanzibarError;
-use crate::model::{NamespaceConfig, UsersetExpression as LegacyUsersetExpression};
-use crate::parser::{self, LegacyNamespaceAst, LegacyRelationAst};
+use crate::{
+    domain::{ObjectType, RelationName, Relationship, SubjectRef},
+    error::ZanzibarError,
+    model::{NamespaceConfig, UsersetExpression as LegacyUsersetExpression},
+    parser::{self, LegacyNamespaceAst, LegacyRelationAst},
+};
 
 /// A source schema document.
 #[cfg_attr(
@@ -76,7 +80,8 @@ pub enum SchemaError {
 
     /// A tuple-to-userset target relation cannot be resolved from the known schema.
     #[error(
-        "tuple-to-userset in '{namespace}.{owner}' references unavailable target relation '{missing}'"
+        "tuple-to-userset in '{namespace}.{owner}' references unavailable target relation \
+         '{missing}'"
     )]
     MissingTupleToUsersetTarget {
         /// Namespace containing the owner relation.

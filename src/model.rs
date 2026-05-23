@@ -19,11 +19,30 @@ pub struct Object {
     pub id: String,
 }
 
+impl Object {
+    /// Creates a namespaced object.
+    #[must_use]
+    pub fn new(namespace: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            id: id.into(),
+        }
+    }
+}
+
 /// Represents a relation or permission type on an object.
 /// e.g., `owner`, `editor`, `viewer`
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Relation(pub String);
+
+impl Relation {
+    /// Creates a relation or permission name.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+}
 
 /// Represents either a specific user ID or a reference to a userset (e.g., a group).
 #[cfg_attr(
@@ -39,6 +58,20 @@ pub enum User {
     /// A set of users, identified by an object-relation pair.
     /// e.g., `group:eng#member`
     Userset(Object, Relation),
+}
+
+impl User {
+    /// Creates a direct user subject.
+    #[must_use]
+    pub fn user_id(id: impl Into<String>) -> Self {
+        Self::UserId(id.into())
+    }
+
+    /// Creates a userset subject.
+    #[must_use]
+    pub fn userset(object: Object, relation: Relation) -> Self {
+        Self::Userset(object, relation)
+    }
 }
 
 /// The core relation tuple, representing a single permission assertion.
@@ -57,6 +90,18 @@ pub struct RelationTuple {
     pub relation: Relation,
     /// Relationship subject.
     pub user: User,
+}
+
+impl RelationTuple {
+    /// Creates a relationship tuple.
+    #[must_use]
+    pub fn new(object: Object, relation: Relation, user: User) -> Self {
+        Self {
+            object,
+            relation,
+            user,
+        }
+    }
 }
 
 /// Request for a check at a specified consistency level.
