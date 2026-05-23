@@ -58,7 +58,10 @@ fn write_or_abort(store: &mut impl TupleStore, tuple: RelationTuple) {
 
 fn service_with_relationships(count: usize) -> ZanzibarService {
     let mut service = ZanzibarService::new();
-    service.add_config(owner_namespace());
+    if let Err(error) = service.add_config(owner_namespace()) {
+        eprintln!("failed to build service benchmark schema: {error}");
+        std::process::abort();
+    }
 
     for index in 0..count {
         if let Err(error) = service.write_tuple(owner_tuple(index)) {

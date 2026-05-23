@@ -1,6 +1,9 @@
 //! Defines custom error types for the application.
 use thiserror::Error;
 
+use crate::domain::DomainError;
+use crate::schema::SchemaError;
+
 #[derive(Error, Debug, PartialEq)]
 pub enum ZanzibarError {
     #[error("Namespace '{0}' not found")]
@@ -14,4 +17,10 @@ pub enum ZanzibarError {
 
     #[error("Storage error: {0}")]
     StorageError(String),
+
+    #[error(transparent)]
+    Domain(#[from] DomainError),
+
+    #[error(transparent)]
+    Schema(#[from] SchemaError),
 }

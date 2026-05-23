@@ -325,7 +325,7 @@ impl ZanzibarService {
     pub fn add_dsl(&mut self, dsl: &str) -> Result<(), ZanzibarError>
 
     // Add namespace configuration
-    pub fn add_config(&mut self, config: NamespaceConfig)
+    pub fn add_config(&mut self, config: NamespaceConfig) -> Result<(), ZanzibarError>
 
     // Write a relation tuple
     pub fn write_tuple(&mut self, tuple: RelationTuple) -> Result<(), ZanzibarError>

@@ -1,27 +1,32 @@
 //! Core evaluation logic for `check` and `expand` requests.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
 
 use crate::error::ZanzibarError;
 use crate::model::{ExpandedUserset, NamespaceConfig, Object, Relation, User, UsersetExpression};
 use crate::store::TupleStore;
 
-fn check_internal<S>(
+fn check_internal<S, C>(
     object: &Object,
     relation: &Relation,
     user: &User,
-    config: &NamespaceConfig,
+    configs: &HashMap<String, NamespaceConfig, C>,
     store: &(impl TupleStore + ?Sized),
     visited: &mut HashSet<(Object, Relation, User), S>,
 ) -> Result<bool, ZanzibarError>
 where
     S: BuildHasher,
+    C: BuildHasher,
 {
     if !visited.insert((object.clone(), relation.clone(), user.clone())) {
         // We've already seen this exact check in this path, so we're in a cycle.
         return Ok(false);
     }
+
+    let config = configs
+        .get(&object.namespace)
+        .ok_or_else(|| ZanzibarError::NamespaceNotFound(object.namespace.clone()))?;
 
     let relation_config = config
         .relations
@@ -34,24 +39,25 @@ where
         .as_ref()
         .unwrap_or(&UsersetExpression::This);
 
-    let result = eval_expression(object, relation, user, config, store, visited, rewrite);
+    let result = eval_expression(object, relation, user, configs, store, visited, rewrite);
 
     // Important: remove the current check from `visited` on the way back up the recursion.
     visited.remove(&(object.clone(), relation.clone(), user.clone()));
     result
 }
 
-fn eval_expression<S>(
+fn eval_expression<S, C>(
     object: &Object,
     relation: &Relation,
     user: &User,
-    config: &NamespaceConfig,
+    configs: &HashMap<String, NamespaceConfig, C>,
     store: &(impl TupleStore + ?Sized),
     visited: &mut HashSet<(Object, Relation, User), S>,
     expression: &UsersetExpression,
 ) -> Result<bool, ZanzibarError>
 where
     S: BuildHasher,
+    C: BuildHasher,
 {
     match expression {
         UsersetExpression::This => {
@@ -68,7 +74,7 @@ where
                     // Note: a subtle but important detail. When checking a userset,
                     // we must start a fresh `check` call, not `eval_expression`,
                     // as the new object (`obj`) may have its own rewrite rules.
-                    if check_internal(&obj, &rel, user, config, store, visited)? {
+                    if check_internal(&obj, &rel, user, configs, store, visited)? {
                         return Ok(true);
                     }
                 }
@@ -79,7 +85,7 @@ where
             relation: computed_relation,
         } => {
             // Similarly, start a fresh `check` to respect the rewrite rules of the new relation.
-            check_internal(object, computed_relation, user, config, store, visited)
+            check_internal(object, computed_relation, user, configs, store, visited)
         }
         UsersetExpression::TupleToUserset {
             tupleset_relation,
@@ -92,7 +98,7 @@ where
                         &intermediate_obj,
                         computed_userset_relation,
                         user,
-                        config,
+                        configs,
                         store,
                         visited,
                     )? {
@@ -104,7 +110,7 @@ where
         }
         UsersetExpression::Union(expressions) => {
             for expr in expressions {
-                if eval_expression(object, relation, user, config, store, visited, expr)? {
+                if eval_expression(object, relation, user, configs, store, visited, expr)? {
                     return Ok(true);
                 }
             }
@@ -113,7 +119,7 @@ where
         UsersetExpression::Intersection(expressions) => {
             for expr in expressions {
                 // If any sub-expression is false, the whole intersection is false.
-                if !eval_expression(object, relation, user, config, store, visited, expr)? {
+                if !eval_expression(object, relation, user, configs, store, visited, expr)? {
                     return Ok(false);
                 }
             }
@@ -123,12 +129,12 @@ where
         UsersetExpression::Exclusion { base, exclude } => {
             // If the user is in the `exclude` set, the result is false.
             let is_excluded =
-                eval_expression(object, relation, user, config, store, visited, exclude)?;
+                eval_expression(object, relation, user, configs, store, visited, exclude)?;
             if is_excluded {
                 return Ok(false);
             }
             // Otherwise, the result is determined by the `base` set.
-            eval_expression(object, relation, user, config, store, visited, base)
+            eval_expression(object, relation, user, configs, store, visited, base)
         }
     }
 }
@@ -150,7 +156,29 @@ pub fn check<S>(
 where
     S: BuildHasher,
 {
-    check_internal(object, relation, user, config, store, visited)
+    let configs = HashMap::from([(config.name.clone(), config.clone())]);
+    check_internal(object, relation, user, &configs, store, visited)
+}
+
+/// Evaluates a `check` request against a whole schema config map.
+///
+/// # Errors
+///
+/// Returns [`ZanzibarError::NamespaceNotFound`] or [`ZanzibarError::RelationNotFound`] when a
+/// recursive userset edge references an unknown namespace or relation.
+pub fn check_with_configs<S, C>(
+    object: &Object,
+    relation: &Relation,
+    user: &User,
+    configs: &HashMap<String, NamespaceConfig, C>,
+    store: &(impl TupleStore + ?Sized),
+    visited: &mut HashSet<(Object, Relation, User), S>,
+) -> Result<bool, ZanzibarError>
+where
+    S: BuildHasher,
+    C: BuildHasher,
+{
+    check_internal(object, relation, user, configs, store, visited)
 }
 
 /// Evaluates an `expand` request.
@@ -165,6 +193,29 @@ pub fn expand(
     config: &NamespaceConfig,
     store: &(impl TupleStore + ?Sized),
 ) -> Result<ExpandedUserset, ZanzibarError> {
+    let configs = HashMap::from([(config.name.clone(), config.clone())]);
+    expand_with_configs(object, relation, &configs, store)
+}
+
+/// Evaluates an `expand` request against a whole schema config map.
+///
+/// # Errors
+///
+/// Returns [`ZanzibarError::NamespaceNotFound`] or [`ZanzibarError::RelationNotFound`] when the
+/// requested relation or a recursive userset edge cannot be resolved.
+pub fn expand_with_configs<C>(
+    object: &Object,
+    relation: &Relation,
+    configs: &HashMap<String, NamespaceConfig, C>,
+    store: &(impl TupleStore + ?Sized),
+) -> Result<ExpandedUserset, ZanzibarError>
+where
+    C: BuildHasher,
+{
+    let config = configs
+        .get(&object.namespace)
+        .ok_or_else(|| ZanzibarError::NamespaceNotFound(object.namespace.clone()))?;
+
     let relation_config = config
         .relations
         .get(relation)
@@ -175,16 +226,19 @@ pub fn expand(
         .as_ref()
         .unwrap_or(&UsersetExpression::This);
 
-    expand_expression(object, relation, config, store, rewrite)
+    expand_expression(object, relation, configs, store, rewrite)
 }
 
-fn expand_expression(
+fn expand_expression<C>(
     object: &Object,
     relation: &Relation,
-    config: &NamespaceConfig,
+    configs: &HashMap<String, NamespaceConfig, C>,
     store: &(impl TupleStore + ?Sized),
     expression: &UsersetExpression,
-) -> Result<ExpandedUserset, ZanzibarError> {
+) -> Result<ExpandedUserset, ZanzibarError>
+where
+    C: BuildHasher,
+{
     match expression {
         UsersetExpression::This => {
             let direct_tuples = store.read_tuples(object, Some(relation), None);
@@ -199,7 +253,7 @@ fn expand_expression(
         }
         UsersetExpression::ComputedUserset {
             relation: computed_relation,
-        } => expand(object, computed_relation, config, store),
+        } => expand_with_configs(object, computed_relation, configs, store),
         UsersetExpression::TupleToUserset {
             tupleset_relation,
             computed_userset_relation,
@@ -208,10 +262,10 @@ fn expand_expression(
             let mut users = Vec::new();
             for t in tupleset {
                 if let User::Userset(intermediate_obj, _) = t.user {
-                    users.push(expand(
+                    users.push(expand_with_configs(
                         &intermediate_obj,
                         computed_userset_relation,
-                        config,
+                        configs,
                         store,
                     )?);
                 }
@@ -221,20 +275,20 @@ fn expand_expression(
         UsersetExpression::Union(expressions) => {
             let mut sub_expressions = Vec::new();
             for expr in expressions {
-                sub_expressions.push(expand_expression(object, relation, config, store, expr)?);
+                sub_expressions.push(expand_expression(object, relation, configs, store, expr)?);
             }
             Ok(ExpandedUserset::Union(sub_expressions))
         }
         UsersetExpression::Intersection(expressions) => {
             let mut sub_expressions = Vec::new();
             for expr in expressions {
-                sub_expressions.push(expand_expression(object, relation, config, store, expr)?);
+                sub_expressions.push(expand_expression(object, relation, configs, store, expr)?);
             }
             Ok(ExpandedUserset::Intersection(sub_expressions))
         }
         UsersetExpression::Exclusion { base, exclude } => {
-            let base_expr = expand_expression(object, relation, config, store, base)?;
-            let exclude_expr = expand_expression(object, relation, config, store, exclude)?;
+            let base_expr = expand_expression(object, relation, configs, store, base)?;
+            let exclude_expr = expand_expression(object, relation, configs, store, exclude)?;
             Ok(ExpandedUserset::Exclusion {
                 base: Box::new(base_expr),
                 exclude: Box::new(exclude_expr),

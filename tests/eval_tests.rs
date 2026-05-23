@@ -8,7 +8,7 @@ use simple_zanzibar::ZanzibarService;
 use std::collections::HashMap;
 
 /// Creates a `ZanzibarService` pre-populated with a common test configuration.
-fn create_test_service() -> ZanzibarService {
+fn create_test_service() -> Result<ZanzibarService, ZanzibarError> {
     let mut service = ZanzibarService::new();
 
     let doc_namespace = NamespaceConfig {
@@ -49,26 +49,37 @@ fn create_test_service() -> ZanzibarService {
             ),
         ]),
     };
-    service.add_config(doc_namespace);
+    service.add_config(doc_namespace)?;
 
     let folder_namespace = NamespaceConfig {
         name: "folder".to_string(),
-        relations: HashMap::from([(
-            Relation("viewer".to_string()),
-            RelationConfig {
-                name: Relation("viewer".to_string()),
-                userset_rewrite: None,
-            },
-        )]),
+        relations: HashMap::from([
+            (
+                Relation("owner".to_string()),
+                RelationConfig {
+                    name: Relation("owner".to_string()),
+                    userset_rewrite: None,
+                },
+            ),
+            (
+                Relation("viewer".to_string()),
+                RelationConfig {
+                    name: Relation("viewer".to_string()),
+                    userset_rewrite: Some(UsersetExpression::ComputedUserset {
+                        relation: Relation("owner".to_string()),
+                    }),
+                },
+            ),
+        ]),
     };
-    service.add_config(folder_namespace);
+    service.add_config(folder_namespace)?;
 
-    service
+    Ok(service)
 }
 
 #[test]
 fn test_check_direct_access() -> Result<(), ZanzibarError> {
-    let mut service = create_test_service();
+    let mut service = create_test_service()?;
     let doc1 = Object {
         namespace: "doc".to_string(),
         id: "1".to_string(),
@@ -88,7 +99,7 @@ fn test_check_direct_access() -> Result<(), ZanzibarError> {
 
 #[test]
 fn test_check_computed_userset() -> Result<(), ZanzibarError> {
-    let mut service = create_test_service();
+    let mut service = create_test_service()?;
     let doc1 = Object {
         namespace: "doc".to_string(),
         id: "1".to_string(),
@@ -110,7 +121,7 @@ fn test_check_computed_userset() -> Result<(), ZanzibarError> {
 
 #[test]
 fn test_check_hierarchical_access() -> Result<(), ZanzibarError> {
-    let mut service = create_test_service();
+    let mut service = create_test_service()?;
 
     let folder_a = Object {
         namespace: "folder".to_string(),
@@ -123,10 +134,10 @@ fn test_check_hierarchical_access() -> Result<(), ZanzibarError> {
     let bob = User::UserId("bob".to_string());
     let viewer_rel = Relation("viewer".to_string());
 
-    // Bob can view Folder A
+    // Bob owns Folder A, and folder#viewer rewrites to folder#owner.
     service.write_tuple(RelationTuple {
         object: folder_a.clone(),
-        relation: viewer_rel.clone(),
+        relation: Relation("owner".to_string()),
         user: bob.clone(),
     })?;
 
@@ -139,6 +150,37 @@ fn test_check_hierarchical_access() -> Result<(), ZanzibarError> {
     })?;
 
     // Assert that Bob can view Doc 1 due to inheritance.
+    assert!(service.check(&doc1, &viewer_rel, &bob)?);
+    Ok(())
+}
+
+#[test]
+fn test_check_cross_namespace_userset_uses_target_namespace_rewrite() -> Result<(), ZanzibarError> {
+    let mut service = create_test_service()?;
+
+    let folder_a = Object {
+        namespace: "folder".to_string(),
+        id: "A".to_string(),
+    };
+    let doc1 = Object {
+        namespace: "doc".to_string(),
+        id: "1".to_string(),
+    };
+    let bob = User::UserId("bob".to_string());
+    let viewer_rel = Relation("viewer".to_string());
+
+    service.write_tuple(RelationTuple {
+        object: folder_a.clone(),
+        relation: Relation("owner".to_string()),
+        user: bob.clone(),
+    })?;
+
+    service.write_tuple(RelationTuple {
+        object: doc1.clone(),
+        relation: Relation("parent".to_string()),
+        user: User::Userset(folder_a, viewer_rel.clone()),
+    })?;
+
     assert!(service.check(&doc1, &viewer_rel, &bob)?);
     Ok(())
 }

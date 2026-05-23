@@ -13,51 +13,69 @@ use crate::model::{NamespaceConfig, Relation, RelationConfig, UsersetExpression}
 #[grammar = "grammar.pest"]
 struct ZanzibarParser;
 
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyNamespaceAst {
+    pub(crate) name: String,
+    pub(crate) relations: Vec<LegacyRelationAst>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyRelationAst {
+    pub(crate) name: String,
+    pub(crate) rewrite: Option<UsersetExpression>,
+}
+
+pub(crate) fn parse_dsl_ast(dsl: &str) -> Result<Vec<LegacyNamespaceAst>, ZanzibarError> {
+    let pairs = ZanzibarParser::parse(Rule::file, dsl)
+        .map_err(|e| ZanzibarError::ParseError(e.to_string()))?;
+
+    let mut namespaces = Vec::new();
+    for pair in pairs {
+        for inner_pair in pair.into_inner() {
+            if inner_pair.as_rule() == Rule::namespace_def {
+                namespaces.push(parse_namespace_ast(inner_pair)?);
+            }
+        }
+    }
+
+    Ok(namespaces)
+}
+
 /// Parses a DSL string into a vector of `NamespaceConfig`s.
 ///
 /// # Errors
 ///
 /// Returns [`ZanzibarError::ParseError`] when the input does not match the DSL grammar.
 pub fn parse_dsl(dsl: &str) -> Result<Vec<NamespaceConfig>, ZanzibarError> {
-    let pairs = ZanzibarParser::parse(Rule::file, dsl)
-        .map_err(|e| ZanzibarError::ParseError(e.to_string()))?;
-
-    let mut configs = Vec::new();
-    for pair in pairs {
-        for inner_pair in pair.into_inner() {
-            if inner_pair.as_rule() == Rule::namespace_def {
-                configs.push(parse_namespace(inner_pair)?);
-            }
-        }
-    }
-    Ok(configs)
+    parse_dsl_ast(dsl)?
+        .into_iter()
+        .map(TryFrom::try_from)
+        .collect()
 }
 
-fn parse_namespace(pair: Pair<Rule>) -> Result<NamespaceConfig, ZanzibarError> {
+fn parse_namespace_ast(pair: Pair<Rule>) -> Result<LegacyNamespaceAst, ZanzibarError> {
     let mut inner = pair.into_inner();
 
     // Skip the NAMESPACE keyword and get the identifier.
     let _namespace_keyword = next_pair(&mut inner, "namespace keyword")?;
     let name_pair = next_pair(&mut inner, "namespace identifier")?;
     let name = name_pair.as_str().to_string();
-    let mut relations = HashMap::new();
+    let mut relations = Vec::new();
 
     for relation_pair in inner {
-        let (rel, rel_config) = parse_relation(relation_pair)?;
-        relations.insert(rel, rel_config);
+        relations.push(parse_relation_ast(relation_pair)?);
     }
 
-    Ok(NamespaceConfig { name, relations })
+    Ok(LegacyNamespaceAst { name, relations })
 }
 
-fn parse_relation(pair: Pair<Rule>) -> Result<(Relation, RelationConfig), ZanzibarError> {
+fn parse_relation_ast(pair: Pair<Rule>) -> Result<LegacyRelationAst, ZanzibarError> {
     let mut inner = pair.into_inner();
 
     // Skip the RELATION keyword.
     let _relation_keyword = next_pair(&mut inner, "relation keyword")?;
     let name_pair = next_pair(&mut inner, "relation name")?;
-    let name_str = name_pair.as_str();
-    let name = Relation(name_str.to_string());
+    let name = name_pair.as_str().to_string();
 
     let rewrite = match inner.next() {
         Some(rewrite_pair) => {
@@ -70,13 +88,30 @@ fn parse_relation(pair: Pair<Rule>) -> Result<(Relation, RelationConfig), Zanzib
         None => None,
     };
 
-    Ok((
-        name.clone(),
-        RelationConfig {
-            name,
-            userset_rewrite: rewrite,
-        },
-    ))
+    Ok(LegacyRelationAst { name, rewrite })
+}
+
+impl TryFrom<LegacyNamespaceAst> for NamespaceConfig {
+    type Error = ZanzibarError;
+
+    fn try_from(namespace: LegacyNamespaceAst) -> Result<Self, Self::Error> {
+        let mut relations = HashMap::new();
+        for relation in namespace.relations {
+            let name = Relation(relation.name);
+            relations.insert(
+                name.clone(),
+                RelationConfig {
+                    name,
+                    userset_rewrite: relation.rewrite,
+                },
+            );
+        }
+
+        Ok(NamespaceConfig {
+            name: namespace.name,
+            relations,
+        })
+    }
 }
 
 fn parse_rewrite(pair: Pair<Rule>) -> Result<UsersetExpression, ZanzibarError> {
