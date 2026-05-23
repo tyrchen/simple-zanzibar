@@ -7,13 +7,13 @@ use std::{
 };
 
 use simple_zanzibar::{
-    EngineError, PolicyText, SnapshotCompression, SnapshotLoadOptions, SnapshotSaveOptions,
-    ZanzibarEngine, ZanzibarService,
+    EngineError, PolicyText, SnapshotLoadOptions, SnapshotSaveOptions, ZanzibarEngine,
+    ZanzibarService,
     domain::Relationship,
     eval::EvaluationLimits,
     model::{
-        LookupObjectPermissionsRequest, LookupPermissionsRequest, LookupResourcesRequest, Object,
-        PermissionSubjects, Relation, User,
+        CheckRequest, LookupObjectPermissionsRequest, LookupPermissionsRequest,
+        LookupResourcesRequest, Object, PermissionSubjects, Relation, User,
     },
     relationship::RelationshipMutation,
     revision::Consistency,
@@ -69,16 +69,79 @@ fn test_should_expose_permission_lookup_through_engine_api()
     let policy = populated_service()?.export_policy_text()?;
     let engine = ZanzibarEngine::from_policy_text(&policy)?;
 
-    let permissions = engine.lookup_permissions(LookupPermissionsRequest {
-        subject: User::UserId("alice".to_string()),
-        resource: doc("inherited_doc"),
-        consistency: Consistency::Latest,
-    })?;
+    let permissions = engine.lookup_permissions(LookupPermissionsRequest::new(
+        User::UserId("alice".to_string()),
+        doc("inherited_doc"),
+        Consistency::Latest,
+    ))?;
 
     assert_eq!(
         permissions.permissions,
         vec![relation("can_view"), relation("parent")],
     );
+    Ok(())
+}
+
+#[test]
+fn test_should_offer_checked_ergonomic_engine_helpers() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.apply_schema(SchemaSource {
+        name: Some("docs"),
+        text: r"
+        namespace doc {
+            relation viewer {}
+        }
+        ",
+    })?;
+
+    engine.touch_relationship("doc:readme#viewer@user:alice")?;
+
+    assert!(
+        engine
+            .check(CheckRequest::new(
+                doc("readme"),
+                relation("viewer"),
+                User::UserId("alice".to_string()),
+                Consistency::Latest,
+            ))?
+            .allowed
+    );
+    assert_eq!(
+        engine
+            .lookup_permissions(LookupPermissionsRequest::new(
+                User::UserId("alice".to_string()),
+                doc("readme"),
+                Consistency::Latest,
+            ))?
+            .permissions,
+        vec![relation("viewer")],
+    );
+    assert_eq!(
+        engine
+            .lookup_object_permissions(LookupObjectPermissionsRequest::new(
+                doc("readme"),
+                "user",
+                Consistency::Latest,
+            ))?
+            .permissions,
+        vec![PermissionSubjects {
+            permission: relation("viewer"),
+            subjects: vec![User::UserId("alice".to_string())],
+        }],
+    );
+
+    engine.delete_relationship("doc:readme#viewer@user:alice")?;
+    assert!(
+        !engine
+            .check(CheckRequest::new(
+                doc("readme"),
+                relation("viewer"),
+                User::UserId("alice".to_string()),
+                Consistency::Latest,
+            ))?
+            .allowed
+    );
+
     Ok(())
 }
 
@@ -150,22 +213,9 @@ fn test_should_save_snapshot_from_policy_text_with_zstd() -> Result<(), Box<dyn 
 {
     let policy = populated_service()?.export_policy_text()?;
     let path = temp_snapshot_path("policy_zstd");
-    ZanzibarService::save_snapshot_from_policy_text(
-        &path,
-        &policy,
-        SnapshotSaveOptions {
-            compression: SnapshotCompression::Zstd,
-            ..SnapshotSaveOptions::default()
-        },
-    )?;
+    ZanzibarService::save_snapshot_from_policy_text(&path, &policy, SnapshotSaveOptions::zstd())?;
 
-    let loaded = ZanzibarService::load_snapshot(
-        &path,
-        SnapshotLoadOptions {
-            compression: SnapshotCompression::Zstd,
-            ..SnapshotLoadOptions::default()
-        },
-    )?;
+    let loaded = ZanzibarService::load_snapshot(&path, SnapshotLoadOptions::zstd())?;
 
     assert!(loaded.check(
         &doc("direct_doc"),

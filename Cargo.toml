@@ -70,6 +70,10 @@ test = false
 name = "file_permissions"
 path = "examples/file_permissions.rs"
 
+[[example]]
+name = "collaboration_workspace"
+path = "examples/collaboration_workspace.rs"
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

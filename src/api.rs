@@ -228,6 +228,42 @@ impl ZanzibarEngine {
         self.write_relationships_with_preconditions(mutations, [])
     }
 
+    /// Creates one relationship, failing if it already exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when the relationship text is invalid, no schema is loaded,
+    /// validation fails, or the relationship already exists.
+    pub fn create_relationship(&self, relationship: &str) -> Result<ConsistencyToken, EngineError> {
+        enter_api_span!("create_relationship");
+        let mutation = RelationshipMutation::create(relationship)?;
+        self.write_relationships([mutation])
+    }
+
+    /// Grants or refreshes one relationship idempotently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when the relationship text is invalid, no schema is loaded, or
+    /// validation fails.
+    pub fn touch_relationship(&self, relationship: &str) -> Result<ConsistencyToken, EngineError> {
+        enter_api_span!("touch_relationship");
+        let mutation = RelationshipMutation::touch(relationship)?;
+        self.write_relationships([mutation])
+    }
+
+    /// Deletes one relationship, failing if it does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when the relationship text is invalid, no schema is loaded,
+    /// validation fails, or the relationship does not exist.
+    pub fn delete_relationship(&self, relationship: &str) -> Result<ConsistencyToken, EngineError> {
+        enter_api_span!("delete_relationship");
+        let mutation = RelationshipMutation::delete(relationship)?;
+        self.write_relationships([mutation])
+    }
+
     /// Applies relationship mutations with preconditions and publishes a new revision.
     ///
     /// # Errors

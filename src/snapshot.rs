@@ -60,6 +60,30 @@ impl Default for SnapshotSaveOptions {
     }
 }
 
+impl SnapshotSaveOptions {
+    /// Creates save options for an uncompressed `.szsnap` artifact.
+    #[must_use]
+    pub fn uncompressed() -> Self {
+        Self::default()
+    }
+
+    /// Creates save options for a zstd-wrapped `.szsnap.zst` artifact.
+    #[must_use]
+    pub fn zstd() -> Self {
+        Self {
+            compression: SnapshotCompression::Zstd,
+            ..Self::default()
+        }
+    }
+
+    /// Returns options with a specific zstd compression level.
+    #[must_use]
+    pub fn with_zstd_level(mut self, zstd_level: i32) -> Self {
+        self.zstd_level = zstd_level;
+        self
+    }
+}
+
 /// Snapshot compression mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotCompression {
@@ -92,6 +116,23 @@ impl Default for SnapshotLoadOptions {
             validation: SnapshotValidationMode::Full,
             integrity: SnapshotIntegrityMode::Checksum,
             max_file_bytes: non_zero_u64(DEFAULT_MAX_FILE_BYTES),
+        }
+    }
+}
+
+impl SnapshotLoadOptions {
+    /// Creates load options for an uncompressed `.szsnap` artifact.
+    #[must_use]
+    pub fn uncompressed() -> Self {
+        Self::default()
+    }
+
+    /// Creates load options for a zstd-wrapped `.szsnap.zst` artifact.
+    #[must_use]
+    pub fn zstd() -> Self {
+        Self {
+            compression: SnapshotCompression::Zstd,
+            ..Self::default()
         }
     }
 }

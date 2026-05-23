@@ -203,6 +203,18 @@ pub struct LookupResourcesRequest {
     pub resource_type: String,
 }
 
+impl LookupResourcesRequest {
+    /// Creates a request to list resources of one type that a subject can access.
+    #[must_use]
+    pub fn new(subject: User, permission: Relation, resource_type: impl Into<String>) -> Self {
+        Self {
+            subject,
+            permission,
+            resource_type: resource_type.into(),
+        }
+    }
+}
+
 /// Resources returned by a lookup request.
 #[cfg_attr(
     feature = "serde",
@@ -229,6 +241,18 @@ pub struct LookupSubjectsRequest {
     pub permission: Relation,
     /// Subject namespace/type to return.
     pub subject_type: String,
+}
+
+impl LookupSubjectsRequest {
+    /// Creates a request to list subjects of one type that can access a resource.
+    #[must_use]
+    pub fn new(resource: Object, permission: Relation, subject_type: impl Into<String>) -> Self {
+        Self {
+            resource,
+            permission,
+            subject_type: subject_type.into(),
+        }
+    }
 }
 
 /// Subjects returned by a lookup request.
@@ -259,6 +283,18 @@ pub struct LookupPermissionsRequest {
     pub consistency: Consistency,
 }
 
+impl LookupPermissionsRequest {
+    /// Creates a request to list all relations or permissions one subject has on one resource.
+    #[must_use]
+    pub fn new(subject: User, resource: Object, consistency: Consistency) -> Self {
+        Self {
+            subject,
+            resource,
+            consistency,
+        }
+    }
+}
+
 /// Permissions returned by a subject/resource lookup request.
 #[cfg_attr(
     feature = "serde",
@@ -285,6 +321,22 @@ pub struct LookupObjectPermissionsRequest {
     pub subject_type: String,
     /// Consistency selector for the read.
     pub consistency: Consistency,
+}
+
+impl LookupObjectPermissionsRequest {
+    /// Creates a request to list subjects grouped by each relation or permission on a resource.
+    #[must_use]
+    pub fn new(
+        resource: Object,
+        subject_type: impl Into<String>,
+        consistency: Consistency,
+    ) -> Self {
+        Self {
+            resource,
+            subject_type: subject_type.into(),
+            consistency,
+        }
+    }
 }
 
 /// Subjects grouped by permission for one resource.
