@@ -52,6 +52,7 @@ This plan defines how each phase proves correctness, safety, compatibility, and 
 | Performance | criterion benchmarks for budgets in [71](./71-performance-budgets-design.md). |
 | Memory | peak RSS checks for compact relationship store budgets in [16](./16-compact-relationship-store-design.md). |
 | Snapshot artifact | save/load equivalence, corrupt file rejection, file size, load time, and load-time RSS for [17](./17-compact-snapshot-format-design.md) and trusted fast-load coverage for [18](./18-trusted-fast-snapshot-load-design.md). |
+| Public API completeness | zstd snapshot round trips, policy text import/export, schema replacement/deletion, permission enumeration, and public API benchmarks for [19](./19-public-api-completeness-design.md). |
 
 ## 4. Command Gates
 
@@ -134,6 +135,14 @@ snapshot_trusted_loaded_check_inherited/1m
 snapshot_trusted_loaded_lookup_resources/1m
 snapshot_load_peak_rss/1m
 snapshot_file_size/1m
+public_api/check/100k
+public_api/lookup_resources/100k
+public_api/lookup_subjects/100k
+public_api/lookup_permissions/100k
+public_api/lookup_object_permissions/100k
+public_api/export_policy_text/100k
+public_api/snapshot_save_zstd/100k
+public_api/snapshot_load_zstd/100k
 ```
 
 Required corrupt-input tests:
@@ -154,9 +163,23 @@ snapshot built from the same relationship set. Trusted fast-load snapshots must 
 that subsequent create/touch/delete writes preserve relationship uniqueness semantics after the lazy
 uniqueness index is built.
 
-## 9. Cross-References
+## 9. Public API Completeness Verification
+
+Required tests for [19](./19-public-api-completeness-design.md):
+
+- raw and zstd snapshot artifacts round trip through both `ZanzibarService` and `ZanzibarEngine`;
+- zstd load rejects decompressed payloads beyond `SnapshotLoadOptions::max_file_bytes`;
+- `PolicyText` import/export preserves check, expand, lookup, and permission enumeration behavior;
+- exported policy files are deterministic, sorted, and grouped by resource namespace;
+- schema replacement, namespace deletion, and relation deletion publish revisions on success and
+  leave the prior state observable after failed deletion;
+- `lookup_permissions` and `lookup_object_permissions` cover direct, computed userset,
+  tuple-to-userset, and exclusion behavior.
+
+## 10. Cross-References
 
 - <- Depends on: [70-security-design.md](./70-security-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md)
 - -> Consumed by: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Memory layout: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
 - Snapshot artifact format: [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md)
+- Public API completeness: [19-public-api-completeness-design.md](./19-public-api-completeness-design.md)

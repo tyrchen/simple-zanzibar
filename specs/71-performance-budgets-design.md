@@ -154,6 +154,60 @@ benchmarks must still satisfy the loaded-query budgets in § 3.2.
 | `snapshot_trusted_loaded_check_inherited/1m` | 1M org rules | `[7.2171 us, 7.2732 us, 7.3198 us]` | passes <= 25 us |
 | `snapshot_trusted_loaded_lookup_resources/1m` | 1M org rules | `[3.8150 ms, 3.9764 ms, 4.1401 ms]` | passes <= 10 ms |
 
+## 3.5 Public API Completeness Benchmarks
+
+[19-public-api-completeness-design.md](./19-public-api-completeness-design.md) adds a public API
+benchmark harness that measures the crate-facing surface, including zstd snapshot wrappers and
+policy text export.
+
+| Operation | Dataset | Target |
+| --- | --- | ---: |
+| `public_api/check/100k` | 100k org rules | Criterion upper estimate <= 10 us |
+| `public_api/expand/100k` | 100k org rules | recorded baseline |
+| `public_api/lookup_resources/100k` | 100k org rules | Criterion upper estimate <= 10 ms |
+| `public_api/lookup_subjects/100k` | 100k org rules | Criterion upper estimate <= 10 ms |
+| `public_api/lookup_permissions/100k` | 100k org rules | Criterion upper estimate <= 250 us |
+| `public_api/lookup_object_permissions/100k` | 100k org rules | Criterion upper estimate <= 25 ms |
+| `public_api/write_relationships/1k_batch` | 100k org rules base | recorded baseline |
+| `public_api/export_policy_text/100k` | 100k org rules | recorded baseline |
+| `public_api/snapshot_save_zstd/100k` | 100k org rules | recorded baseline |
+| `public_api/snapshot_load_zstd/100k` | 100k org rules | recorded baseline |
+
+The zstd numbers describe storage/distribution tradeoffs. They do not replace the trusted raw
+snapshot fast-load gate in § 3.4.
+
+2026-05-23 evidence:
+
+| Operation | Dataset | Measurement | Target status |
+| --- | --- | ---: | --- |
+| `public_api/apply_schema/small` | small schema | `[40.358 us, 40.742 us, 41.332 us]` | recorded baseline |
+| `public_api/replace_schema/small` | small schema | `[40.574 us, 41.285 us, 42.260 us]` | recorded baseline |
+| `public_api/delete_relation/small` | small schema | `[2.7558 us, 2.8226 us, 2.8841 us]` | recorded baseline |
+| `public_api/delete_namespace/small` | small schema | `[2.3846 us, 2.4320 us, 2.4550 us]` | recorded baseline |
+| `public_api/check/100k` | 100k org rules | `[2.8479 us, 2.8662 us, 2.8904 us]` | passes <= 10 us |
+| `public_api/expand/100k` | 100k org rules | `[4.6743 us, 4.7234 us, 4.8001 us]` | recorded baseline |
+| `public_api/lookup_resources/100k` | 100k org rules | `[3.2315 ms, 3.2529 ms, 3.2751 ms]` | passes <= 10 ms |
+| `public_api/lookup_subjects/100k` | 100k org rules | `[6.4236 us, 6.4700 us, 6.5226 us]` | passes <= 10 ms |
+| `public_api/lookup_permissions/100k` | 100k org rules | `[15.683 us, 15.799 us, 15.917 us]` | passes <= 250 us |
+| `public_api/lookup_object_permissions/100k` | 100k org rules | `[14.019 us, 14.090 us, 14.148 us]` | passes <= 25 ms |
+| `public_api/write_relationships/1k_batch` | 100k org rules base | `[7.3189 ms, 7.9381 ms, 8.5944 ms]` | recorded baseline |
+| `public_api/apply_policy_text/1k` | 1k org rules | `[1.0222 ms, 1.0575 ms, 1.1059 ms]` | recorded baseline |
+| `public_api/export_policy_text/100k` | 100k org rules | `[41.733 ms, 42.442 ms, 43.150 ms]` | recorded baseline |
+| `public_api/export_policy_files/1k` | 1k org rules | `[1.1863 ms, 1.2307 ms, 1.2975 ms]` | recorded baseline |
+| `public_api/snapshot_save_uncompressed/100k` | 100k org rules | `[49.547 ms, 50.476 ms, 51.422 ms]` | recorded baseline |
+| `public_api/snapshot_load_uncompressed/100k` | 100k org rules | `[52.936 ms, 53.320 ms, 53.705 ms]` | recorded baseline |
+| `public_api/snapshot_save_zstd/100k` | 100k org rules | `[64.139 ms, 64.937 ms, 65.745 ms]` | recorded baseline |
+| `public_api/snapshot_load_zstd/100k` | 100k org rules | `[62.064 ms, 63.144 ms, 64.369 ms]` | recorded baseline |
+
+Focused 1M regression checks after the public API additions:
+
+| Operation | Dataset | Measurement | Target status |
+| --- | --- | ---: | --- |
+| `snapshot_load_compact/1m` full mode | 1M org rules | `[574.45 ms, 578.91 ms, 583.77 ms]` | passes <= 700 ms; no detected regression |
+| `snapshot_load_trusted_fast/1m` | 1M org rules | `[138.30 ms, 139.35 ms, 140.46 ms]` | passes <= 200 ms; improved on this run |
+| `snapshot_loaded_check_direct/1m` | 1M org rules | `[2.9807 us, 2.9895 us, 3.0075 us]` | passes <= 10 us; change within noise |
+| `snapshot_trusted_loaded_check_direct/1m` | 1M org rules | `[3.0595 us, 3.0873 us, 3.1159 us]` | passes <= 10 us; no detected regression |
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.

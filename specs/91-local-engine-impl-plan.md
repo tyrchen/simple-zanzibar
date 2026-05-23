@@ -208,6 +208,28 @@ Exit criteria:
 - trusted loaded query benchmarks pass the loaded-query budgets.
 - `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`, `cargo +nightly fmt --check`, strict clippy including boundary lints, `cargo audit`, and `cargo deny check` pass.
 
+## 12b. Phase 10 - Public API Completeness
+
+Closes M9.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 10.1 | Add zstd snapshot compression options, bounded decompression, and raw/zstd load-save tests. | [19](./19-public-api-completeness-design.md), [17](./17-compact-snapshot-format-design.md), [70](./70-security-design.md) | 1 day |
+| 10.2 | Add `PolicyText`, policy import/export helpers, deterministic file export, and snapshot-from-policy helpers. | [19](./19-public-api-completeness-design.md), [15](./15-public-api-design.md) | 1.5 days |
+| 10.3 | Add schema replacement, namespace deletion, and relation deletion APIs with atomic revalidation. | [19](./19-public-api-completeness-design.md), [11](./11-schema-system-design.md), [13](./13-revision-consistency-design.md) | 1 day |
+| 10.4 | Add `lookup_permissions` and `lookup_object_permissions` request/response APIs on service and engine. | [19](./19-public-api-completeness-design.md), [14](./14-evaluation-engine-design.md), [15](./15-public-api-design.md) | 1 day |
+| 10.5 | Add integration tests for zstd, policy round trips, schema deletion failure atomicity, permission enumeration, and engine wrappers. | [19](./19-public-api-completeness-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+| 10.6 | Add `public_api` Criterion benchmark target and Makefile target; run and publish results. | [19](./19-public-api-completeness-design.md), [71](./71-performance-budgets-design.md) | 1 day |
+
+Exit criteria:
+
+- M9 roadmap criteria pass.
+- Existing snapshot full/trusted validation tests still pass.
+- zstd load applies the configured byte cap to both compressed and decompressed bytes.
+- Policy export/import is deterministic and behaviorally equivalent for check, expand, lookup, and permission enumeration.
+- Public API benchmark results are posted to the PR comment.
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`, `cargo +nightly fmt --check`, strict clippy including boundary lints, `cargo audit`, and `cargo deny check` pass.
+
 ## 13. Cross-References
 
 - Stakeholder roadmap: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md)
@@ -215,3 +237,4 @@ Exit criteria:
 - Verification gates: [72-testing-verification-plan.md](./72-testing-verification-plan.md)
 - Compact store design: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
 - Compact snapshot format: [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md)
+- Public API completeness: [19-public-api-completeness-design.md](./19-public-api-completeness-design.md)

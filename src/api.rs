@@ -14,9 +14,11 @@ use crate::{
     error::ZanzibarError,
     eval::{EvaluationError, EvaluationLimits},
     model::{
-        CheckRequest, CheckResponse, ExpandRequest, ExpandResponse, LookupResources,
-        LookupResourcesRequest, LookupSubjects, LookupSubjectsRequest,
+        CheckRequest, CheckResponse, ExpandRequest, ExpandResponse, LookupObjectPermissions,
+        LookupObjectPermissionsRequest, LookupPermissions, LookupPermissionsRequest,
+        LookupResources, LookupResourcesRequest, LookupSubjects, LookupSubjectsRequest,
     },
+    policy::{PolicyIoError, PolicyText},
     relationship::{Precondition, RelationshipMutation, StoreError},
     revision::{ConsistencyError, ConsistencyToken, default_retained_snapshots},
     schema::{SchemaError, SchemaSource},
@@ -251,6 +253,138 @@ impl ZanzibarEngine {
         enter_api_span!("apply_schema");
         let mut service = self.write_service("apply_schema")?;
         Ok(service.add_dsl_with_token(source.text)?)
+    }
+
+    /// Replaces the complete schema document and publishes a new revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when the schema cannot be parsed or existing relationships no longer
+    /// validate against it.
+    pub fn replace_schema(
+        &self,
+        source: SchemaSource<'_>,
+    ) -> Result<ConsistencyToken, EngineError> {
+        enter_api_span!("replace_schema");
+        let mut service = self.write_service("replace_schema")?;
+        Ok(service.replace_dsl_with_token(source.text)?)
+    }
+
+    /// Deletes one namespace definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when the namespace is missing or existing relationships still
+    /// reference it.
+    pub fn delete_namespace(&self, namespace: &str) -> Result<ConsistencyToken, EngineError> {
+        enter_api_span!("delete_namespace");
+        let mut service = self.write_service("delete_namespace")?;
+        Ok(service.delete_namespace(namespace)?)
+    }
+
+    /// Deletes one relation definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when the relation is missing or existing relationships still
+    /// reference it.
+    pub fn delete_relation(
+        &self,
+        namespace: &str,
+        relation: &str,
+    ) -> Result<ConsistencyToken, EngineError> {
+        enter_api_span!("delete_relation");
+        let mut service = self.write_service("delete_relation")?;
+        Ok(service.delete_relation(namespace, relation)?)
+    }
+
+    /// Builds a new engine from policy text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when policy text cannot be parsed or validated.
+    pub fn from_policy_text(policy: &PolicyText) -> Result<Self, EngineError> {
+        enter_api_span!("from_policy_text");
+        Ok(Self {
+            service: RwLock::new(ZanzibarService::from_policy_text(policy)?),
+        })
+    }
+
+    /// Replaces this engine's state with policy text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when policy text cannot be parsed or validated.
+    pub fn apply_policy_text(&self, policy: &PolicyText) -> Result<ConsistencyToken, EngineError> {
+        enter_api_span!("apply_policy_text");
+        let mut service = self.write_service("apply_policy_text")?;
+        Ok(service.apply_policy_text(policy)?)
+    }
+
+    /// Exports the latest state as deterministic policy text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when no schema has been loaded.
+    pub fn export_policy_text(&self) -> Result<PolicyText, EngineError> {
+        enter_api_span!("export_policy_text");
+        let service = self.read_service("export_policy_text")?;
+        Ok(service.export_policy_text()?)
+    }
+
+    /// Exports deterministic policy files under `directory`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyIoError`] when no schema has been loaded, locking fails, or file output
+    /// fails.
+    pub fn export_policy_files(&self, directory: impl AsRef<Path>) -> Result<(), PolicyIoError> {
+        enter_api_span!("export_policy_files");
+        let service = self
+            .service
+            .read()
+            .map_err(|_| PolicyIoError::LockPoisoned {
+                operation: "export_policy_files",
+            })?;
+        service.export_policy_files(directory)
+    }
+
+    /// Looks up every relation or permission a subject has on one resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when request validation or evaluation fails.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "public API follows the request/response ownership contract in \
+                  specs/19-public-api-completeness-design.md"
+    )]
+    pub fn lookup_permissions(
+        &self,
+        request: LookupPermissionsRequest,
+    ) -> Result<LookupPermissions, EngineError> {
+        enter_api_span!("lookup_permissions");
+        let service = self.read_service("lookup_permissions")?;
+        Ok(service.lookup_permissions(&request)?)
+    }
+
+    /// Looks up subjects grouped by every relation or permission they have on one resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when request validation, store access, or evaluation fails.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "public API follows the request/response ownership contract in \
+                  specs/19-public-api-completeness-design.md"
+    )]
+    pub fn lookup_object_permissions(
+        &self,
+        request: LookupObjectPermissionsRequest,
+    ) -> Result<LookupObjectPermissions, EngineError> {
+        enter_api_span!("lookup_object_permissions");
+        let service = self.read_service("lookup_object_permissions")?;
+        Ok(service.lookup_object_permissions(&request)?)
     }
 
     /// Saves the latest published snapshot to a versioned `.szsnap` artifact.

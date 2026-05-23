@@ -68,6 +68,7 @@ Dependency versions checked with `cargo search` on 2026-05-23:
 | `criterion` | `0.8.2` | performance benchmarks | Adopt as dev-dependency when benchmark phase starts. |
 | `proptest` | `1.11.0` | property tests | Adopt as dev-dependency for store/schema invariants. |
 | `rstest` | `0.26.1` | parameterized tests | Adopt as dev-dependency for validation matrices. |
+| `zstd` | `0.13.3` | snapshot compression wrapper | Adopt for [19](./19-public-api-completeness-design.md) with default features disabled. |
 
 Any dependency added during implementation must pass `cargo audit` and `cargo deny check`.
 

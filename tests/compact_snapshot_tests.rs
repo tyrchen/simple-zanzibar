@@ -9,8 +9,9 @@ use std::{
 
 use proptest::{prelude::*, test_runner::TestCaseError};
 use simple_zanzibar::{
-    SnapshotIntegrityMode, SnapshotIoError, SnapshotLoadOptions, SnapshotLoadProfile,
-    SnapshotSaveOptions, SnapshotValidationMode, ZanzibarEngine, ZanzibarService,
+    SnapshotCompression, SnapshotIntegrityMode, SnapshotIoError, SnapshotLoadOptions,
+    SnapshotLoadProfile, SnapshotSaveOptions, SnapshotValidationMode, ZanzibarEngine,
+    ZanzibarService,
     eval::EvaluationLimits,
     model::{LookupResourcesRequest, LookupSubjectsRequest, Object, Relation, RelationTuple, User},
     relationship::RelationshipMutation,
@@ -111,6 +112,73 @@ fn test_should_save_and_load_snapshot_through_public_engine_api()
 
     assert!(allowed);
     remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_should_save_and_load_zstd_snapshot_through_service_and_engine()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = populated_service()?.0;
+    let path = temp_snapshot_path("zstd");
+    service.save_snapshot(
+        &path,
+        SnapshotSaveOptions {
+            compression: SnapshotCompression::Zstd,
+            ..SnapshotSaveOptions::default()
+        },
+    )?;
+
+    let options = SnapshotLoadOptions {
+        compression: SnapshotCompression::Zstd,
+        ..SnapshotLoadOptions::default()
+    };
+    let loaded = ZanzibarService::load_snapshot(&path, options)?;
+    assert_equivalent_behavior(&service, &loaded)?;
+
+    let engine = ZanzibarEngine::load_snapshot(&path, options)?;
+    assert!(
+        engine
+            .check(simple_zanzibar::model::CheckRequest::new(
+                doc("direct_doc"),
+                Relation("can_view".to_string()),
+                User::UserId("alice".to_string()),
+                Consistency::Latest,
+            ))?
+            .allowed
+    );
+    remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_should_apply_snapshot_size_cap_to_zstd_decompressed_payload()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = populated_service()?.0;
+    let raw_path = temp_snapshot_path("zstd_cap_raw");
+    let zstd_path = temp_snapshot_path("zstd_cap_compressed");
+    service.save_snapshot(&raw_path, SnapshotSaveOptions::default())?;
+    service.save_snapshot(
+        &zstd_path,
+        SnapshotSaveOptions {
+            compression: SnapshotCompression::Zstd,
+            ..SnapshotSaveOptions::default()
+        },
+    )?;
+    let raw_len = fs::metadata(&raw_path)?.len();
+    let capped_len = raw_len.checked_sub(1).ok_or("raw snapshot is empty")?;
+
+    let result = ZanzibarService::load_snapshot(
+        &zstd_path,
+        SnapshotLoadOptions {
+            compression: SnapshotCompression::Zstd,
+            max_file_bytes: non_zero_u64(capped_len),
+            ..SnapshotLoadOptions::default()
+        },
+    );
+
+    remove_file(&raw_path);
+    remove_file(&zstd_path);
+    assert!(matches!(result, Err(SnapshotIoError::LimitExceeded { .. })));
     Ok(())
 }
 
@@ -615,6 +683,7 @@ fn snapshot_load_options(
     validation: SnapshotValidationMode,
 ) -> SnapshotLoadOptions {
     SnapshotLoadOptions {
+        compression: SnapshotCompression::None,
         profile,
         validation,
         integrity: SnapshotIntegrityMode::Checksum,
@@ -624,6 +693,7 @@ fn snapshot_load_options(
 
 fn snapshot_external_load_options(validation: SnapshotValidationMode) -> SnapshotLoadOptions {
     SnapshotLoadOptions {
+        compression: SnapshotCompression::None,
         profile: SnapshotLoadProfile::FastLoad,
         validation,
         integrity: SnapshotIntegrityMode::External,

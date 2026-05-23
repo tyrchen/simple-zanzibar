@@ -243,6 +243,76 @@ pub struct LookupSubjects {
     pub subjects: Vec<User>,
 }
 
+/// Request for all permissions a subject has on one resource.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupPermissionsRequest {
+    /// Subject whose permissions are requested.
+    pub subject: User,
+    /// Resource object to evaluate.
+    pub resource: Object,
+    /// Consistency selector for the read.
+    pub consistency: Consistency,
+}
+
+/// Permissions returned by a subject/resource lookup request.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupPermissions {
+    /// Sorted relations or permissions that evaluated to allowed.
+    pub permissions: Vec<Relation>,
+}
+
+/// Request for subjects grouped by every permission they have on one resource.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupObjectPermissionsRequest {
+    /// Resource object to evaluate.
+    pub resource: Object,
+    /// Subject namespace/type to return.
+    pub subject_type: String,
+    /// Consistency selector for the read.
+    pub consistency: Consistency,
+}
+
+/// Subjects grouped by permission for one resource.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupObjectPermissions {
+    /// Permission groups with non-empty subjects.
+    pub permissions: Vec<PermissionSubjects>,
+}
+
+/// Subjects that have one permission on a resource.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionSubjects {
+    /// Relation or permission name.
+    pub permission: Relation,
+    /// Subjects that passed the shared check evaluator.
+    pub subjects: Vec<User>,
+}
+
 /// Defines the schema and policy rules for a particular namespace.
 #[cfg_attr(
     feature = "serde",

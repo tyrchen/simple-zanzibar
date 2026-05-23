@@ -69,6 +69,7 @@ pub mod error;
 pub mod eval;
 pub mod model;
 pub mod parser;
+pub mod policy;
 pub mod relationship;
 pub mod revision;
 pub mod schema;
@@ -87,6 +88,7 @@ use arc_swap::ArcSwapOption;
 
 pub use crate::{
     api::{EngineError, ZanzibarEngine, ZanzibarEngineBuilder},
+    policy::{PolicyIoError, PolicyText, PolicyTextFile},
     snapshot::{
         SnapshotCompression, SnapshotIntegrityMode, SnapshotIoError, SnapshotLoadOptions,
         SnapshotLoadProfile, SnapshotSaveOptions, SnapshotValidationMode,
@@ -96,8 +98,10 @@ use crate::{
     error::ZanzibarError,
     eval::EvaluationLimits,
     model::{
-        LookupResources, LookupResourcesRequest, LookupSubjects, LookupSubjectsRequest,
-        NamespaceConfig, Object, Relation, RelationTuple, User,
+        LookupObjectPermissions, LookupObjectPermissionsRequest, LookupPermissions,
+        LookupPermissionsRequest, LookupResources, LookupResourcesRequest, LookupSubjects,
+        LookupSubjectsRequest, NamespaceConfig, Object, PermissionSubjects, Relation,
+        RelationTuple, User,
     },
     relationship::{
         IndexedRelationshipStore, Precondition, RelationshipFilter, RelationshipMutation,
@@ -187,6 +191,49 @@ impl ZanzibarService {
         self
     }
 
+    /// Builds a new service from canonical or hand-authored policy text.
+    ///
+    /// Relationship files accept one relationship per line. Blank lines and full-line `#` or `//`
+    /// comments are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError`] when the schema, relationship text, or relationship semantics are
+    /// invalid.
+    pub fn from_policy_text(policy: &PolicyText) -> Result<Self, ZanzibarError> {
+        let mut service = Self::new();
+        service.apply_policy_text(policy)?;
+        Ok(service)
+    }
+
+    /// Replaces this service with the state described by policy text and returns the final token.
+    ///
+    /// The replacement is atomic with respect to validation: if schema parsing or relationship
+    /// application fails, the previous service state remains unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError`] when policy text cannot be parsed or validated.
+    pub fn apply_policy_text(
+        &mut self,
+        policy: &PolicyText,
+    ) -> Result<ConsistencyToken, ZanzibarError> {
+        policy::apply_policy_text_to_service(self, policy)
+    }
+
+    /// Saves a snapshot built from policy text without requiring the caller to keep a service.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyIoError`] when policy parsing or snapshot writing fails.
+    pub fn save_snapshot_from_policy_text(
+        path: impl AsRef<Path>,
+        policy: &PolicyText,
+        options: SnapshotSaveOptions,
+    ) -> Result<(), PolicyIoError> {
+        policy::save_snapshot_from_policy_text(path.as_ref(), policy, options)
+    }
+
     /// Parses a DSL string and adds the resulting configurations to the service.
     ///
     /// # Errors
@@ -213,6 +260,38 @@ impl ZanzibarService {
         self.publish_snapshot(next_configs, compiled_schema, next_relationships)
     }
 
+    /// Replaces the complete schema DSL and publishes a new revision.
+    ///
+    /// Existing relationships are revalidated against the replacement schema. If any relationship
+    /// references a missing namespace or relation, the operation fails and the current state is
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError`] when the DSL cannot be parsed or existing relationships do not
+    /// validate against the replacement schema.
+    pub fn replace_dsl(&mut self, dsl: &str) -> Result<(), ZanzibarError> {
+        self.replace_dsl_with_token(dsl).map(|_| ())
+    }
+
+    /// Replaces the complete schema DSL and returns a consistency token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError`] when the DSL cannot be parsed or existing relationships do not
+    /// validate against the replacement schema.
+    pub fn replace_dsl_with_token(&mut self, dsl: &str) -> Result<ConsistencyToken, ZanzibarError> {
+        schema::compile_legacy_dsl(dsl)?;
+        let configs = parser::parse_dsl(dsl)?;
+        let next_configs = configs
+            .into_iter()
+            .map(|config| (config.name.clone(), config))
+            .collect::<HashMap<_, _>>();
+        let compiled_schema = schema::compile_legacy_configs(next_configs.values().cloned())?;
+        let next_relationships = self.relationship_store_for_schema(&compiled_schema)?;
+        self.publish_snapshot(next_configs, compiled_schema, next_relationships)
+    }
+
     /// Adds or updates a namespace configuration.
     ///
     /// # Errors
@@ -233,6 +312,60 @@ impl ZanzibarService {
     ) -> Result<ConsistencyToken, ZanzibarError> {
         let mut next_configs = self.configs.clone();
         next_configs.insert(config.name.clone(), config);
+        let compiled_schema = schema::compile_legacy_configs(next_configs.values().cloned())?;
+        let next_relationships = self.relationship_store_for_schema(&compiled_schema)?;
+        self.publish_snapshot(next_configs, compiled_schema, next_relationships)
+    }
+
+    /// Deletes one namespace definition and publishes a new revision.
+    ///
+    /// Existing relationships are revalidated against the candidate schema. If any relationship
+    /// still references the deleted namespace, the operation fails and the current state is
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::NamespaceNotFound`] when the namespace is missing, or another typed
+    /// error when the resulting schema cannot validate existing relationships.
+    pub fn delete_namespace(&mut self, namespace: &str) -> Result<ConsistencyToken, ZanzibarError> {
+        domain::ObjectType::try_from(namespace)?;
+        let mut next_configs = self.configs.clone();
+        if next_configs.remove(namespace).is_none() {
+            return Err(ZanzibarError::NamespaceNotFound(namespace.to_string()));
+        }
+        let compiled_schema = schema::compile_legacy_configs(next_configs.values().cloned())?;
+        let next_relationships = self.relationship_store_for_schema(&compiled_schema)?;
+        self.publish_snapshot(next_configs, compiled_schema, next_relationships)
+    }
+
+    /// Deletes one relation definition and publishes a new revision.
+    ///
+    /// Existing relationships are revalidated against the candidate schema. If any relationship
+    /// still references the deleted relation, the operation fails and the current state is
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::NamespaceNotFound`] or [`ZanzibarError::RelationNotFound`] when the
+    /// target does not exist, or another typed error when existing relationships fail validation.
+    pub fn delete_relation(
+        &mut self,
+        namespace: &str,
+        relation: &str,
+    ) -> Result<ConsistencyToken, ZanzibarError> {
+        domain::ObjectType::try_from(namespace)?;
+        domain::RelationName::try_from(relation)?;
+        let mut next_configs = self.configs.clone();
+        let config = next_configs
+            .get_mut(namespace)
+            .ok_or_else(|| ZanzibarError::NamespaceNotFound(namespace.to_string()))?;
+        let relation_key = Relation(relation.to_string());
+        if config.relations.remove(&relation_key).is_none() {
+            return Err(ZanzibarError::RelationNotFound(
+                relation.to_string(),
+                namespace.to_string(),
+            ));
+        }
         let compiled_schema = schema::compile_legacy_configs(next_configs.values().cloned())?;
         let next_relationships = self.relationship_store_for_schema(&compiled_schema)?;
         self.publish_snapshot(next_configs, compiled_schema, next_relationships)
@@ -506,6 +639,111 @@ impl ZanzibarService {
     ) -> Result<LookupSubjects, ZanzibarError> {
         let snapshot = self.snapshot_for_consistency(consistency)?;
         eval::lookup_subjects_with_snapshot(&snapshot, request, self.evaluation_limits)
+    }
+
+    /// Looks up all relations or permissions a subject has on one resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns typed consistency, domain, schema, or evaluation errors when lookup cannot run.
+    pub fn lookup_permissions(
+        &self,
+        request: &LookupPermissionsRequest,
+    ) -> Result<LookupPermissions, ZanzibarError> {
+        let snapshot = self.snapshot_for_consistency(request.consistency.clone())?;
+        let object_type = domain::ObjectType::try_from(request.resource.namespace.as_str())?;
+        let namespace = snapshot.schema().resolver().namespace(&object_type)?;
+        let mut permissions = Vec::new();
+        let mut relations = namespace.relations().iter().collect::<Vec<_>>();
+        relations.sort_by(|left, right| left.name().cmp(right.name()));
+        for relation_definition in relations {
+            let relation = Relation(relation_definition.name().as_str().to_string());
+            if eval::check_with_snapshot(
+                &snapshot,
+                &request.resource,
+                &relation,
+                &request.subject,
+                self.evaluation_limits,
+            )?
+            .is_allowed()
+            {
+                permissions.push(relation);
+            }
+        }
+        Ok(LookupPermissions { permissions })
+    }
+
+    /// Looks up subjects grouped by every relation or permission they have on one resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns typed consistency, domain, schema, store, or evaluation errors when lookup cannot
+    /// run.
+    pub fn lookup_object_permissions(
+        &self,
+        request: &LookupObjectPermissionsRequest,
+    ) -> Result<LookupObjectPermissions, ZanzibarError> {
+        let snapshot = self.snapshot_for_consistency(request.consistency.clone())?;
+        let object_type = domain::ObjectType::try_from(request.resource.namespace.as_str())?;
+        let namespace = snapshot.schema().resolver().namespace(&object_type)?;
+        let subject_type = domain::SubjectType::try_from(request.subject_type.as_str())?;
+        if subject_type.as_str() != "user" {
+            let subject_object_type = domain::ObjectType::try_from(subject_type.as_str())?;
+            snapshot
+                .schema()
+                .resolver()
+                .namespace(&subject_object_type)?;
+        }
+
+        let mut permissions = Vec::new();
+        let mut relations = namespace.relations().iter().collect::<Vec<_>>();
+        relations.sort_by(|left, right| left.name().cmp(right.name()));
+        for relation_definition in relations {
+            let permission = Relation(relation_definition.name().as_str().to_string());
+            let subjects = eval::lookup_subjects_with_snapshot(
+                &snapshot,
+                &LookupSubjectsRequest {
+                    resource: request.resource.clone(),
+                    permission: permission.clone(),
+                    subject_type: request.subject_type.clone(),
+                },
+                self.evaluation_limits,
+            )?
+            .subjects;
+            if !subjects.is_empty() {
+                permissions.push(PermissionSubjects {
+                    permission,
+                    subjects,
+                });
+            }
+        }
+        Ok(LookupObjectPermissions { permissions })
+    }
+
+    /// Exports the latest snapshot as deterministic reviewable policy text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::SchemaRequired`] when no schema snapshot is loaded.
+    pub fn export_policy_text(&self) -> Result<PolicyText, ZanzibarError> {
+        let snapshot = self
+            .current_snapshot
+            .load_full()
+            .ok_or(ZanzibarError::SchemaRequired)?;
+        Ok(policy::export_policy_text(
+            snapshot.configs(),
+            snapshot.relationships().rows(),
+        ))
+    }
+
+    /// Writes deterministic reviewable policy files under `directory`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyIoError`] when no schema is loaded or file output fails.
+    pub fn export_policy_files(&self, directory: impl AsRef<Path>) -> Result<(), PolicyIoError> {
+        let policy = self.export_policy_text()?;
+        policy::write_policy_files(directory.as_ref(), &policy)
     }
 
     /// Saves the latest published snapshot to a versioned `.szsnap` artifact.

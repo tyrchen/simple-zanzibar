@@ -157,3 +157,39 @@ Each decision is load-bearing. Supersede with a new decision entry rather than s
   the supply-chain tradeoff visible in code review.
 - Pinned by: [18-trusted-fast-snapshot-load-design.md](./18-trusted-fast-snapshot-load-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md), [72-testing-verification-plan.md](./72-testing-verification-plan.md)
 - Date: 2026-05-23
+
+## D16 - Treat zstd as an outer snapshot transport wrapper
+
+- Context: The `.szsnap` v2 payload is already close to the in-memory compact representation and
+  meets the trusted 200 ms raw load target. zstd is valuable for distribution and disk footprint,
+  but decoding it during startup adds CPU and transient memory that should not redefine the raw
+  fast-load contract.
+- Alternatives considered: compress individual `.szsnap` sections; add a new compressed file
+  version; keep compression entirely outside the crate; wrap the raw `.szsnap` bytes in one zstd
+  frame.
+- Decision: add `SnapshotCompression::Zstd` as a public save/load option that compresses or
+  decompresses the entire raw `.szsnap` payload before the existing v2 parser runs.
+- Why: this preserves the stable binary format, keeps corrupt-file validation in one parser, and
+  lets deployments choose between direct compressed load and the faster content-addressed cache
+  pattern of decompress-once then raw trusted fast-load.
+- Pinned by: [19-public-api-completeness-design.md](./19-public-api-completeness-design.md),
+  [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md),
+  [18-trusted-fast-snapshot-load-design.md](./18-trusted-fast-snapshot-load-design.md)
+- Date: 2026-05-23
+
+## D17 - Add bounded audit helpers instead of an unbounded global permission matrix
+
+- Context: Users need "what permissions does this subject have on this object?" and "who has which
+  permissions on this object?" as public API calls. A full global matrix over every object, subject,
+  and relation would be expensive and easy to misuse in an embedded library.
+- Alternatives considered: require callers to enumerate schema relations manually; add a global
+  audit scan; add object/subject-bounded helpers that compose existing evaluators.
+- Decision: add `lookup_permissions` for one subject/object pair and `lookup_object_permissions`
+  for one object plus one subject type. Both enumerate only the target object's schema relations and
+  reuse the existing `check` / `lookup_subjects` semantics.
+- Why: the helpers cover common product questions while preserving Zanzibar's explicit subject-type
+  lookup boundary and existing evaluator limits.
+- Pinned by: [19-public-api-completeness-design.md](./19-public-api-completeness-design.md),
+  [14-evaluation-engine-design.md](./14-evaluation-engine-design.md),
+  [71-performance-budgets-design.md](./71-performance-budgets-design.md)
+- Date: 2026-05-23

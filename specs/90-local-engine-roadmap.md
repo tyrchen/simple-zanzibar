@@ -138,6 +138,24 @@ Exit criteria:
 - `snapshot_load_trusted_fast/1m` Criterion upper estimate <= 200 ms with trusted fast-load and external integrity
 - trusted loaded direct, inherited, and lookup latency budgets in [71](./71-performance-budgets-design.md) pass
 
+### M9 - Complete Public API Surface
+
+User-visible outcome: applications can use Simple Zanzibar as a complete local policy package:
+load/save raw or zstd snapshots, import/export reviewable policy text, replace/delete schema
+policy, and answer permission-audit queries without hand-enumerating schema relations.
+
+Specs touched: [15](./15-public-api-design.md), [19](./19-public-api-completeness-design.md), [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- raw and zstd snapshot save/load APIs round trip equivalent services
+- `PolicyText` import/export round trips schema and relationships with deterministic sorted output
+- `export_policy_files` writes `schema.zed` and grouped relationship files suitable for review
+- schema replacement, namespace deletion, and relation deletion publish revisions only when existing relationships remain valid
+- `lookup_permissions` and `lookup_object_permissions` return stable sorted audit results
+- public API benchmarks record check, lookup, permission enumeration, policy export, and zstd snapshot costs
+- full build, test, fmt, clippy, audit, and deny gates pass
+
 ## 3. Calendar Shape
 
 One experienced Rust developer:
@@ -151,6 +169,7 @@ One experienced Rust developer:
 - M6: 2 to 3 weeks
 - M7: 2 to 3 weeks
 - M8: 1 week
+- M9: 1 week
 
 Total through M5: 8.5 to 11 weeks, assuming no persistent backend and no caveats.
 
@@ -159,6 +178,8 @@ Total through M6: 10.5 to 14 weeks.
 Total through M7: 12.5 to 17 weeks.
 
 Total through M8: 13.5 to 18 weeks.
+
+Total through M9: 14.5 to 19 weeks.
 
 ## 4. Cross-References
 
