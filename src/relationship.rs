@@ -66,6 +66,7 @@ pub enum StoreError {
 }
 
 /// Maximum number of query results.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryLimit(NonZeroUsize);
 
@@ -101,6 +102,11 @@ impl Default for QueryLimit {
 }
 
 /// Subject-side relationship filter.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubjectFilter {
     subject_type: SubjectType,
@@ -172,6 +178,11 @@ impl TryFrom<&User> for SubjectFilter {
 }
 
 /// Resource-side relationship filter.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationshipFilter {
     resource_type: ObjectType,
@@ -242,6 +253,11 @@ impl RelationshipFilter {
 }
 
 /// Relationship mutation.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelationshipMutation {
     /// Insert only if absent.
@@ -265,6 +281,11 @@ impl RelationshipMutation {
 }
 
 /// Mutation precondition.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Precondition {
     /// At least one relationship must match.

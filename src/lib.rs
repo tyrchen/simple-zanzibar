@@ -63,6 +63,7 @@
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
+pub mod api;
 pub mod domain;
 pub mod error;
 pub mod eval;
@@ -95,6 +96,8 @@ use crate::revision::{
 };
 use crate::schema::CompiledSchema;
 use crate::store::{InMemoryTupleStore, TupleStore};
+
+pub use crate::api::{EngineError, ZanzibarEngine, ZanzibarEngineBuilder};
 
 /// Compatibility facade for the local Zanzibar engine.
 ///
@@ -414,20 +417,34 @@ impl ZanzibarService {
         relation: &Relation,
     ) -> Result<model::ExpandedUserset, ZanzibarError> {
         if self.schema.is_some() {
-            let snapshot = self.snapshot_for_consistency(Consistency::Latest)?;
-            let object_type = domain::ObjectType::try_from(object.namespace.as_str())?;
-            let relation_name = domain::RelationName::try_from(relation.0.as_str())?;
-            snapshot
-                .schema()
-                .resolver()
-                .relation(&object_type, &relation_name)?;
-            return eval::expand_with_snapshot(&snapshot, object, relation, self.evaluation_limits);
+            return self.expand_with_consistency(object, relation, Consistency::Latest);
         }
 
         if !self.configs.contains_key(&object.namespace) {
             return Err(ZanzibarError::NamespaceNotFound(object.namespace.clone()));
         }
         eval::expand_with_configs(object, relation, &self.configs, self.store.as_ref())
+    }
+
+    /// Expands the userset for a given object and relation at the requested consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns typed consistency, domain, schema, or evaluation errors when the expand cannot run.
+    pub fn expand_with_consistency(
+        &self,
+        object: &Object,
+        relation: &Relation,
+        consistency: Consistency,
+    ) -> Result<model::ExpandedUserset, ZanzibarError> {
+        let snapshot = self.snapshot_for_consistency(consistency)?;
+        let object_type = domain::ObjectType::try_from(object.namespace.as_str())?;
+        let relation_name = domain::RelationName::try_from(relation.0.as_str())?;
+        snapshot
+            .schema()
+            .resolver()
+            .relation(&object_type, &relation_name)?;
+        eval::expand_with_snapshot(&snapshot, object, relation, self.evaluation_limits)
     }
 
     /// Looks up resources of a type that the request subject can access.

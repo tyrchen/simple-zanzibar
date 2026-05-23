@@ -28,19 +28,22 @@ arc-swap = { version = "1.9.1", default-features = false }
 blake3 = "1.8.5"
 pest = "2.8.0"
 pest_derive = "2.8.0"
+serde = { version = "1.0.228", features = ["derive"], optional = true }
 thiserror = "2.0.12"
+tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
 
 [features]
 default = ["std", "compat"]
 std = []
-serde = []
-tracing = []
+serde = ["dep:serde"]
+tracing = ["dep:tracing"]
 compat = []
 bench-internals = []
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1.11.0"
+serde_json = "1.0.150"
 
 [[bench]]
 name = "baseline"

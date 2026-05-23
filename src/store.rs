@@ -6,7 +6,7 @@ use crate::model::{Object, Relation, RelationTuple, User};
 
 /// A trait for abstracting the storage and retrieval of `RelationTuple`s.
 /// This allows the core logic to be decoupled from the specific storage backend.
-pub trait TupleStore {
+pub trait TupleStore: Send + Sync {
     /// Reads tuples from the store, with optional filtering.
     ///
     /// # Arguments

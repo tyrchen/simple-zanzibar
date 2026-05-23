@@ -289,12 +289,38 @@ impl FromStr for ConsistencyToken {
 }
 
 /// Read consistency mode.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", tag = "kind", content = "token")
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Consistency {
     /// Read the latest published snapshot.
     Latest,
     /// Read exactly at a previously returned token.
     Exact(ConsistencyToken),
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for ConsistencyToken {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for ConsistencyToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_str(&value).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Published immutable snapshot.

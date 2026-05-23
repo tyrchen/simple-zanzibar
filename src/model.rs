@@ -2,8 +2,15 @@
 
 use std::hash::Hash;
 
+use crate::revision::Consistency;
+
 /// Represents a namespaced digital object.
 /// e.g., `doc:readme`, `folder:A`
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Object {
     /// Object namespace/type.
@@ -14,10 +21,16 @@ pub struct Object {
 
 /// Represents a relation or permission type on an object.
 /// e.g., `owner`, `editor`, `viewer`
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Relation(pub String);
 
 /// Represents either a specific user ID or a reference to a userset (e.g., a group).
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", tag = "type", content = "value")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum User {
     /// A specific user, identified by a unique string.
@@ -31,6 +44,11 @@ pub enum User {
 /// The core relation tuple, representing a single permission assertion.
 /// This is the atomic unit of authorization data.
 /// e.g., `(doc:readme#owner@user:alice)`
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelationTuple {
     /// Relationship resource object.
@@ -41,7 +59,95 @@ pub struct RelationTuple {
     pub user: User,
 }
 
+/// Request for a check at a specified consistency level.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckRequest {
+    /// Protected object to evaluate.
+    pub object: Object,
+    /// Relation or permission to evaluate.
+    pub relation: Relation,
+    /// Subject whose membership is checked.
+    pub user: User,
+    /// Consistency selector for the read.
+    pub consistency: Consistency,
+}
+
+impl CheckRequest {
+    /// Creates a check request.
+    #[must_use]
+    pub fn new(object: Object, relation: Relation, user: User, consistency: Consistency) -> Self {
+        Self {
+            object,
+            relation,
+            user,
+            consistency,
+        }
+    }
+}
+
+/// Response for a check request.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckResponse {
+    /// Whether the subject has the requested relation or permission.
+    pub allowed: bool,
+}
+
+/// Request for expanding an object relation or permission at a specified consistency level.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandRequest {
+    /// Protected object to expand.
+    pub object: Object,
+    /// Relation or permission to expand.
+    pub relation: Relation,
+    /// Consistency selector for the read.
+    pub consistency: Consistency,
+}
+
+impl ExpandRequest {
+    /// Creates an expand request.
+    #[must_use]
+    pub fn new(object: Object, relation: Relation, consistency: Consistency) -> Self {
+        Self {
+            object,
+            relation,
+            consistency,
+        }
+    }
+}
+
+/// Response for an expand request.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandResponse {
+    /// Expanded userset tree.
+    pub expanded: ExpandedUserset,
+}
+
 /// Request for resources of one type that a subject can access through a permission.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupResourcesRequest {
     /// Subject whose accessible resources are requested.
@@ -53,6 +159,11 @@ pub struct LookupResourcesRequest {
 }
 
 /// Resources returned by a lookup request.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupResources {
     /// De-duplicated resources that passed the shared check evaluator.
@@ -60,6 +171,11 @@ pub struct LookupResources {
 }
 
 /// Request for subjects of one type that can access a resource through a permission.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupSubjectsRequest {
     /// Protected resource to check.
@@ -71,6 +187,11 @@ pub struct LookupSubjectsRequest {
 }
 
 /// Subjects returned by a lookup request.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupSubjects {
     /// De-duplicated subjects that passed the shared check evaluator.
@@ -78,6 +199,11 @@ pub struct LookupSubjects {
 }
 
 /// Defines the schema and policy rules for a particular namespace.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone, Default)]
 pub struct NamespaceConfig {
     /// Namespace/type name.
@@ -87,6 +213,11 @@ pub struct NamespaceConfig {
 }
 
 /// Defines a specific relation within a namespace, including its rewrite rules.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 #[derive(Debug, Clone)]
 pub struct RelationConfig {
     /// Relation name.
@@ -96,6 +227,11 @@ pub struct RelationConfig {
 }
 
 /// Represents a tree of userset computations, forming the core of the policy language.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 #[derive(Debug, Clone)]
 pub enum UsersetExpression {
     /// `this` - The set of users directly granted this relation.
@@ -129,7 +265,12 @@ pub enum UsersetExpression {
 }
 
 /// Represents the result of an `expand` operation, detailing the effective userset.
-#[derive(Debug, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpandedUserset {
     /// A specific user who has the permission.
     User(String),
