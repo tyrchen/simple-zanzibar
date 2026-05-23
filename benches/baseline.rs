@@ -1,6 +1,6 @@
-//! Phase 0 baseline benchmarks for the legacy scan-based engine.
+//! Benchmarks for legacy scan and indexed direct-check paths.
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion};
 use simple_zanzibar::model::{
     NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User,
 };
@@ -9,6 +9,7 @@ use simple_zanzibar::ZanzibarService;
 
 use std::collections::HashMap;
 use std::hint::black_box;
+use std::time::Duration;
 
 const DATASET_RELATIONSHIPS: usize = 100_000;
 
@@ -81,13 +82,13 @@ fn store_with_relationships(count: usize) -> InMemoryTupleStore {
     store
 }
 
-fn bench_legacy_direct_check(c: &mut Criterion) {
+fn bench_indexed_direct_check(c: &mut Criterion) {
     let service = service_with_relationships(DATASET_RELATIONSHIPS);
     let object = object_at(DATASET_RELATIONSHIPS - 1);
     let relation = owner_relation();
     let user = user_at(DATASET_RELATIONSHIPS - 1);
 
-    c.bench_function("legacy_direct_check_scan_100k", |b| {
+    c.bench_function("indexed_direct_check_100k", |b| {
         b.iter(|| {
             black_box(service.check(black_box(&object), black_box(&relation), black_box(&user)))
         });
@@ -115,9 +116,17 @@ fn bench_legacy_store_scan(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    name = baseline;
-    config = Criterion::default().sample_size(10);
-    targets = bench_legacy_direct_check, bench_legacy_store_scan
-);
-criterion_main!(baseline);
+fn main() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+
+    let mut criterion = Criterion::default()
+        .sample_size(10)
+        .warm_up_time(Duration::from_millis(100))
+        .measurement_time(Duration::from_millis(500))
+        .configure_from_args();
+    bench_indexed_direct_check(&mut criterion);
+    bench_legacy_store_scan(&mut criterion);
+    criterion.final_summary();
+}

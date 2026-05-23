@@ -47,6 +47,19 @@ pub trait TupleStore {
     ///
     /// Returns an error string when the tuple cannot be deleted, such as when it does not exist.
     fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), String>;
+
+    /// Returns all tuples currently stored.
+    ///
+    /// This compatibility method lets the v2 indexed store rebuild from legacy state during the
+    /// migration period.
+    fn all_tuples(&self) -> Vec<RelationTuple>;
+
+    /// Replaces all tuples currently stored.
+    ///
+    /// This compatibility method lets the service apply validated batch mutations atomically
+    /// across the legacy tuple store and the indexed relationship store during the migration
+    /// period.
+    fn replace_all(&mut self, tuples: Vec<RelationTuple>);
 }
 
 /// A simple, in-memory implementation of the `TupleStore` trait using a `HashSet`.
@@ -87,5 +100,13 @@ impl TupleStore for InMemoryTupleStore {
         } else {
             Err("Tuple not found".to_string())
         }
+    }
+
+    fn all_tuples(&self) -> Vec<RelationTuple> {
+        self.store.iter().cloned().collect()
+    }
+
+    fn replace_all(&mut self, tuples: Vec<RelationTuple>) {
+        self.store = tuples.into_iter().collect();
     }
 }

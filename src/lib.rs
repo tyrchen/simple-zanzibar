@@ -5,6 +5,7 @@ pub mod error;
 pub mod eval;
 pub mod model;
 pub mod parser;
+pub mod relationship;
 pub mod schema;
 pub mod store;
 
@@ -12,6 +13,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::ZanzibarError;
 use crate::model::{NamespaceConfig, Object, Relation, RelationTuple, User};
+use crate::relationship::{
+    IndexedRelationshipStore, Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter,
+};
 use crate::schema::CompiledSchema;
 use crate::store::{InMemoryTupleStore, TupleStore};
 
@@ -19,6 +23,7 @@ use crate::store::{InMemoryTupleStore, TupleStore};
 pub struct ZanzibarService {
     configs: HashMap<String, NamespaceConfig>,
     schema: Option<CompiledSchema>,
+    relationships: IndexedRelationshipStore,
     store: Box<dyn TupleStore>,
 }
 
@@ -35,6 +40,7 @@ impl ZanzibarService {
         ZanzibarService {
             configs: HashMap::new(),
             schema: None,
+            relationships: IndexedRelationshipStore::default(),
             store: Box::new(InMemoryTupleStore::default()),
         }
     }
@@ -52,8 +58,10 @@ impl ZanzibarService {
             next_configs.insert(config.name.clone(), config);
         }
         let compiled_schema = schema::compile_legacy_configs(next_configs.values().cloned())?;
+        let next_relationships = self.rebuild_relationship_store(&compiled_schema)?;
         self.configs = next_configs;
         self.schema = Some(compiled_schema);
+        self.relationships = next_relationships;
         Ok(())
     }
 
@@ -66,8 +74,10 @@ impl ZanzibarService {
         let mut next_configs = self.configs.clone();
         next_configs.insert(config.name.clone(), config);
         let compiled_schema = schema::compile_legacy_configs(next_configs.values().cloned())?;
+        let next_relationships = self.rebuild_relationship_store(&compiled_schema)?;
         self.configs = next_configs;
         self.schema = Some(compiled_schema);
+        self.relationships = next_relationships;
         Ok(())
     }
 
@@ -80,11 +90,48 @@ impl ZanzibarService {
         if let Some(schema) = &self.schema {
             let relationship = domain::Relationship::try_from(&tuple)?;
             schema.validate_relationship(&relationship)?;
+            self.relationships
+                .apply_mutations([RelationshipMutation::Create(relationship)], [])?;
         }
 
         self.store
             .write_tuple(tuple)
             .map_err(ZanzibarError::StorageError)
+    }
+
+    /// Applies a validated batch of relationship mutations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError::SchemaRequired`] when no schema has been loaded, or a typed
+    /// validation/store error when any relationship, precondition, or mutation semantic is invalid.
+    pub fn apply_relationship_mutations(
+        &mut self,
+        mutations: impl IntoIterator<Item = RelationshipMutation>,
+        preconditions: impl IntoIterator<Item = Precondition>,
+    ) -> Result<(), ZanzibarError> {
+        let schema = self.schema.as_ref().ok_or(ZanzibarError::SchemaRequired)?;
+        let mutations = mutations.into_iter().collect::<Vec<_>>();
+        let preconditions = preconditions.into_iter().collect::<Vec<_>>();
+
+        for mutation in &mutations {
+            schema.validate_relationship(mutation.relationship())?;
+        }
+        for precondition in &preconditions {
+            validate_precondition_filter(schema, precondition)?;
+        }
+
+        let mut candidate = self.relationships.clone();
+        candidate.apply_mutations(mutations, preconditions)?;
+        let tuples = candidate
+            .rows()
+            .iter()
+            .map(relation_tuple_from_relationship)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        self.store.replace_all(tuples);
+        self.relationships = candidate;
+        Ok(())
     }
 
     /// Deletes a relation tuple from the store.
@@ -93,6 +140,12 @@ impl ZanzibarService {
     ///
     /// Returns [`ZanzibarError::StorageError`] when the underlying store rejects the delete.
     pub fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), ZanzibarError> {
+        if self.schema.is_some() {
+            let relationship = domain::Relationship::try_from(tuple)?;
+            self.relationships
+                .apply_mutations([RelationshipMutation::Delete(relationship)], [])?;
+        }
+
         self.store
             .delete_tuple(tuple)
             .map_err(ZanzibarError::StorageError)
@@ -116,9 +169,18 @@ impl ZanzibarService {
         }
 
         if let Some(schema) = &self.schema {
-            let object_type = domain::ObjectType::try_from(object.namespace.as_str())?;
+            let resource = domain::ObjectRef::try_from(object)?;
+            let object_type = resource.object_type().clone();
             let relation_name = domain::RelationName::try_from(relation.0.as_str())?;
             schema.resolver().relation(&object_type, &relation_name)?;
+            return eval::check_with_indexed_store(
+                object,
+                relation,
+                user,
+                &self.configs,
+                &self.relationships,
+                &mut HashSet::new(),
+            );
         }
 
         eval::check_with_configs(
@@ -154,6 +216,92 @@ impl ZanzibarService {
         }
 
         eval::expand_with_configs(object, relation, &self.configs, self.store.as_ref())
+    }
+
+    fn rebuild_relationship_store(
+        &self,
+        schema: &CompiledSchema,
+    ) -> Result<IndexedRelationshipStore, ZanzibarError> {
+        let mut relationships = IndexedRelationshipStore::default();
+        for tuple in self.store.all_tuples() {
+            let relationship = domain::Relationship::try_from(&tuple)?;
+            schema.validate_relationship(&relationship)?;
+            relationships.apply_mutations([RelationshipMutation::Touch(relationship)], [])?;
+        }
+        Ok(relationships)
+    }
+}
+
+fn validate_precondition_filter(
+    schema: &CompiledSchema,
+    precondition: &Precondition,
+) -> Result<(), ZanzibarError> {
+    match precondition {
+        Precondition::MustMatch(filter) | Precondition::MustNotMatch(filter) => {
+            validate_relationship_filter(schema, filter)
+        }
+    }
+}
+
+fn validate_relationship_filter(
+    schema: &CompiledSchema,
+    filter: &RelationshipFilter,
+) -> Result<(), ZanzibarError> {
+    schema.resolver().namespace(filter.resource_type())?;
+    if let Some(relation) = filter.optional_relation() {
+        schema
+            .resolver()
+            .relation(filter.resource_type(), relation)?;
+    }
+    if let Some(subject) = filter.optional_subject() {
+        validate_subject_filter(schema, subject)?;
+    }
+    Ok(())
+}
+
+fn validate_subject_filter(
+    schema: &CompiledSchema,
+    filter: &SubjectFilter,
+) -> Result<(), ZanzibarError> {
+    if let Some(relation) = filter.optional_relation() {
+        let object_type = domain::ObjectType::try_from(filter.subject_type().as_str())?;
+        schema.resolver().relation(&object_type, relation)?;
+    }
+    Ok(())
+}
+
+fn relation_tuple_from_relationship(
+    relationship: &domain::Relationship,
+) -> Result<RelationTuple, ZanzibarError> {
+    let object = legacy_object_from_domain(relationship.resource());
+    let relation = Relation(relationship.relation().as_str().to_string());
+    let user = match relationship.subject() {
+        domain::SubjectRef::Object(subject) if subject.object_type().as_str() == "user" => {
+            User::UserId(subject.object_id().as_str().to_string())
+        }
+        domain::SubjectRef::Object(subject) => {
+            return Err(ZanzibarError::StorageError(format!(
+                "legacy tuple store cannot represent direct subject type '{}'",
+                subject.object_type()
+            )));
+        }
+        domain::SubjectRef::Userset { object, relation } => User::Userset(
+            legacy_object_from_domain(object),
+            Relation(relation.as_str().to_string()),
+        ),
+    };
+
+    Ok(RelationTuple {
+        object,
+        relation,
+        user,
+    })
+}
+
+fn legacy_object_from_domain(object: &domain::ObjectRef) -> Object {
+    Object {
+        namespace: object.object_type().as_str().to_string(),
+        id: object.object_id().as_str().to_string(),
     }
 }
 

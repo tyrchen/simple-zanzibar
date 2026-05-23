@@ -454,3 +454,15 @@ impl TryFrom<&Relation> for RelationName {
         Self::try_from(value.0.as_str())
     }
 }
+
+impl From<&ObjectType> for SubjectType {
+    fn from(value: &ObjectType) -> Self {
+        Self(value.0.clone())
+    }
+}
+
+impl From<&ObjectId> for SubjectId {
+    fn from(value: &ObjectId) -> Self {
+        Self(value.0.clone())
+    }
+}

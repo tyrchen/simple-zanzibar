@@ -1,8 +1,12 @@
 //! Integration tests for the Zanzibar service.
 //! These tests demonstrate the full workflow from DSL parsing to authorization checks.
 
+use std::str::FromStr;
+
 use simple_zanzibar::{
+    domain::{DomainError, Relationship},
     model::{Object, Relation, RelationTuple, User},
+    relationship::{Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter},
     ZanzibarService,
 };
 
@@ -298,4 +302,122 @@ fn test_tuple_management() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!service.check(&obj, &rel, &user)?);
 
     Ok(())
+}
+
+#[test]
+fn test_tuple_written_before_schema_should_backfill_indexed_store(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut service = ZanzibarService::new();
+    let obj = Object {
+        namespace: "test".to_string(),
+        id: "item".to_string(),
+    };
+    let rel = Relation("viewer".to_string());
+    let user = User::UserId("alice".to_string());
+
+    service.write_tuple(RelationTuple {
+        object: obj.clone(),
+        relation: rel.clone(),
+        user: user.clone(),
+    })?;
+
+    service.add_dsl(
+        r"
+        namespace test {
+            relation viewer {}
+        }
+    ",
+    )?;
+
+    assert!(service.check(&obj, &rel, &user)?);
+    Ok(())
+}
+
+#[test]
+fn test_relationship_batch_should_validate_and_apply_atomically(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut service = ZanzibarService::new();
+    service.add_dsl(
+        r"
+        namespace doc {
+            relation viewer {}
+        }
+    ",
+    )?;
+
+    let alice = relationship("doc:readme#viewer@user:alice")?;
+    let bob = relationship("doc:readme#viewer@user:bob")?;
+    service.apply_relationship_mutations(
+        [
+            RelationshipMutation::Create(alice.clone()),
+            RelationshipMutation::Touch(bob.clone()),
+        ],
+        [Precondition::MustNotMatch(exact_filter(
+            "doc:readme#viewer@user:alice",
+        )?)],
+    )?;
+
+    let object = Object {
+        namespace: "doc".to_string(),
+        id: "readme".to_string(),
+    };
+    let relation = Relation("viewer".to_string());
+    assert!(service.check(&object, &relation, &User::UserId("alice".to_string()))?);
+    assert!(service.check(&object, &relation, &User::UserId("bob".to_string()))?);
+
+    let missing = relationship("doc:missing#viewer@user:alice")?;
+    assert!(service
+        .apply_relationship_mutations(
+            [
+                RelationshipMutation::Create(relationship("doc:readme#viewer@user:charlie")?),
+                RelationshipMutation::Delete(missing),
+            ],
+            [],
+        )
+        .is_err());
+    assert!(!service.check(&object, &relation, &User::UserId("charlie".to_string()))?);
+
+    Ok(())
+}
+
+#[test]
+fn test_relationship_batch_should_require_schema() -> Result<(), Box<dyn std::error::Error>> {
+    let mut service = ZanzibarService::new();
+
+    assert!(service
+        .apply_relationship_mutations(
+            [RelationshipMutation::Create(relationship(
+                "doc:readme#viewer@user:alice",
+            )?)],
+            [],
+        )
+        .is_err());
+
+    Ok(())
+}
+
+fn relationship(value: &str) -> Result<Relationship, DomainError> {
+    Relationship::from_str(value)
+}
+
+fn exact_filter(value: &str) -> Result<RelationshipFilter, DomainError> {
+    let relationship = relationship(value)?;
+    let subject = match relationship.subject() {
+        simple_zanzibar::domain::SubjectRef::Object(object) => SubjectFilter::exact(
+            object.object_type().as_str().try_into()?,
+            object.object_id().as_str().try_into()?,
+            None,
+        ),
+        simple_zanzibar::domain::SubjectRef::Userset { object, relation } => SubjectFilter::exact(
+            object.object_type().as_str().try_into()?,
+            object.object_id().as_str().try_into()?,
+            Some(relation.clone()),
+        ),
+    };
+
+    Ok(RelationshipFilter::for_exact_subject(
+        relationship.resource(),
+        relationship.relation().clone(),
+        subject,
+    ))
 }

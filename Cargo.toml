@@ -30,10 +30,12 @@ thiserror = "2.0.12"
 [dev-dependencies]
 arc-swap = { version = "1.9.1", default-features = false }
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+proptest = "1.11.0"
 
 [[bench]]
 name = "baseline"
 harness = false
+test = false
 
 [[example]]
 name = "file_permissions"
