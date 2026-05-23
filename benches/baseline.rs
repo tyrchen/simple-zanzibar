@@ -50,6 +50,27 @@ fn owner_namespace() -> NamespaceConfig {
     }
 }
 
+fn graph_schema() -> &'static str {
+    r#"
+    namespace doc {
+        relation owner {}
+        relation viewer {}
+        relation parent {}
+        relation inherited_viewer {
+            rewrite tuple_to_userset(tupleset: "parent", computed_userset: "viewer")
+        }
+    }
+
+    namespace group {
+        relation member {}
+    }
+
+    namespace folder {
+        relation viewer {}
+    }
+    "#
+}
+
 fn write_or_abort(store: &mut impl TupleStore, tuple: RelationTuple) {
     if let Err(error) = store.write_tuple(tuple) {
         eprintln!("failed to build benchmark dataset: {error}");
@@ -72,6 +93,80 @@ fn service_with_relationships(count: usize) -> ZanzibarService {
         std::process::abort();
     }
 
+    service
+}
+
+fn service_with_one_hop_relationships(count: usize) -> ZanzibarService {
+    let mut service = ZanzibarService::new();
+    let pairs = count / 2;
+    for index in 0..pairs {
+        if let Err(error) = service.write_tuple(RelationTuple {
+            object: object_at(index),
+            relation: Relation("viewer".to_string()),
+            user: User::Userset(
+                Object {
+                    namespace: "group".to_string(),
+                    id: format!("group-{index:06}"),
+                },
+                Relation("member".to_string()),
+            ),
+        }) {
+            eprintln!("failed to build one-hop benchmark dataset: {error}");
+            std::process::abort();
+        }
+        if let Err(error) = service.write_tuple(RelationTuple {
+            object: Object {
+                namespace: "group".to_string(),
+                id: format!("group-{index:06}"),
+            },
+            relation: Relation("member".to_string()),
+            user: user_at(index),
+        }) {
+            eprintln!("failed to build one-hop benchmark dataset: {error}");
+            std::process::abort();
+        }
+    }
+    if let Err(error) = service.add_dsl(graph_schema()) {
+        eprintln!("failed to build one-hop benchmark schema: {error}");
+        std::process::abort();
+    }
+    service
+}
+
+fn service_with_tuple_to_userset_relationships(count: usize) -> ZanzibarService {
+    let mut service = ZanzibarService::new();
+    let pairs = count / 2;
+    for index in 0..pairs {
+        if let Err(error) = service.write_tuple(RelationTuple {
+            object: object_at(index),
+            relation: Relation("parent".to_string()),
+            user: User::Userset(
+                Object {
+                    namespace: "folder".to_string(),
+                    id: format!("folder-{index:06}"),
+                },
+                Relation("viewer".to_string()),
+            ),
+        }) {
+            eprintln!("failed to build tuple-to-userset benchmark dataset: {error}");
+            std::process::abort();
+        }
+        if let Err(error) = service.write_tuple(RelationTuple {
+            object: Object {
+                namespace: "folder".to_string(),
+                id: format!("folder-{index:06}"),
+            },
+            relation: Relation("viewer".to_string()),
+            user: user_at(index),
+        }) {
+            eprintln!("failed to build tuple-to-userset benchmark dataset: {error}");
+            std::process::abort();
+        }
+    }
+    if let Err(error) = service.add_dsl(graph_schema()) {
+        eprintln!("failed to build tuple-to-userset benchmark schema: {error}");
+        std::process::abort();
+    }
     service
 }
 
@@ -117,6 +212,34 @@ fn bench_legacy_store_scan(c: &mut Criterion) {
     });
 }
 
+fn bench_one_hop_userset_check(c: &mut Criterion) {
+    let service = service_with_one_hop_relationships(DATASET_RELATIONSHIPS);
+    let target = (DATASET_RELATIONSHIPS / 2) - 1;
+    let object = object_at(target);
+    let relation = Relation("viewer".to_string());
+    let user = user_at(target);
+
+    c.bench_function("one_hop_userset_check_100k", |b| {
+        b.iter(|| {
+            black_box(service.check(black_box(&object), black_box(&relation), black_box(&user)))
+        });
+    });
+}
+
+fn bench_tuple_to_userset_check(c: &mut Criterion) {
+    let service = service_with_tuple_to_userset_relationships(DATASET_RELATIONSHIPS);
+    let target = (DATASET_RELATIONSHIPS / 2) - 1;
+    let object = object_at(target);
+    let relation = Relation("inherited_viewer".to_string());
+    let user = user_at(target);
+
+    c.bench_function("tuple_to_userset_check_100k", |b| {
+        b.iter(|| {
+            black_box(service.check(black_box(&object), black_box(&relation), black_box(&user)))
+        });
+    });
+}
+
 fn main() {
     if cfg!(debug_assertions) {
         return;
@@ -128,6 +251,8 @@ fn main() {
         .measurement_time(Duration::from_millis(500))
         .configure_from_args();
     bench_indexed_direct_check(&mut criterion);
+    bench_one_hop_userset_check(&mut criterion);
+    bench_tuple_to_userset_check(&mut criterion);
     bench_legacy_store_scan(&mut criterion);
     criterion.final_summary();
 }

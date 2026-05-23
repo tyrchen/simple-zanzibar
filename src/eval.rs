@@ -2,6 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
+use std::num::{NonZeroU32, NonZeroUsize};
+
+use thiserror::Error;
 
 use crate::domain::{
     ObjectRef as DomainObjectRef, ObjectType, RelationName, Relationship, SubjectRef,
@@ -11,7 +14,560 @@ use crate::model::{ExpandedUserset, NamespaceConfig, Object, Relation, User, Use
 use crate::relationship::{
     IndexedRelationshipStore, QueryLimit, RelationshipFilter, RelationshipReader, SubjectFilter,
 };
+use crate::revision::PublishedSnapshot;
+use crate::schema::UsersetExpression as SchemaUsersetExpression;
 use crate::store::TupleStore;
+
+const DEFAULT_MAX_DEPTH: u32 = 50;
+const DEFAULT_MAX_FANOUT_PER_STEP: u32 = 1_000;
+const DEFAULT_MAX_LOOKUP_RESULTS: u32 = 1_000;
+
+/// Errors produced by the shared evaluation engine.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum EvaluationError {
+    /// A recursive evaluation exceeded the configured depth limit.
+    #[error("evaluation depth exceeded at {key:?}")]
+    DepthExceeded {
+        /// Evaluation key that exceeded the limit.
+        key: Box<EvaluationKey>,
+    },
+
+    /// A single evaluator step exceeded the configured fanout limit.
+    #[error("evaluation fanout exceeded limit {limit}")]
+    FanoutExceeded {
+        /// Configured fanout limit.
+        limit: NonZeroU32,
+    },
+}
+
+/// Immutable key for evaluator depth errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvaluationKey {
+    /// A check key.
+    Check(CheckKey),
+    /// An expand key.
+    Expand(ExpandKey),
+}
+
+/// Immutable key for recursion tracking.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CheckKey {
+    object: Object,
+    relation: Relation,
+    user: User,
+}
+
+impl CheckKey {
+    fn new(object: &Object, relation: &Relation, user: &User) -> Self {
+        Self {
+            object: object.clone(),
+            relation: relation.clone(),
+            user: user.clone(),
+        }
+    }
+}
+
+/// Immutable key for expand recursion tracking.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExpandKey {
+    object: Object,
+    relation: Relation,
+}
+
+impl ExpandKey {
+    fn new(object: &Object, relation: &Relation) -> Self {
+        Self {
+            object: object.clone(),
+            relation: relation.clone(),
+        }
+    }
+}
+
+/// Evaluator resource limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvaluationLimits {
+    /// Maximum recursive check depth.
+    pub max_depth: NonZeroU32,
+    /// Maximum userset fanout per evaluator step.
+    pub max_fanout_per_step: NonZeroU32,
+    /// Maximum lookup results for lookup APIs.
+    pub max_lookup_results: NonZeroU32,
+}
+
+impl Default for EvaluationLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: non_zero_u32(DEFAULT_MAX_DEPTH),
+            max_fanout_per_step: non_zero_u32(DEFAULT_MAX_FANOUT_PER_STEP),
+            max_lookup_results: non_zero_u32(DEFAULT_MAX_LOOKUP_RESULTS),
+        }
+    }
+}
+
+/// Membership algebra result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Membership {
+    /// The subject is a member.
+    Allowed,
+    /// The subject is not a member.
+    Denied,
+    /// Reserved for future caveat/condition support.
+    Conditional,
+}
+
+impl Membership {
+    /// Returns true when membership is allowed.
+    #[must_use]
+    pub const fn is_allowed(self) -> bool {
+        matches!(self, Self::Allowed)
+    }
+
+    /// Returns the union of two membership results.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Allowed, _) | (_, Self::Allowed) => Self::Allowed,
+            (Self::Conditional, _) | (_, Self::Conditional) => Self::Conditional,
+            (Self::Denied, Self::Denied) => Self::Denied,
+        }
+    }
+
+    /// Returns the intersection of two membership results.
+    #[must_use]
+    pub const fn intersection(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Denied, _) | (_, Self::Denied) => Self::Denied,
+            (Self::Conditional, _) | (_, Self::Conditional) => Self::Conditional,
+            (Self::Allowed, Self::Allowed) => Self::Allowed,
+        }
+    }
+
+    /// Returns membership for `self - other`.
+    #[must_use]
+    pub const fn exclusion(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Denied, _) | (_, Self::Allowed) => Self::Denied,
+            (Self::Conditional, _) | (_, Self::Conditional) => Self::Conditional,
+            (Self::Allowed, Self::Denied) => Self::Allowed,
+        }
+    }
+}
+
+/// Evaluation context over one immutable snapshot.
+#[derive(Debug)]
+pub struct EvaluationContext<'a> {
+    snapshot: &'a PublishedSnapshot,
+    limits: EvaluationLimits,
+    remaining_depth: u32,
+    visited: HashSet<CheckKey>,
+    expanded: HashSet<ExpandKey>,
+}
+
+impl<'a> EvaluationContext<'a> {
+    /// Creates an evaluation context for a snapshot.
+    #[must_use]
+    pub fn new(snapshot: &'a PublishedSnapshot, limits: EvaluationLimits) -> Self {
+        Self {
+            snapshot,
+            limits,
+            remaining_depth: limits.max_depth.get(),
+            visited: HashSet::new(),
+            expanded: HashSet::new(),
+        }
+    }
+
+    /// Evaluates a check request and returns membership algebra.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError`] when validation, store access, or evaluator limits fail.
+    pub fn check(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+        user: &User,
+    ) -> Result<Membership, ZanzibarError> {
+        let key = CheckKey::new(object, relation, user);
+        if !self.visited.insert(key.clone()) {
+            return Ok(Membership::Denied);
+        }
+        if let Err(error) = self.enter(EvaluationKey::Check(key.clone())) {
+            self.visited.remove(&key);
+            return Err(error);
+        }
+
+        let result = self.check_entered(object, relation, user);
+        self.visited.remove(&key);
+        self.leave();
+        result
+    }
+
+    /// Expands a userset using the same snapshot and recursion limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZanzibarError`] when validation, store access, or evaluator limits fail.
+    pub fn expand(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+    ) -> Result<ExpandedUserset, ZanzibarError> {
+        let key = ExpandKey::new(object, relation);
+        if !self.expanded.insert(key.clone()) {
+            return Ok(ExpandedUserset::Union(Vec::new()));
+        }
+        if let Err(error) = self.enter(EvaluationKey::Expand(key.clone())) {
+            self.expanded.remove(&key);
+            return Err(error);
+        }
+
+        let result = self.expand_entered(object, relation);
+        self.expanded.remove(&key);
+        self.leave();
+        result
+    }
+
+    fn expand_entered(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+    ) -> Result<ExpandedUserset, ZanzibarError> {
+        let object_type = ObjectType::try_from(object.namespace.as_str())?;
+        let relation_name = RelationName::try_from(relation)?;
+        let relation_definition = self
+            .snapshot
+            .schema()
+            .resolver()
+            .relation(&object_type, &relation_name)?;
+        match relation_definition.userset_rewrite() {
+            Some(expression) => self.expand_schema_expression(object, relation, expression),
+            None => self.expand_this(object, relation),
+        }
+    }
+
+    fn check_entered(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+        user: &User,
+    ) -> Result<Membership, ZanzibarError> {
+        let object_type = ObjectType::try_from(object.namespace.as_str())?;
+        let relation_name = RelationName::try_from(relation)?;
+        let relation_definition = self
+            .snapshot
+            .schema()
+            .resolver()
+            .relation(&object_type, &relation_name)?;
+        match relation_definition.userset_rewrite() {
+            Some(expression) => self.eval_schema_expression(object, relation, user, expression),
+            None => self.eval_this(object, relation, user),
+        }
+    }
+
+    fn eval_schema_expression(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+        user: &User,
+        expression: &SchemaUsersetExpression,
+    ) -> Result<Membership, ZanzibarError> {
+        match expression {
+            SchemaUsersetExpression::This => self.eval_this(object, relation, user),
+            SchemaUsersetExpression::ComputedUserset { relation } => {
+                self.check(object, &legacy_relation(relation), user)
+            }
+            SchemaUsersetExpression::TupleToUserset {
+                tupleset_relation,
+                computed_userset_relation,
+            } => self.eval_tuple_to_userset(
+                object,
+                user,
+                &legacy_relation(tupleset_relation),
+                &legacy_relation(computed_userset_relation),
+            ),
+            SchemaUsersetExpression::Union(expressions) => {
+                self.eval_schema_union(object, relation, user, expressions)
+            }
+            SchemaUsersetExpression::Intersection(expressions) => {
+                self.eval_schema_intersection(object, relation, user, expressions)
+            }
+            SchemaUsersetExpression::Exclusion { base, exclude } => {
+                self.eval_schema_exclusion(object, relation, user, base, exclude)
+            }
+        }
+    }
+
+    fn eval_this(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+        user: &User,
+    ) -> Result<Membership, ZanzibarError> {
+        let resource = DomainObjectRef::try_from(object)?;
+        let relation_name = RelationName::try_from(relation)?;
+        let subject = SubjectFilter::try_from(user)?;
+        let exact_filter =
+            RelationshipFilter::for_exact_subject(&resource, relation_name.clone(), subject);
+        if self
+            .snapshot
+            .relationships()
+            .any_resource_match(&exact_filter)?
+        {
+            return Ok(Membership::Allowed);
+        }
+
+        let mut fanout = 0_u32;
+        for relationship in indexed_resource_relation(
+            self.snapshot.relationships(),
+            object,
+            relation,
+            unbounded_query_limit(),
+        )? {
+            if let SubjectRef::Userset {
+                object: userset_object,
+                relation: userset_relation,
+            } = relationship.subject()
+            {
+                self.increment_fanout(&mut fanout)?;
+                let nested_object = legacy_object(userset_object);
+                let nested_relation = legacy_relation(userset_relation);
+                if self
+                    .check(&nested_object, &nested_relation, user)?
+                    .is_allowed()
+                {
+                    return Ok(Membership::Allowed);
+                }
+            }
+        }
+
+        Ok(Membership::Denied)
+    }
+
+    fn eval_tuple_to_userset(
+        &mut self,
+        object: &Object,
+        user: &User,
+        tupleset_relation: &Relation,
+        computed_userset_relation: &Relation,
+    ) -> Result<Membership, ZanzibarError> {
+        let mut fanout = 0_u32;
+        for relationship in indexed_resource_relation(
+            self.snapshot.relationships(),
+            object,
+            tupleset_relation,
+            unbounded_query_limit(),
+        )? {
+            if let SubjectRef::Userset {
+                object: intermediate,
+                ..
+            } = relationship.subject()
+            {
+                self.increment_fanout(&mut fanout)?;
+                let intermediate_object = legacy_object(intermediate);
+                if self
+                    .check(&intermediate_object, computed_userset_relation, user)?
+                    .is_allowed()
+                {
+                    return Ok(Membership::Allowed);
+                }
+            }
+        }
+        Ok(Membership::Denied)
+    }
+
+    fn eval_schema_union(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+        user: &User,
+        expressions: &[SchemaUsersetExpression],
+    ) -> Result<Membership, ZanzibarError> {
+        let mut result = Membership::Denied;
+        for expression in expressions {
+            result = result.union(self.eval_schema_expression(object, relation, user, expression)?);
+            if result == Membership::Allowed {
+                return Ok(result);
+            }
+        }
+        Ok(result)
+    }
+
+    fn eval_schema_intersection(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+        user: &User,
+        expressions: &[SchemaUsersetExpression],
+    ) -> Result<Membership, ZanzibarError> {
+        let mut result = Membership::Allowed;
+        for expression in expressions {
+            result = result
+                .intersection(self.eval_schema_expression(object, relation, user, expression)?);
+            if result == Membership::Denied {
+                return Ok(result);
+            }
+        }
+        Ok(result)
+    }
+
+    fn eval_schema_exclusion(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+        user: &User,
+        base: &SchemaUsersetExpression,
+        exclude: &SchemaUsersetExpression,
+    ) -> Result<Membership, ZanzibarError> {
+        let base = self.eval_schema_expression(object, relation, user, base)?;
+        if base == Membership::Denied {
+            return Ok(Membership::Denied);
+        }
+        let exclude = self.eval_schema_expression(object, relation, user, exclude)?;
+        Ok(base.exclusion(exclude))
+    }
+
+    fn expand_schema_expression(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+        expression: &SchemaUsersetExpression,
+    ) -> Result<ExpandedUserset, ZanzibarError> {
+        match expression {
+            SchemaUsersetExpression::This => self.expand_this(object, relation),
+            SchemaUsersetExpression::ComputedUserset { relation } => {
+                self.expand(object, &legacy_relation(relation))
+            }
+            SchemaUsersetExpression::TupleToUserset {
+                tupleset_relation,
+                computed_userset_relation,
+            } => {
+                let mut users = Vec::new();
+                let mut fanout = 0_u32;
+                for relationship in indexed_resource_relation(
+                    self.snapshot.relationships(),
+                    object,
+                    &legacy_relation(tupleset_relation),
+                    unbounded_query_limit(),
+                )? {
+                    if let SubjectRef::Userset {
+                        object: intermediate,
+                        ..
+                    } = relationship.subject()
+                    {
+                        self.increment_fanout(&mut fanout)?;
+                        users.push(self.expand(
+                            &legacy_object(intermediate),
+                            &legacy_relation(computed_userset_relation),
+                        )?);
+                    }
+                }
+                Ok(ExpandedUserset::Union(users))
+            }
+            SchemaUsersetExpression::Union(expressions) => {
+                let mut users = Vec::with_capacity(expressions.len());
+                for expression in expressions {
+                    users.push(self.expand_schema_expression(object, relation, expression)?);
+                }
+                Ok(ExpandedUserset::Union(users))
+            }
+            SchemaUsersetExpression::Intersection(expressions) => {
+                let mut users = Vec::with_capacity(expressions.len());
+                for expression in expressions {
+                    users.push(self.expand_schema_expression(object, relation, expression)?);
+                }
+                Ok(ExpandedUserset::Intersection(users))
+            }
+            SchemaUsersetExpression::Exclusion { base, exclude } => {
+                let base = self.expand_schema_expression(object, relation, base)?;
+                let exclude = self.expand_schema_expression(object, relation, exclude)?;
+                Ok(ExpandedUserset::Exclusion {
+                    base: Box::new(base),
+                    exclude: Box::new(exclude),
+                })
+            }
+        }
+    }
+
+    fn expand_this(
+        &mut self,
+        object: &Object,
+        relation: &Relation,
+    ) -> Result<ExpandedUserset, ZanzibarError> {
+        let mut users = Vec::new();
+        let mut fanout = 0_u32;
+        for relationship in indexed_resource_relation(
+            self.snapshot.relationships(),
+            object,
+            relation,
+            self.fanout_query_limit(),
+        )? {
+            self.increment_fanout(&mut fanout)?;
+            users.push(expanded_subject(relationship.subject())?);
+        }
+        Ok(ExpandedUserset::Union(users))
+    }
+
+    fn enter(&mut self, key: EvaluationKey) -> Result<(), ZanzibarError> {
+        if self.remaining_depth == 0 {
+            return Err(EvaluationError::DepthExceeded { key: Box::new(key) }.into());
+        }
+        self.remaining_depth = self.remaining_depth.saturating_sub(1);
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.remaining_depth = self.remaining_depth.saturating_add(1);
+    }
+
+    fn increment_fanout(&self, current: &mut u32) -> Result<(), ZanzibarError> {
+        *current = current.saturating_add(1);
+        if *current > self.limits.max_fanout_per_step.get() {
+            return Err(EvaluationError::FanoutExceeded {
+                limit: self.limits.max_fanout_per_step,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn fanout_query_limit(&self) -> QueryLimit {
+        let requested = u64::from(self.limits.max_fanout_per_step.get()) + 1;
+        let limit = match usize::try_from(requested).ok().and_then(NonZeroUsize::new) {
+            Some(limit) => limit,
+            None => NonZeroUsize::MAX,
+        };
+        QueryLimit::new(limit)
+    }
+}
+
+/// Evaluates a snapshot-backed check request.
+///
+/// # Errors
+///
+/// Returns [`ZanzibarError`] when validation, store access, or evaluator limits fail.
+pub fn check_with_snapshot(
+    snapshot: &PublishedSnapshot,
+    object: &Object,
+    relation: &Relation,
+    user: &User,
+    limits: EvaluationLimits,
+) -> Result<Membership, ZanzibarError> {
+    EvaluationContext::new(snapshot, limits).check(object, relation, user)
+}
+
+/// Evaluates a snapshot-backed expand request.
+///
+/// # Errors
+///
+/// Returns [`ZanzibarError`] when validation, store access, or evaluator limits fail.
+pub fn expand_with_snapshot(
+    snapshot: &PublishedSnapshot,
+    object: &Object,
+    relation: &Relation,
+    limits: EvaluationLimits,
+) -> Result<ExpandedUserset, ZanzibarError> {
+    EvaluationContext::new(snapshot, limits).expand(object, relation)
+}
 
 fn check_internal<S, C>(
     object: &Object,
@@ -265,8 +821,12 @@ where
             tupleset_relation,
             computed_userset_relation,
         } => {
-            for relationship in indexed_resource_relation(relationships, object, tupleset_relation)?
-            {
+            for relationship in indexed_resource_relation(
+                relationships,
+                object,
+                tupleset_relation,
+                QueryLimit::default(),
+            )? {
                 if let SubjectRef::Userset {
                     object: intermediate,
                     ..
@@ -366,7 +926,9 @@ where
         return Ok(true);
     }
 
-    for relationship in indexed_resource_relation(relationships, object, relation)? {
+    for relationship in
+        indexed_resource_relation(relationships, object, relation, QueryLimit::default())?
+    {
         if let SubjectRef::Userset {
             object: userset_object,
             relation: userset_relation,
@@ -394,6 +956,7 @@ fn indexed_resource_relation<'a>(
     relationships: &'a IndexedRelationshipStore,
     object: &Object,
     relation: &Relation,
+    limit: QueryLimit,
 ) -> Result<impl Iterator<Item = &'a Relationship>, ZanzibarError> {
     let resource = DomainObjectRef::try_from(object)?;
     let relation_name = RelationName::try_from(relation)?;
@@ -402,7 +965,7 @@ fn indexed_resource_relation<'a>(
         Some(resource.object_id().clone()),
         Some(relation_name),
         None,
-        QueryLimit::default(),
+        limit,
     );
     Ok(relationships.query_relationships(&filter)?)
 }
@@ -416,6 +979,33 @@ fn legacy_object(object: &DomainObjectRef) -> Object {
 
 fn legacy_relation(relation: &RelationName) -> Relation {
     Relation(relation.as_str().to_string())
+}
+
+fn expanded_subject(subject: &SubjectRef) -> Result<ExpandedUserset, ZanzibarError> {
+    match subject {
+        SubjectRef::Object(object) if object.object_type().as_str() == "user" => Ok(
+            ExpandedUserset::User(object.object_id().as_str().to_string()),
+        ),
+        SubjectRef::Object(object) => Err(ZanzibarError::StorageError(format!(
+            "legacy expand cannot represent direct subject type '{}'",
+            object.object_type()
+        ))),
+        SubjectRef::Userset { object, relation } => Ok(ExpandedUserset::Userset(
+            legacy_object(object),
+            legacy_relation(relation),
+        )),
+    }
+}
+
+fn non_zero_u32(value: u32) -> NonZeroU32 {
+    match NonZeroU32::new(value) {
+        Some(value) => value,
+        None => NonZeroU32::MIN,
+    }
+}
+
+fn unbounded_query_limit() -> QueryLimit {
+    QueryLimit::new(NonZeroUsize::MAX)
 }
 
 /// Evaluates an `expand` request.

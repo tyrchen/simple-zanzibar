@@ -48,6 +48,20 @@ updated.
   `#![forbid(unsafe_code)]` and required warn lints, then fix all resulting diagnostics.
 - Target phase: Phase 6 task 6.1 and 6.2.
 
+### D4 - Legacy Evaluator Public Surface
+
+- Severity: P2
+- Citation: [src/eval.rs](../src/eval.rs)
+- Source: Phase 4 review against [14-evaluation-engine-design.md](./14-evaluation-engine-design.md)
+  and [15-public-api-design.md](./15-public-api-design.md)
+- Finding: `check_with_configs`, `check_with_indexed_store`, and `expand_with_configs` remain public
+  compatibility helpers, so callers can bypass the snapshot-backed `EvaluationContext` even though
+  `ZanzibarService` now routes typed-schema checks and expands through the shared evaluator.
+- Fix shape: when the v2 public API lands, move these helpers behind the compatibility facade or make
+  them crate-private/test-only so the public surface cannot opt out of typed schema, snapshot,
+  recursion, fanout, and membership semantics.
+- Target phase: Phase 6 task 6.4 after `ZanzibarEngine` owns the public request/response API.
+
 ## 3. Cross-References
 
 - Implementation plan: [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 
 use crate::error::ZanzibarError;
+use crate::eval::EvaluationLimits;
 use crate::model::{NamespaceConfig, Object, Relation, RelationTuple, User};
 use crate::relationship::{
     IndexedRelationshipStore, Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter,
@@ -38,6 +39,7 @@ pub struct ZanzibarService {
     datastore_id: DatastoreId,
     retained_snapshots: NonZeroUsize,
     last_revision: Option<Revision>,
+    evaluation_limits: EvaluationLimits,
     store: Box<dyn TupleStore>,
 }
 
@@ -60,6 +62,7 @@ impl ZanzibarService {
             datastore_id: DatastoreId::new_unique(),
             retained_snapshots: default_retained_snapshots(),
             last_revision: None,
+            evaluation_limits: EvaluationLimits::default(),
             store: Box::new(InMemoryTupleStore::default()),
         }
     }
@@ -70,6 +73,13 @@ impl ZanzibarService {
         let mut service = Self::new();
         service.retained_snapshots = retained_snapshots;
         service
+    }
+
+    /// Sets evaluation recursion and fanout limits.
+    #[must_use]
+    pub fn with_evaluation_limits(mut self, limits: EvaluationLimits) -> Self {
+        self.evaluation_limits = limits;
+        self
     }
 
     /// Parses a DSL string and adds the resulting configurations to the service.
@@ -263,13 +273,9 @@ impl ZanzibarService {
             .schema()
             .resolver()
             .relation(resource.object_type(), &relation_name)?;
-        eval::check_with_indexed_store(
-            object,
-            relation,
-            user,
-            snapshot.configs(),
-            snapshot.relationships(),
-            &mut HashSet::new(),
+        Ok(
+            eval::check_with_snapshot(&snapshot, object, relation, user, self.evaluation_limits)?
+                .is_allowed(),
         )
     }
 
@@ -285,16 +291,20 @@ impl ZanzibarService {
         object: &Object,
         relation: &Relation,
     ) -> Result<model::ExpandedUserset, ZanzibarError> {
+        if self.schema.is_some() {
+            let snapshot = self.snapshot_for_consistency(Consistency::Latest)?;
+            let object_type = domain::ObjectType::try_from(object.namespace.as_str())?;
+            let relation_name = domain::RelationName::try_from(relation.0.as_str())?;
+            snapshot
+                .schema()
+                .resolver()
+                .relation(&object_type, &relation_name)?;
+            return eval::expand_with_snapshot(&snapshot, object, relation, self.evaluation_limits);
+        }
+
         if !self.configs.contains_key(&object.namespace) {
             return Err(ZanzibarError::NamespaceNotFound(object.namespace.clone()));
         }
-
-        if let Some(schema) = &self.schema {
-            let object_type = domain::ObjectType::try_from(object.namespace.as_str())?;
-            let relation_name = domain::RelationName::try_from(relation.0.as_str())?;
-            schema.resolver().relation(&object_type, &relation_name)?;
-        }
-
         eval::expand_with_configs(object, relation, &self.configs, self.store.as_ref())
     }
 
