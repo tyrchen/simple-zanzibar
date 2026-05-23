@@ -11,7 +11,7 @@ use std::{
 
 use criterion::{BatchSize, Criterion};
 use simple_zanzibar::{
-    ZanzibarService,
+    ZanzibarEngine,
     domain::{RelationName, Relationship, SubjectId, SubjectRef, SubjectType},
     eval::{
         EvaluationLimits, check_with_snapshot, expand_with_snapshot,
@@ -84,8 +84,8 @@ fn bench_building_blocks(criterion: &mut Criterion, filters: &[String]) {
     if should_benchmark(schema_name, filters) {
         criterion.bench_function(schema_name, |bencher| {
             bencher.iter_batched(
-                ZanzibarService::new,
-                |mut service| {
+                || ZanzibarEngine::builder().build(),
+                |service| {
                     must(
                         service.add_dsl(black_box(org_schema())),
                         "failed to apply schema",
@@ -102,8 +102,8 @@ fn bench_building_blocks(criterion: &mut Criterion, filters: &[String]) {
         criterion.bench_function(write_name, |bencher| {
             bencher.iter_batched(
                 configured_service,
-                |mut service| {
-                    apply_generated_relationships(&mut service, WRITE_BATCH_RULES);
+                |service| {
+                    apply_generated_relationships(&service, WRITE_BATCH_RULES);
                     black_box(service)
                 },
                 BatchSize::LargeInput,
@@ -364,9 +364,11 @@ fn build_org_scenario(rules: usize) -> OrgScenario {
     scenario
 }
 
-fn configured_service() -> ZanzibarService {
-    let mut service = ZanzibarService::with_snapshot_retention(non_zero_usize(1))
-        .with_evaluation_limits(evaluation_limits());
+fn configured_service() -> ZanzibarEngine {
+    let service = ZanzibarEngine::builder()
+        .retained_snapshots(non_zero_usize(1))
+        .evaluation_limits(evaluation_limits())
+        .build();
     must(
         service.add_dsl(org_schema()),
         "failed to apply organization schema",
@@ -515,7 +517,7 @@ fn ensure_check(
     }
 }
 
-fn apply_generated_relationships(service: &mut ZanzibarService, rules: usize) {
+fn apply_generated_relationships(service: &ZanzibarEngine, rules: usize) {
     let fixed_relationships = fixed_relationships();
     let mut batch = Vec::with_capacity(MUTATION_BATCH_LIMIT);
 
@@ -548,7 +550,7 @@ fn apply_generated_store_relationships(store: &mut IndexedRelationshipStore, rul
 }
 
 fn push_relationship(
-    service: &mut ZanzibarService,
+    service: &ZanzibarEngine,
     batch: &mut Vec<RelationshipMutation>,
     relationship: Relationship,
 ) {
@@ -558,14 +560,14 @@ fn push_relationship(
     }
 }
 
-fn flush_relationships(service: &mut ZanzibarService, batch: &mut Vec<RelationshipMutation>) {
+fn flush_relationships(service: &ZanzibarEngine, batch: &mut Vec<RelationshipMutation>) {
     if batch.is_empty() {
         return;
     }
 
     let mutations = std::mem::take(batch);
     must(
-        service.apply_relationship_mutations(mutations, []),
+        service.write_relationships_with_preconditions(mutations, []),
         "failed to apply generated relationship batch",
     );
 }

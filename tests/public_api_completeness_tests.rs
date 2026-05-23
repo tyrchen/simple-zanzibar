@@ -8,7 +8,6 @@ use std::{
 
 use simple_zanzibar::{
     EngineError, PolicyText, SnapshotLoadOptions, SnapshotSaveOptions, ZanzibarEngine,
-    ZanzibarService,
     domain::Relationship,
     eval::EvaluationLimits,
     model::{
@@ -175,7 +174,7 @@ fn test_should_export_and_import_reviewable_policy_text() -> Result<(), Box<dyn 
             .contains("doc:direct_doc#viewer@group:eng#member\n")
     );
 
-    let loaded = ZanzibarService::from_policy_text(&policy)?;
+    let loaded = ZanzibarEngine::from_policy_text(&policy)?;
     assert_equivalent_public_queries(&service, &loaded)?;
     Ok(())
 }
@@ -213,11 +212,11 @@ fn test_should_save_snapshot_from_policy_text_with_zstd() -> Result<(), Box<dyn 
 {
     let policy = populated_service()?.export_policy_text()?;
     let path = temp_snapshot_path("policy_zstd");
-    ZanzibarService::save_snapshot_from_policy_text(&path, &policy, SnapshotSaveOptions::zstd())?;
+    ZanzibarEngine::save_snapshot_from_policy_text(&path, &policy, SnapshotSaveOptions::zstd())?;
 
-    let loaded = ZanzibarService::load_snapshot(&path, SnapshotLoadOptions::zstd())?;
+    let loaded = ZanzibarEngine::load_snapshot(&path, SnapshotLoadOptions::zstd())?;
 
-    assert!(loaded.check(
+    assert!(loaded.check_relation(
         &doc("direct_doc"),
         &relation("can_view"),
         &User::UserId("alice".to_string()),
@@ -229,7 +228,7 @@ fn test_should_save_snapshot_from_policy_text_with_zstd() -> Result<(), Box<dyn 
 #[test]
 fn test_should_reject_duplicate_policy_text_relationships_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = populated_service()?;
+    let service = populated_service()?;
     let before = service.export_policy_text()?;
     let duplicate_policy = PolicyText::from_single_relationship_file(
         schema().to_string(),
@@ -246,7 +245,7 @@ fn test_should_reject_duplicate_policy_text_relationships_atomically()
 #[test]
 fn test_should_replace_and_delete_schema_policy_with_atomic_revalidation()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = populated_service()?;
+    let service = populated_service()?;
     let before = service.export_policy_text()?;
 
     let delete_with_live_relationship = service.delete_relation("doc", "viewer");
@@ -254,7 +253,8 @@ fn test_should_replace_and_delete_schema_policy_with_atomic_revalidation()
     assert_eq!(service.export_policy_text()?, before);
 
     let relationship: Relationship = "doc:direct_doc#viewer@group:eng#member".parse()?;
-    service.apply_relationship_mutations([RelationshipMutation::Delete(relationship)], [])?;
+    service
+        .write_relationships_with_preconditions([RelationshipMutation::Delete(relationship)], [])?;
     let still_invalid = service.delete_relation("doc", "viewer");
     assert!(still_invalid.is_err());
 
@@ -263,14 +263,14 @@ fn test_should_replace_and_delete_schema_policy_with_atomic_revalidation()
         "doc:denied_doc#banned@user:alice",
         "doc:inherited_doc#parent@folder:root#inherited_viewer",
     ] {
-        service.apply_relationship_mutations(
+        service.write_relationships_with_preconditions(
             [RelationshipMutation::Delete(relationship.parse()?)],
             [],
         )?;
     }
     service.delete_namespace("doc")?;
 
-    let check = service.check(
+    let check = service.check_relation(
         &doc("direct_doc"),
         &relation("can_view"),
         &User::UserId("alice".to_string()),
@@ -315,8 +315,8 @@ fn test_should_expose_schema_replacement_and_policy_export_through_engine()
 }
 
 fn assert_equivalent_public_queries(
-    original: &ZanzibarService,
-    loaded: &ZanzibarService,
+    original: &ZanzibarEngine,
+    loaded: &ZanzibarEngine,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let alice = User::UserId("alice".to_string());
     let request = LookupResourcesRequest {
@@ -341,12 +341,12 @@ fn assert_equivalent_public_queries(
         })?,
     );
     assert_eq!(
-        original.check(
+        original.check_relation(
             &doc("inherited_doc"),
             &relation("can_view"),
             &User::UserId("alice".to_string()),
         )?,
-        loaded.check(
+        loaded.check_relation(
             &doc("inherited_doc"),
             &relation("can_view"),
             &User::UserId("alice".to_string()),
@@ -355,12 +355,14 @@ fn assert_equivalent_public_queries(
     Ok(())
 }
 
-fn populated_service() -> Result<ZanzibarService, Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: non_zero_u32(32),
-        max_fanout_per_step: non_zero_u32(10_000),
-        max_lookup_results: non_zero_u32(1_000),
-    });
+fn populated_service() -> Result<ZanzibarEngine, Box<dyn std::error::Error>> {
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: non_zero_u32(32),
+            max_fanout_per_step: non_zero_u32(10_000),
+            max_lookup_results: non_zero_u32(1_000),
+        })
+        .build();
     service.add_dsl(schema())?;
     for relationship in [
         "group:eng#member@user:alice",
@@ -370,7 +372,7 @@ fn populated_service() -> Result<ZanzibarService, Box<dyn std::error::Error>> {
         "doc:denied_doc#viewer@group:eng#member",
         "doc:denied_doc#banned@user:alice",
     ] {
-        service.apply_relationship_mutations(
+        service.write_relationships_with_preconditions(
             [RelationshipMutation::Touch(relationship.parse()?)],
             [],
         )?;

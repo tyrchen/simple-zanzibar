@@ -23,7 +23,7 @@ The primary cause is not the Zanzibar model. It is duplicated ownership and poin
 - `IndexedRelationshipStore` stores owned `Relationship` values in both `rows` and `uniqueness`.
 - Every index key clones string-backed domain types.
 - Posting lists use `BTreeSet<usize>`, allocating tree nodes for row ids.
-- `publish_snapshot` stores one relationship copy in `ZanzibarService` and another clone inside `PublishedSnapshot`.
+- `publish_snapshot` stores one relationship copy in the writer-owned store and another clone inside `PublishedSnapshot`.
 - The compatibility `InMemoryTupleStore` can retain another full legacy tuple representation.
 
 ## 2. Goals
@@ -32,7 +32,7 @@ The primary cause is not the Zanzibar model. It is duplicated ownership and poin
 | --- | --- | --- |
 | G1 | Reduce steady-state RSS by one order of magnitude for large org datasets. | `org_authorization/1m_rules/check_direct_group_viewer` max RSS <= 400 MiB on the reference machine, excluding future Criterion variance. |
 | G2 | Preserve current read latency. | Direct check p95 remains <= 10 us over 1M relationships; inherited check p95 remains <= 25 us. |
-| G3 | Preserve public API compatibility. | Existing `Relationship`, `RelationshipFilter`, `SubjectFilter`, `ZanzibarService`, consistency, check, expand, and lookup tests keep passing. |
+| G3 | Preserve public API compatibility. | Existing `Relationship`, `RelationshipFilter`, `SubjectFilter`, `ZanzibarEngine`, consistency, check, expand, and lookup tests keep passing. |
 | G4 | Keep exact snapshot semantics. | Published snapshots remain immutable; exact-token reads never observe later writes. |
 | G5 | Keep implementation simple enough to review. | Start with std collections, compact ids, and `Vec<RowId>` postings; defer compressed bitmaps until benchmarks prove a need. |
 
@@ -47,7 +47,7 @@ The primary cause is not the Zanzibar model. It is duplicated ownership and poin
 ## 4. Current Memory Shape
 
 ```text
-ZanzibarService
+WriterState
   |
   +-- relationships: IndexedRelationshipStore
   |     |
@@ -73,7 +73,7 @@ The same logical relationship is represented as multiple independent allocations
 ## 5. Target Architecture
 
 ```text
-ZanzibarService
+WriterState
   |
   +-- current_snapshot: ArcSwap<PublishedSnapshot>
   |
@@ -266,7 +266,7 @@ self.current_snapshot.store(Arc<PublishedSnapshot>)
 self.snapshot_history.push_back(Arc<PublishedSnapshot>)
 ```
 
-`ZanzibarService` should not own a separate relationship store outside the current `PublishedSnapshot`. When a write starts, it loads the current snapshot and builds the next compact snapshot from it. For M6, copying compact rows/postings during a write is acceptable because the steady-state memory target is the release gate; a later persistent delta store can optimize write amplification if benchmark evidence requires it.
+The writer state should not own a separate relationship store outside the current `PublishedSnapshot`. When a write starts, it loads the current snapshot and builds the next compact snapshot from it. For M6, copying compact rows/postings during a write is acceptable because the steady-state memory target is the release gate; a later persistent delta store can optimize write amplification if benchmark evidence requires it.
 
 Compatibility store policy:
 

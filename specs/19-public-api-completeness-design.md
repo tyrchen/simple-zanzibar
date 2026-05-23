@@ -98,27 +98,16 @@ pub struct PolicyTextFile {
     pub contents: String,
 }
 
-impl ZanzibarService {
-    pub fn from_policy_text(policy: &PolicyText) -> Result<Self, ZanzibarError>;
-    pub fn apply_policy_text(&mut self, policy: &PolicyText) -> Result<ConsistencyToken, ZanzibarError>;
-    pub fn export_policy_text(&self) -> Result<PolicyText, ZanzibarError>;
+impl ZanzibarEngine {
+    pub fn from_policy_text(policy: &PolicyText) -> Result<Self, EngineError>;
+    pub fn apply_policy_text(&self, policy: &PolicyText) -> Result<ConsistencyToken, EngineError>;
+    pub fn export_policy_text(&self) -> Result<PolicyText, EngineError>;
     pub fn export_policy_files(&self, directory: impl AsRef<Path>) -> Result<(), PolicyIoError>;
     pub fn save_snapshot_from_policy_text(
         path: impl AsRef<Path>,
         policy: &PolicyText,
         options: SnapshotSaveOptions,
     ) -> Result<(), PolicyIoError>;
-}
-```
-
-`ZanzibarEngine` exposes the same operations where engine locking is relevant:
-
-```rust
-impl ZanzibarEngine {
-    pub fn from_policy_text(policy: &PolicyText) -> Result<Self, EngineError>;
-    pub fn apply_policy_text(&self, policy: &PolicyText) -> Result<ConsistencyToken, EngineError>;
-    pub fn export_policy_text(&self) -> Result<PolicyText, EngineError>;
-    pub fn export_policy_files(&self, directory: impl AsRef<Path>) -> Result<(), PolicyIoError>;
 }
 ```
 
@@ -144,17 +133,6 @@ Existing APIs:
 New APIs:
 
 ```rust
-impl ZanzibarService {
-    pub fn replace_dsl(&mut self, dsl: &str) -> Result<(), ZanzibarError>;
-    pub fn replace_dsl_with_token(&mut self, dsl: &str) -> Result<ConsistencyToken, ZanzibarError>;
-    pub fn delete_namespace(&mut self, namespace: &str) -> Result<ConsistencyToken, ZanzibarError>;
-    pub fn delete_relation(
-        &mut self,
-        namespace: &str,
-        relation: &str,
-    ) -> Result<ConsistencyToken, ZanzibarError>;
-}
-
 impl ZanzibarEngine {
     pub fn replace_schema(&self, source: SchemaSource<'_>) -> Result<ConsistencyToken, EngineError>;
     pub fn delete_namespace(&self, namespace: &str) -> Result<ConsistencyToken, EngineError>;
@@ -256,7 +234,7 @@ and startup tradeoff visibility.
 
 ## 7. Testing Requirements
 
-- zstd snapshot save/load equivalence through `ZanzibarService` and `ZanzibarEngine`.
+- zstd snapshot save/load equivalence through `ZanzibarEngine`.
 - zstd decompression size cap rejects oversized decompressed output.
 - `PolicyText` export/import round trip preserves check, expand, lookup, and permission enumeration.
 - `export_policy_files` creates deterministic `schema.zed` plus grouped sorted relationship files.

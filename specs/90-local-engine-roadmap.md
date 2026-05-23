@@ -156,6 +156,30 @@ Exit criteria:
 - public API benchmarks record check, lookup, permission enumeration, policy export, and zstd snapshot costs
 - full build, test, fmt, clippy, audit, and deny gates pass
 
+### M10 - Concurrent Runtime and Tenant Shards
+
+User-visible outcome: applications use `ZanzibarEngine` as the only public runtime. Read APIs no
+longer take a service-level lock, writes flow through a single writer actor optimized for caller
+batches, and multi-tenant applications can shard state across independent tenant engines.
+
+Specs touched: [13](./13-revision-consistency-design.md), [15](./15-public-api-design.md),
+[20](./20-concurrent-engine-runtime-design.md), [71](./71-performance-budgets-design.md),
+[72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- the legacy mutable facade is removed from the public API, examples, tests, and benchmarks
+- latest check/expand/lookup/export/snapshot-save paths clone immutable `EngineState` through
+  `ArcSwapOption` and do not acquire a read lock
+- relationship, schema, and policy writes are serialized by a bounded single writer actor
+- failed writes publish no snapshot and preserve exact-token semantics
+- tenant shard manager routes existing tenant lookups without locking and isolates revisions/tokens
+  per tenant
+- concurrent runtime benchmarks cover read-heavy/light-write, read-heavy/medium-write
+  unbatched/batched, read-heavy/heavy-write unbatched/batched, and tenant-sharded write load
+- benchmark results are posted to the PR comment
+- full build, test, fmt, strict clippy, docs, audit, and deny gates pass
+
 ## 3. Calendar Shape
 
 One experienced Rust developer:
@@ -170,6 +194,7 @@ One experienced Rust developer:
 - M7: 2 to 3 weeks
 - M8: 1 week
 - M9: 1 week
+- M10: 1.5 to 2 weeks
 
 Total through M5: 8.5 to 11 weeks, assuming no persistent backend and no caveats.
 
@@ -180,6 +205,8 @@ Total through M7: 12.5 to 17 weeks.
 Total through M8: 13.5 to 18 weeks.
 
 Total through M9: 14.5 to 19 weeks.
+
+Total through M10: 16 to 21 weeks.
 
 ## 4. Cross-References
 

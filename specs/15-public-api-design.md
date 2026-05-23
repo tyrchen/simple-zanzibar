@@ -6,7 +6,9 @@ Depends on: [14-evaluation-engine-design.md](./14-evaluation-engine-design.md)
 
 ## 1. Purpose
 
-This spec defines the crate-facing API and migration shape. The new engine is strict and typed, while the existing `ZanzibarService` facade remains as a compatibility layer until the v2 API is proven by tests and examples.
+This spec defines the crate-facing API and migration shape. The new engine is strict and typed.
+[20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md) supersedes the
+early compatibility plan and removes the legacy mutable facade from the public API before stabilization.
 
 ## 2. Public Surface
 
@@ -39,20 +41,10 @@ Request builders are provided for multi-field requests. Per AGENTS.md, `typed-bu
 
 ## 3. Compatibility Facade
 
-`ZanzibarService` stays available for M0:
-
-```rust
-impl ZanzibarService {
-    pub fn new() -> Self;
-    pub fn add_dsl(&mut self, dsl: &str) -> Result<(), ZanzibarError>;
-    pub fn write_tuple(&mut self, tuple: RelationTuple) -> Result<(), ZanzibarError>;
-    pub fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), ZanzibarError>;
-    pub fn check(...) -> Result<bool, ZanzibarError>;
-    pub fn expand(...) -> Result<ExpandedUserset, ZanzibarError>;
-}
-```
-
-Internally it delegates to `ZanzibarEngine`. Legacy model structs are converted into v2 domain types at the boundary. When legacy values are invalid under v2 validation, the facade returns a migration error with the invalid field name.
+The early M0 compatibility facade is retired by
+[20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md). Public examples,
+tests, and benchmarks use `ZanzibarEngine` directly. Legacy model structs that remain public for
+request DTOs are converted into validated domain types at the engine boundary.
 
 ## 4. Error Model
 
@@ -88,7 +80,7 @@ Every public API gets a doc-tested example:
 - Type Design & API: explicit return types, builders for request structs with more than five fields.
 - Safety & Security: string-based convenience constructors validate before engine access.
 - Serialization: optional serde feature for request/response DTOs, camelCase, deny unknown fields.
-- Testing: examples are doctests; compatibility facade has integration tests.
+- Testing: examples are doctests; public behavior tests target `ZanzibarEngine` directly.
 - Logging & Observability: public API starts tracing spans when `tracing` feature is enabled.
 - Performance: string convenience APIs are not used inside hot evaluator loops.
 - Documentation: public API docs are complete before release.
@@ -98,3 +90,4 @@ Every public API gets a doc-tested example:
 - <- Depends on: [14-evaluation-engine-design.md](./14-evaluation-engine-design.md)
 - -> Consumed by: [60-crates-features-design.md](./60-crates-features-design.md), [72-testing-verification-plan.md](./72-testing-verification-plan.md)
 - Related research: [../docs/research/study-spicedb.md § Request Paths](../docs/research/study-spicedb.md#request-paths)
+- Superseded runtime details: [20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md)

@@ -4,7 +4,7 @@ use std::{collections::HashMap, hint::black_box, num::NonZeroU32, time::Duration
 
 use criterion::{BatchSize, Criterion};
 use simple_zanzibar::{
-    ZanzibarService,
+    ZanzibarEngine,
     eval::EvaluationLimits,
     model::{
         LookupResourcesRequest, NamespaceConfig, Object, Relation, RelationConfig, RelationTuple,
@@ -81,8 +81,12 @@ fn write_or_abort(store: &mut impl TupleStore, tuple: RelationTuple) {
     }
 }
 
-fn service_with_relationships(count: usize) -> ZanzibarService {
-    let mut service = ZanzibarService::new();
+fn service_with_relationships(count: usize) -> ZanzibarEngine {
+    let service = ZanzibarEngine::builder().build();
+    if let Err(error) = service.apply_namespace_config(owner_namespace()) {
+        eprintln!("failed to build service benchmark schema: {error}");
+        std::process::abort();
+    }
 
     for index in 0..count {
         if let Err(error) = service.write_tuple(owner_tuple(index)) {
@@ -91,16 +95,15 @@ fn service_with_relationships(count: usize) -> ZanzibarService {
         }
     }
 
-    if let Err(error) = service.add_config(owner_namespace()) {
-        eprintln!("failed to build service benchmark schema: {error}");
-        std::process::abort();
-    }
-
     service
 }
 
-fn service_with_one_hop_relationships(count: usize) -> ZanzibarService {
-    let mut service = ZanzibarService::new();
+fn service_with_one_hop_relationships(count: usize) -> ZanzibarEngine {
+    let service = ZanzibarEngine::builder().build();
+    if let Err(error) = service.add_dsl(graph_schema()) {
+        eprintln!("failed to build one-hop benchmark schema: {error}");
+        std::process::abort();
+    }
     let pairs = count / 2;
     for index in 0..pairs {
         if let Err(error) = service.write_tuple(RelationTuple {
@@ -129,15 +132,15 @@ fn service_with_one_hop_relationships(count: usize) -> ZanzibarService {
             std::process::abort();
         }
     }
-    if let Err(error) = service.add_dsl(graph_schema()) {
-        eprintln!("failed to build one-hop benchmark schema: {error}");
-        std::process::abort();
-    }
     service
 }
 
-fn service_with_tuple_to_userset_relationships(count: usize) -> ZanzibarService {
-    let mut service = ZanzibarService::new();
+fn service_with_tuple_to_userset_relationships(count: usize) -> ZanzibarEngine {
+    let service = ZanzibarEngine::builder().build();
+    if let Err(error) = service.add_dsl(graph_schema()) {
+        eprintln!("failed to build tuple-to-userset benchmark schema: {error}");
+        std::process::abort();
+    }
     let pairs = count / 2;
     for index in 0..pairs {
         if let Err(error) = service.write_tuple(RelationTuple {
@@ -166,19 +169,21 @@ fn service_with_tuple_to_userset_relationships(count: usize) -> ZanzibarService 
             std::process::abort();
         }
     }
-    if let Err(error) = service.add_dsl(graph_schema()) {
-        eprintln!("failed to build tuple-to-userset benchmark schema: {error}");
-        std::process::abort();
-    }
     service
 }
 
-fn service_with_lookup_relationships(count: usize) -> ZanzibarService {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: non_zero_u32(50),
-        max_fanout_per_step: non_zero_u32(1_000),
-        max_lookup_results: non_zero_u32(u32::try_from(count).unwrap_or(u32::MAX)),
-    });
+fn service_with_lookup_relationships(count: usize) -> ZanzibarEngine {
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: non_zero_u32(50),
+            max_fanout_per_step: non_zero_u32(1_000),
+            max_lookup_results: non_zero_u32(u32::try_from(count).unwrap_or(u32::MAX)),
+        })
+        .build();
+    if let Err(error) = service.add_dsl(graph_schema()) {
+        eprintln!("failed to build lookup benchmark schema: {error}");
+        std::process::abort();
+    }
     let viewer = Relation("viewer".to_string());
     let user = User::UserId("lookup-user".to_string());
     for index in 0..count {
@@ -190,10 +195,6 @@ fn service_with_lookup_relationships(count: usize) -> ZanzibarService {
             eprintln!("failed to build lookup benchmark dataset: {error}");
             std::process::abort();
         }
-    }
-    if let Err(error) = service.add_dsl(graph_schema()) {
-        eprintln!("failed to build lookup benchmark schema: {error}");
-        std::process::abort();
     }
     service
 }
@@ -214,7 +215,11 @@ fn bench_indexed_direct_check(c: &mut Criterion) {
 
     c.bench_function("indexed_direct_check_100k", |b| {
         b.iter(|| {
-            black_box(service.check(black_box(&object), black_box(&relation), black_box(&user)))
+            black_box(service.check_relation(
+                black_box(&object),
+                black_box(&relation),
+                black_box(&user),
+            ))
         });
     });
 }
@@ -249,7 +254,11 @@ fn bench_one_hop_userset_check(c: &mut Criterion) {
 
     c.bench_function("one_hop_userset_check_100k", |b| {
         b.iter(|| {
-            black_box(service.check(black_box(&object), black_box(&relation), black_box(&user)))
+            black_box(service.check_relation(
+                black_box(&object),
+                black_box(&relation),
+                black_box(&user),
+            ))
         });
     });
 }
@@ -263,7 +272,11 @@ fn bench_tuple_to_userset_check(c: &mut Criterion) {
 
     c.bench_function("tuple_to_userset_check_100k", |b| {
         b.iter(|| {
-            black_box(service.check(black_box(&object), black_box(&relation), black_box(&user)))
+            black_box(service.check_relation(
+                black_box(&object),
+                black_box(&relation),
+                black_box(&user),
+            ))
         });
     });
 }

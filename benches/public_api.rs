@@ -12,7 +12,6 @@ use std::{
 use criterion::{BatchSize, Criterion};
 use simple_zanzibar::{
     PolicyText, SnapshotCompression, SnapshotLoadOptions, SnapshotSaveOptions, ZanzibarEngine,
-    ZanzibarService,
     domain::Relationship,
     eval::EvaluationLimits,
     model::{
@@ -291,7 +290,7 @@ fn bench_write_apis(criterion: &mut Criterion, filters: &[String], policy: &Poli
     }
 }
 
-fn bench_policy_apis(criterion: &mut Criterion, filters: &[String], service: &ZanzibarService) {
+fn bench_policy_apis(criterion: &mut Criterion, filters: &[String], service: &ZanzibarEngine) {
     let export_name = "public_api/export_policy_text/100k";
     if should_benchmark(export_name, filters) {
         criterion.bench_function(export_name, |bencher| {
@@ -324,7 +323,7 @@ fn bench_policy_apis(criterion: &mut Criterion, filters: &[String], service: &Za
     }
 }
 
-fn bench_snapshot_apis(criterion: &mut Criterion, filters: &[String], service: &ZanzibarService) {
+fn bench_snapshot_apis(criterion: &mut Criterion, filters: &[String], service: &ZanzibarEngine) {
     let save_raw_name = "public_api/snapshot_save_uncompressed/100k";
     if should_benchmark(save_raw_name, filters) {
         criterion.bench_function(save_raw_name, |bencher| {
@@ -392,11 +391,13 @@ fn bench_snapshot_apis(criterion: &mut Criterion, filters: &[String], service: &
     }
 }
 
-fn build_service_with_relationships(rules: usize) -> ZanzibarService {
-    let mut service = ZanzibarService::new().with_evaluation_limits(evaluation_limits());
+fn build_service_with_relationships(rules: usize) -> ZanzibarEngine {
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(evaluation_limits())
+        .build();
     must(service.add_dsl(org_schema()), "failed to apply org schema");
     let relationships = generated_relationships(rules);
-    apply_relationships(&mut service, &relationships);
+    apply_relationships(&service, &relationships);
     service
 }
 
@@ -408,7 +409,7 @@ fn evaluation_limits() -> EvaluationLimits {
     }
 }
 
-fn apply_relationships(service: &mut ZanzibarService, relationships: &[Relationship]) {
+fn apply_relationships(service: &ZanzibarEngine, relationships: &[Relationship]) {
     let mut batch = Vec::with_capacity(MUTATION_BATCH_LIMIT);
     for relationship in relationships {
         batch.push(RelationshipMutation::Touch(relationship.clone()));
@@ -419,13 +420,13 @@ fn apply_relationships(service: &mut ZanzibarService, relationships: &[Relations
     flush_relationships(service, &mut batch);
 }
 
-fn flush_relationships(service: &mut ZanzibarService, batch: &mut Vec<RelationshipMutation>) {
+fn flush_relationships(service: &ZanzibarEngine, batch: &mut Vec<RelationshipMutation>) {
     if batch.is_empty() {
         return;
     }
     let mutations = std::mem::take(batch);
     must(
-        service.apply_relationship_mutations(mutations, []),
+        service.write_relationships_with_preconditions(mutations, []),
         "failed to apply relationship batch",
     );
 }
@@ -581,7 +582,7 @@ fn zstd_load_options() -> SnapshotLoadOptions {
 }
 
 fn prepared_snapshot(
-    service: &ZanzibarService,
+    service: &ZanzibarEngine,
     options: SnapshotSaveOptions,
     label: &str,
 ) -> PathBuf {

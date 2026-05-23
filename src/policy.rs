@@ -185,10 +185,11 @@ pub(crate) fn write_policy_files(
 }
 
 pub(crate) fn apply_policy_text_to_service(
-    service: &mut crate::ZanzibarService,
+    service: &mut crate::WriterState,
     policy: &PolicyText,
 ) -> Result<crate::revision::ConsistencyToken, ZanzibarError> {
-    let mut candidate = crate::ZanzibarService::with_snapshot_retention(service.retained_snapshots)
+    let published_state = service.published_state.clone();
+    let mut candidate = crate::WriterState::with_snapshot_retention(service.retained_snapshots)
         .with_evaluation_limits(service.evaluation_limits);
     candidate.datastore_id = service.datastore_id;
     candidate.last_revision = service.last_revision;
@@ -205,6 +206,7 @@ pub(crate) fn apply_policy_text_to_service(
     if !mutations.is_empty() {
         token = candidate.apply_relationship_mutations(mutations, [])?;
     }
+    candidate.replace_publisher(published_state);
     *service = candidate;
     Ok(token)
 }
@@ -214,7 +216,7 @@ pub(crate) fn save_snapshot_from_policy_text(
     policy: &PolicyText,
     options: SnapshotSaveOptions,
 ) -> Result<(), PolicyIoError> {
-    let service = crate::ZanzibarService::from_policy_text(policy)?;
+    let service = crate::WriterState::from_policy_text(policy)?;
     service.save_snapshot(path, options)?;
     Ok(())
 }

@@ -44,7 +44,7 @@ The existing `model.rs`, `store.rs`, `eval.rs`, and `parser.rs` are retired once
 | `std` | yes | Standard library support. Required for v2. |
 | `serde` | no | Serialize request/response/domain types. |
 | `tracing` | no | Emit structured spans. |
-| `compat` | yes during v2 migration | Keep legacy `ZanzibarService` facade. |
+| `compat` | removed before API stabilization | Legacy legacy mutable facade was retired by [20](./20-concurrent-engine-runtime-design.md). |
 | `bench-internals` | no | Expose benchmark-only constructors and counters. |
 
 No network or runtime feature is part of v2.

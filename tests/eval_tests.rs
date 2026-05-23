@@ -3,7 +3,7 @@
 use std::{collections::HashMap, num::NonZeroU32};
 
 use simple_zanzibar::{
-    ZanzibarService,
+    EngineError, ZanzibarEngine,
     error::ZanzibarError,
     eval::{EvaluationError, EvaluationLimits, Membership},
     model::{
@@ -12,9 +12,9 @@ use simple_zanzibar::{
     },
 };
 
-/// Creates a `ZanzibarService` pre-populated with a common test configuration.
-fn create_test_service() -> Result<ZanzibarService, ZanzibarError> {
-    let mut service = ZanzibarService::new();
+/// Creates a `ZanzibarEngine` pre-populated with a common test configuration.
+fn create_test_service() -> Result<ZanzibarEngine, ZanzibarError> {
+    let service = ZanzibarEngine::builder().build();
 
     let doc_namespace = NamespaceConfig {
         name: "doc".to_string(),
@@ -54,7 +54,7 @@ fn create_test_service() -> Result<ZanzibarService, ZanzibarError> {
             ),
         ]),
     };
-    service.add_config(doc_namespace)?;
+    service.apply_namespace_config(doc_namespace)?;
 
     let folder_namespace = NamespaceConfig {
         name: "folder".to_string(),
@@ -77,14 +77,14 @@ fn create_test_service() -> Result<ZanzibarService, ZanzibarError> {
             ),
         ]),
     };
-    service.add_config(folder_namespace)?;
+    service.apply_namespace_config(folder_namespace)?;
 
     Ok(service)
 }
 
 #[test]
 fn test_check_direct_access() -> Result<(), ZanzibarError> {
-    let mut service = create_test_service()?;
+    let service = create_test_service()?;
     let doc1 = Object {
         namespace: "doc".to_string(),
         id: "1".to_string(),
@@ -98,13 +98,13 @@ fn test_check_direct_access() -> Result<(), ZanzibarError> {
         user: alice.clone(),
     })?;
 
-    assert!(service.check(&doc1, &owner_rel, &alice)?);
+    assert!(service.check_relation(&doc1, &owner_rel, &alice)?);
     Ok(())
 }
 
 #[test]
 fn test_check_computed_userset() -> Result<(), ZanzibarError> {
-    let mut service = create_test_service()?;
+    let service = create_test_service()?;
     let doc1 = Object {
         namespace: "doc".to_string(),
         id: "1".to_string(),
@@ -120,13 +120,13 @@ fn test_check_computed_userset() -> Result<(), ZanzibarError> {
     })?;
 
     // Alice is an owner, so she should also be a viewer via ComputedUserset.
-    assert!(service.check(&doc1, &viewer_rel, &alice)?);
+    assert!(service.check_relation(&doc1, &viewer_rel, &alice)?);
     Ok(())
 }
 
 #[test]
 fn test_check_hierarchical_access() -> Result<(), ZanzibarError> {
-    let mut service = create_test_service()?;
+    let service = create_test_service()?;
 
     let folder_a = Object {
         namespace: "folder".to_string(),
@@ -155,13 +155,13 @@ fn test_check_hierarchical_access() -> Result<(), ZanzibarError> {
     })?;
 
     // Assert that Bob can view Doc 1 due to inheritance.
-    assert!(service.check(&doc1, &viewer_rel, &bob)?);
+    assert!(service.check_relation(&doc1, &viewer_rel, &bob)?);
     Ok(())
 }
 
 #[test]
 fn test_check_cross_namespace_userset_uses_target_namespace_rewrite() -> Result<(), ZanzibarError> {
-    let mut service = create_test_service()?;
+    let service = create_test_service()?;
 
     let folder_a = Object {
         namespace: "folder".to_string(),
@@ -186,19 +186,19 @@ fn test_check_cross_namespace_userset_uses_target_namespace_rewrite() -> Result<
         user: User::Userset(folder_a, viewer_rel.clone()),
     })?;
 
-    assert!(service.check(&doc1, &viewer_rel, &bob)?);
+    assert!(service.check_relation(&doc1, &viewer_rel, &bob)?);
     Ok(())
 }
 
 #[test]
 fn test_should_evaluate_intersection_and_exclusion() -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     let owner = Relation("owner".to_string());
     let editor = Relation("editor".to_string());
     let banned = Relation("banned".to_string());
     let owner_editor = Relation("owner_editor".to_string());
     let allowed_owner = Relation("allowed_owner".to_string());
-    service.add_config(NamespaceConfig {
+    service.apply_namespace_config(NamespaceConfig {
         name: "doc".to_string(),
         relations: HashMap::from([
             plain_relation(owner.clone()),
@@ -246,23 +246,25 @@ fn test_should_evaluate_intersection_and_exclusion() -> Result<(), ZanzibarError
     service.write_tuple(tuple(doc.clone(), owner, bob.clone()))?;
     service.write_tuple(tuple(doc.clone(), banned, bob.clone()))?;
 
-    assert!(service.check(&doc, &owner_editor, &alice)?);
-    assert!(!service.check(&doc, &owner_editor, &bob)?);
-    assert!(service.check(&doc, &allowed_owner, &alice)?);
-    assert!(!service.check(&doc, &allowed_owner, &bob)?);
+    assert!(service.check_relation(&doc, &owner_editor, &alice)?);
+    assert!(!service.check_relation(&doc, &owner_editor, &bob)?);
+    assert!(service.check_relation(&doc, &allowed_owner, &alice)?);
+    assert!(!service.check_relation(&doc, &allowed_owner, &bob)?);
     Ok(())
 }
 
 #[test]
 fn test_should_return_depth_exceeded_distinct_from_denied() -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: NonZeroU32::MIN,
-        max_fanout_per_step: non_zero(100),
-        max_lookup_results: non_zero(100),
-    });
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: NonZeroU32::MIN,
+            max_fanout_per_step: non_zero(100),
+            max_lookup_results: non_zero(100),
+        })
+        .build();
     let parent = Relation("parent".to_string());
     let viewer = Relation("viewer".to_string());
-    service.add_config(NamespaceConfig {
+    service.apply_namespace_config(NamespaceConfig {
         name: "doc".to_string(),
         relations: HashMap::from([
             plain_relation(parent.clone()),
@@ -282,11 +284,11 @@ fn test_should_return_depth_exceeded_distinct_from_denied() -> Result<(), Zanzib
         id: "1".to_string(),
     };
 
-    let result = service.check(&doc, &viewer, &User::UserId("alice".to_string()));
+    let result = service.check_relation(&doc, &viewer, &User::UserId("alice".to_string()));
 
     assert!(matches!(
         result,
-        Err(ZanzibarError::Evaluation(
+        Err(EngineError::Evaluation(
             EvaluationError::DepthExceeded { .. }
         ))
     ));
@@ -295,18 +297,20 @@ fn test_should_return_depth_exceeded_distinct_from_denied() -> Result<(), Zanzib
 
 #[test]
 fn test_should_return_fanout_exceeded() -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: non_zero(50),
-        max_fanout_per_step: NonZeroU32::MIN,
-        max_lookup_results: non_zero(100),
-    });
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: non_zero(50),
+            max_fanout_per_step: NonZeroU32::MIN,
+            max_lookup_results: non_zero(100),
+        })
+        .build();
     let viewer = Relation("viewer".to_string());
     let member = Relation("member".to_string());
-    service.add_config(NamespaceConfig {
+    service.apply_namespace_config(NamespaceConfig {
         name: "doc".to_string(),
         relations: HashMap::from([plain_relation(viewer.clone())]),
     })?;
-    service.add_config(NamespaceConfig {
+    service.apply_namespace_config(NamespaceConfig {
         name: "group".to_string(),
         relations: HashMap::from([plain_relation(member.clone())]),
     })?;
@@ -328,11 +332,11 @@ fn test_should_return_fanout_exceeded() -> Result<(), ZanzibarError> {
         ))?;
     }
 
-    let result = service.check(&doc, &viewer, &User::UserId("alice".to_string()));
+    let result = service.check_relation(&doc, &viewer, &User::UserId("alice".to_string()));
 
     assert!(matches!(
         result,
-        Err(ZanzibarError::Evaluation(
+        Err(EngineError::Evaluation(
             EvaluationError::FanoutExceeded { .. }
         ))
     ));
@@ -342,17 +346,30 @@ fn test_should_return_fanout_exceeded() -> Result<(), ZanzibarError> {
 #[test]
 fn test_should_return_fanout_exceeded_after_limit_plus_one_relationships()
 -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: non_zero(50),
-        max_fanout_per_step: non_zero(1_000),
-        max_lookup_results: non_zero(100),
-    });
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: non_zero(50),
+            max_fanout_per_step: non_zero(1_000),
+            max_lookup_results: non_zero(100),
+        })
+        .build();
     let viewer = Relation("viewer".to_string());
     let member = Relation("member".to_string());
     let doc = Object {
         namespace: "doc".to_string(),
         id: "1".to_string(),
     };
+    service.add_dsl(
+        r"
+        namespace doc {
+            relation viewer {}
+        }
+
+        namespace group {
+            relation member {}
+        }
+        ",
+    )?;
     for index in 0..1_001 {
         service.write_tuple(tuple(
             doc.clone(),
@@ -366,23 +383,12 @@ fn test_should_return_fanout_exceeded_after_limit_plus_one_relationships()
             ),
         ))?;
     }
-    service.add_dsl(
-        r"
-        namespace doc {
-            relation viewer {}
-        }
 
-        namespace group {
-            relation member {}
-        }
-        ",
-    )?;
-
-    let result = service.check(&doc, &viewer, &User::UserId("alice".to_string()));
+    let result = service.check_relation(&doc, &viewer, &User::UserId("alice".to_string()));
 
     assert!(matches!(
         result,
-        Err(ZanzibarError::Evaluation(
+        Err(EngineError::Evaluation(
             EvaluationError::FanoutExceeded { .. }
         ))
     ));
@@ -391,11 +397,13 @@ fn test_should_return_fanout_exceeded_after_limit_plus_one_relationships()
 
 #[test]
 fn test_should_not_spend_indirect_fanout_on_direct_grants() -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: non_zero(50),
-        max_fanout_per_step: NonZeroU32::MIN,
-        max_lookup_results: non_zero(100),
-    });
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: non_zero(50),
+            max_fanout_per_step: NonZeroU32::MIN,
+            max_lookup_results: non_zero(100),
+        })
+        .build();
     let viewer = Relation("viewer".to_string());
     let member = Relation("member".to_string());
     let doc = Object {
@@ -431,15 +439,15 @@ fn test_should_not_spend_indirect_fanout_on_direct_grants() -> Result<(), Zanzib
     ))?;
     service.write_tuple(tuple(group, member, User::UserId("alice".to_string())))?;
 
-    assert!(service.check(&doc, &viewer, &User::UserId("alice".to_string()))?);
+    assert!(service.check_relation(&doc, &viewer, &User::UserId("alice".to_string()))?);
     Ok(())
 }
 
 #[test]
 fn test_should_deny_recursion_cycle_without_depth_error() -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     let viewer = Relation("viewer".to_string());
-    service.add_config(NamespaceConfig {
+    service.apply_namespace_config(NamespaceConfig {
         name: "doc".to_string(),
         relations: HashMap::from([(
             viewer.clone(),
@@ -456,20 +464,22 @@ fn test_should_deny_recursion_cycle_without_depth_error() -> Result<(), Zanzibar
         id: "1".to_string(),
     };
 
-    assert!(!service.check(&doc, &viewer, &User::UserId("alice".to_string()))?);
+    assert!(!service.check_relation(&doc, &viewer, &User::UserId("alice".to_string()))?);
     Ok(())
 }
 
 #[test]
 fn test_should_bound_expand_recursion_depth() -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: NonZeroU32::MIN,
-        max_fanout_per_step: non_zero(100),
-        max_lookup_results: non_zero(100),
-    });
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: NonZeroU32::MIN,
+            max_fanout_per_step: non_zero(100),
+            max_lookup_results: non_zero(100),
+        })
+        .build();
     let parent = Relation("parent".to_string());
     let viewer = Relation("viewer".to_string());
-    service.add_config(NamespaceConfig {
+    service.apply_namespace_config(NamespaceConfig {
         name: "doc".to_string(),
         relations: HashMap::from([
             plain_relation(parent.clone()),
@@ -483,7 +493,7 @@ fn test_should_bound_expand_recursion_depth() -> Result<(), ZanzibarError> {
         ]),
     })?;
 
-    let result = service.expand(
+    let result = service.expand_relation(
         &Object {
             namespace: "doc".to_string(),
             id: "1".to_string(),
@@ -493,7 +503,7 @@ fn test_should_bound_expand_recursion_depth() -> Result<(), ZanzibarError> {
 
     assert!(matches!(
         result,
-        Err(ZanzibarError::Evaluation(
+        Err(EngineError::Evaluation(
             EvaluationError::DepthExceeded { .. }
         ))
     ));
@@ -502,13 +512,15 @@ fn test_should_bound_expand_recursion_depth() -> Result<(), ZanzibarError> {
 
 #[test]
 fn test_should_bound_expand_cycle_without_depth_error() -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: NonZeroU32::MIN,
-        max_fanout_per_step: non_zero(100),
-        max_lookup_results: non_zero(100),
-    });
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: NonZeroU32::MIN,
+            max_fanout_per_step: non_zero(100),
+            max_lookup_results: non_zero(100),
+        })
+        .build();
     let viewer = Relation("viewer".to_string());
-    service.add_config(NamespaceConfig {
+    service.apply_namespace_config(NamespaceConfig {
         name: "doc".to_string(),
         relations: HashMap::from([(
             viewer.clone(),
@@ -521,7 +533,7 @@ fn test_should_bound_expand_cycle_without_depth_error() -> Result<(), ZanzibarEr
         )]),
     })?;
 
-    let expanded = service.expand(
+    let expanded = service.expand_relation(
         &Object {
             namespace: "doc".to_string(),
             id: "1".to_string(),
@@ -535,7 +547,7 @@ fn test_should_bound_expand_cycle_without_depth_error() -> Result<(), ZanzibarEr
 
 #[test]
 fn test_should_expand_from_snapshot_path() -> Result<(), ZanzibarError> {
-    let mut service = create_test_service()?;
+    let service = create_test_service()?;
     let doc = Object {
         namespace: "doc".to_string(),
         id: "1".to_string(),
@@ -547,7 +559,7 @@ fn test_should_expand_from_snapshot_path() -> Result<(), ZanzibarError> {
         User::UserId("alice".to_string()),
     ))?;
 
-    let expanded = service.expand(&doc, &owner)?;
+    let expanded = service.expand_relation(&doc, &owner)?;
 
     assert_eq!(
         expanded,
@@ -559,11 +571,13 @@ fn test_should_expand_from_snapshot_path() -> Result<(), ZanzibarError> {
 #[test]
 fn test_should_not_spend_expand_tuple_to_userset_fanout_on_direct_grants()
 -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: non_zero(50),
-        max_fanout_per_step: NonZeroU32::MIN,
-        max_lookup_results: non_zero(100),
-    });
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: non_zero(50),
+            max_fanout_per_step: NonZeroU32::MIN,
+            max_lookup_results: non_zero(100),
+        })
+        .build();
     let parent = Relation("parent".to_string());
     let viewer = Relation("viewer".to_string());
     let inherited_viewer = Relation("inherited_viewer".to_string());
@@ -604,7 +618,7 @@ fn test_should_not_spend_expand_tuple_to_userset_fanout_on_direct_grants()
     ))?;
     service.write_tuple(tuple(folder, viewer, User::UserId("alice".to_string())))?;
 
-    let expanded = service.expand(&doc, &inherited_viewer)?;
+    let expanded = service.expand_relation(&doc, &inherited_viewer)?;
 
     assert_eq!(
         expanded,

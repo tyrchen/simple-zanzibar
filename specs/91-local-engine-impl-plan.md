@@ -53,7 +53,7 @@ Closes M0 foundation.
 | 1.2 | Add schema IR and resolver. | [11](./11-schema-system-design.md) | 1 day |
 | 1.3 | Compile legacy DSL into schema IR. | [11](./11-schema-system-design.md), [15](./15-public-api-design.md) | 1 day |
 | 1.4 | Add schema validator for duplicates and relation references. | [11](./11-schema-system-design.md) | 1.5 days |
-| 1.5 | Wire `ZanzibarService` facade through v2 schema where possible. | [15](./15-public-api-design.md) | 1 day |
+| 1.5 | Wire legacy mutable facade through v2 schema where possible. | [15](./15-public-api-design.md) | 1 day |
 | 1.6 | Add schema/domain tests and doctests. | [72](./72-testing-verification-plan.md) | 1 day |
 
 Exit criteria: M0 roadmap criteria pass.
@@ -230,7 +230,31 @@ Exit criteria:
 - Public API benchmark results are posted to the PR comment.
 - `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`, `cargo +nightly fmt --check`, strict clippy including boundary lints, `cargo audit`, and `cargo deny check` pass.
 
-## 13. Cross-References
+## 13. Phase 11 - Concurrent Runtime and Tenant Shards
+
+Closes M10.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 11.1 | Remove public legacy mutable facade and port examples/tests/benches to `ZanzibarEngine`. | [20](./20-concurrent-engine-runtime-design.md), [15](./15-public-api-design.md) | 1 day |
+| 11.2 | Add immutable `EngineState` and move read APIs to `ArcSwapOption<EngineState>`. | [20](./20-concurrent-engine-runtime-design.md), [13](./13-revision-consistency-design.md) | 1 day |
+| 11.3 | Add bounded single writer actor owning mutable writer state and publishing snapshots. | [20](./20-concurrent-engine-runtime-design.md) | 1.5 days |
+| 11.4 | Add actor lifecycle, writer failure, failed-write atomicity, and concurrent read/write tests. | [20](./20-concurrent-engine-runtime-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+| 11.5 | Add `TenantId` and `ZanzibarTenantShards` with lock-free existing-tenant reads. | [20](./20-concurrent-engine-runtime-design.md) | 1 day |
+| 11.6 | Add concurrent runtime Criterion benchmarks for read/write mix, batching, and tenant sharding. | [20](./20-concurrent-engine-runtime-design.md), [71](./71-performance-budgets-design.md) | 1 day |
+| 11.7 | Run full correctness gates and post benchmark evidence to the PR. | [72](./72-testing-verification-plan.md) | 1 day |
+
+Exit criteria:
+
+- M10 roadmap criteria pass.
+- Existing public snapshot, policy, schema, check, expand, lookup, and permission enumeration
+  behavior remains equivalent through `ZanzibarEngine`.
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`,
+  `cargo +nightly fmt --check`, strict clippy including boundary lints,
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo audit`, and
+  `cargo deny check` pass.
+
+## 14. Cross-References
 
 - Stakeholder roadmap: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md)
 - Key decisions: [99-key-decisions.md](./99-key-decisions.md)
@@ -238,3 +262,4 @@ Exit criteria:
 - Compact store design: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
 - Compact snapshot format: [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md)
 - Public API completeness: [19-public-api-completeness-design.md](./19-public-api-completeness-design.md)
+- Concurrent engine runtime: [20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md)

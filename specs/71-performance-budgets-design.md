@@ -208,6 +208,21 @@ Focused 1M regression checks after the public API additions:
 | `snapshot_loaded_check_direct/1m` | 1M org rules | `[2.9807 us, 2.9895 us, 3.0075 us]` | passes <= 10 us; change within noise |
 | `snapshot_trusted_loaded_check_direct/1m` | 1M org rules | `[3.0595 us, 3.0873 us, 3.1159 us]` | passes <= 10 us; no detected regression |
 
+## 3.6 Concurrent Runtime Benchmarks
+
+[20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md) adds a mixed
+read/write benchmark suite. The first implementation records evidence rather than enforcing hard
+gates because write throughput depends heavily on caller batching and tenant partitioning.
+
+| Operation | Dataset | Target |
+| --- | --- | ---: |
+| `concurrent_runtime/read_heavy_light_write` | 100k base + small batches | record read ops/s and write p95 |
+| `concurrent_runtime/read_heavy_medium_write_unbatched` | 100k base + single writes | record read ops/s and write p95 |
+| `concurrent_runtime/read_heavy_medium_write_batched` | same logical writes batched by 100 | record read ops/s and write p95 |
+| `concurrent_runtime/read_heavy_heavy_write_unbatched` | 100k base + sustained single writes | record read ops/s and write p95 |
+| `concurrent_runtime/read_heavy_heavy_write_batched` | same logical writes batched by 100 or 1k | record read ops/s and write p95 |
+| `concurrent_runtime/tenant_sharded_heavy_write` | same logical write volume split across tenants | record aggregate write ops/s |
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.
@@ -220,6 +235,8 @@ Focused 1M regression checks after the public API additions:
 - No compatibility tuple-store mirror after schema publication.
 - No `BTreeSet` posting lists in the compact store.
 - No hot-path materialization of owned `Relationship` values during `check`.
+- No service-level `RwLock` on public read APIs after [20](./20-concurrent-engine-runtime-design.md).
+- Write throughput guidance must distinguish unbatched, batched, and tenant-sharded cases.
 
 ## 5. Profiling Rules
 

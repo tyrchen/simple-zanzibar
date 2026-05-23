@@ -55,7 +55,7 @@ graph TB
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Service as ZanzibarService
+    participant Service as ZanzibarEngine
     participant Parser as DSL Parser
     participant Store as Tuple Store
     participant Eval as Evaluation Engine
@@ -142,10 +142,10 @@ simple-zanzibar = "0.1.0"
 ### Basic Usage
 
 ```rust
-use simple_zanzibar::{ZanzibarService, model::{Object, Relation, RelationTuple, User}};
+use simple_zanzibar::{ZanzibarEngine, model::{Object, Relation, RelationTuple, User}};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
 
     // Define policy using DSL
     let policy = r#"
@@ -171,7 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Check permission
-    let can_view = service.check(
+    let can_view = service.check_relation(
         &doc,
         &Relation("viewer".to_string()),
         &alice
@@ -312,32 +312,32 @@ namespace folder {
 
 ## 🔧 API Reference
 
-### ZanzibarService
+### ZanzibarEngine
 
 The main service for handling authorization.
 
 ```rust
-impl ZanzibarService {
-    // Create a new service
-    pub fn new() -> Self
+impl ZanzibarEngine {
+    // Create a new engine
+    pub fn builder() -> ZanzibarEngineBuilder
 
     // Load policy from DSL
-    pub fn add_dsl(&mut self, dsl: &str) -> Result<(), ZanzibarError>
+    pub fn add_dsl(&self, dsl: &str) -> Result<(), EngineError>
 
     // Add namespace configuration
-    pub fn add_config(&mut self, config: NamespaceConfig) -> Result<(), ZanzibarError>
+    pub fn apply_namespace_config(&self, config: NamespaceConfig) -> Result<ConsistencyToken, EngineError>
 
     // Write a relation tuple
-    pub fn write_tuple(&mut self, tuple: RelationTuple) -> Result<(), ZanzibarError>
+    pub fn write_tuple(&self, tuple: impl Borrow<RelationTuple>) -> Result<(), EngineError>
 
     // Delete a relation tuple
-    pub fn delete_tuple(&mut self, tuple: &RelationTuple) -> Result<(), ZanzibarError>
+    pub fn delete_tuple(&self, tuple: &RelationTuple) -> Result<(), EngineError>
 
     // Check if user has relation to object
-    pub fn check(&self, object: &Object, relation: &Relation, user: &User) -> Result<bool, ZanzibarError>
+    pub fn check_relation(&self, object: &Object, relation: &Relation, user: &User) -> Result<bool, EngineError>
 
     // Expand userset for object and relation
-    pub fn expand(&self, object: &Object, relation: &Relation) -> Result<ExpandedUserset, ZanzibarError>
+    pub fn expand_relation(&self, object: &Object, relation: &Relation) -> Result<ExpandedUserset, EngineError>
 }
 ```
 
@@ -385,7 +385,7 @@ This example demonstrates:
 ### Custom Implementation
 
 ```rust
-use simple_zanzibar::{ZanzibarService, model::*};
+use simple_zanzibar::{ZanzibarEngine, model::*};
 
 // Define your domain objects
 let document = Object {
@@ -396,7 +396,7 @@ let document = Object {
 let user = User::UserId("john.doe".to_string());
 
 // Set up your service with policies
-let mut service = ZanzibarService::new();
+let service = ZanzibarEngine::builder().build();
 service.add_dsl(r#"
     namespace document {
         relation owner {}
@@ -419,7 +419,7 @@ service.write_tuple(RelationTuple {
 })?;
 
 // Check permissions
-let can_view = service.check(
+let can_view = service.check_relation(
     &document,
     &Relation("viewer".to_string()),
     &user

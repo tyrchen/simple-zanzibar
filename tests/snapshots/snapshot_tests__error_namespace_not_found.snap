@@ -2,4 +2,4 @@
 source: tests/snapshot_tests.rs
 expression: err.to_string()
 ---
-Namespace 'nonexistent' not found
+namespace 'nonexistent' not found

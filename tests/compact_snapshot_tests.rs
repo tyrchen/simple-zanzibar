@@ -11,7 +11,6 @@ use proptest::{prelude::*, test_runner::TestCaseError};
 use simple_zanzibar::{
     SnapshotCompression, SnapshotIntegrityMode, SnapshotIoError, SnapshotLoadOptions,
     SnapshotLoadProfile, SnapshotSaveOptions, SnapshotValidationMode, ZanzibarEngine,
-    ZanzibarService,
     eval::EvaluationLimits,
     model::{LookupResourcesRequest, LookupSubjectsRequest, Object, Relation, RelationTuple, User},
     relationship::RelationshipMutation,
@@ -52,7 +51,7 @@ fn test_should_save_and_load_snapshot_with_equivalent_behavior()
             SnapshotValidationMode::TrustedFastLoad,
         ),
     ] {
-        let mut loaded = ZanzibarService::load_snapshot(&path, options)?;
+        let loaded = ZanzibarEngine::load_snapshot(&path, options)?;
         assert_equivalent_behavior(&service, &loaded)?;
 
         let writer_token_result = loaded.check_with_consistency(
@@ -63,7 +62,7 @@ fn test_should_save_and_load_snapshot_with_equivalent_behavior()
         );
         assert!(matches!(
             writer_token_result,
-            Err(simple_zanzibar::error::ZanzibarError::Consistency(_))
+            Err(simple_zanzibar::EngineError::Consistency(_))
         ));
 
         let bob_tuple = simple_zanzibar::model::RelationTuple {
@@ -81,11 +80,11 @@ fn test_should_save_and_load_snapshot_with_equivalent_behavior()
 
         let duplicate: simple_zanzibar::domain::Relationship =
             "doc:direct_doc#viewer@group:eng#member".parse()?;
-        let duplicate_result =
-            loaded.apply_relationship_mutations([RelationshipMutation::Create(duplicate)], []);
+        let duplicate_result = loaded
+            .write_relationships_with_preconditions([RelationshipMutation::Create(duplicate)], []);
         assert!(matches!(
             duplicate_result,
-            Err(simple_zanzibar::error::ZanzibarError::Store(_))
+            Err(simple_zanzibar::EngineError::Store(_))
         ));
     }
 
@@ -132,7 +131,7 @@ fn test_should_save_and_load_zstd_snapshot_through_service_and_engine()
         compression: SnapshotCompression::Zstd,
         ..SnapshotLoadOptions::default()
     };
-    let loaded = ZanzibarService::load_snapshot(&path, options)?;
+    let loaded = ZanzibarEngine::load_snapshot(&path, options)?;
     assert_equivalent_behavior(&service, &loaded)?;
 
     let engine = ZanzibarEngine::load_snapshot(&path, options)?;
@@ -167,7 +166,7 @@ fn test_should_apply_snapshot_size_cap_to_zstd_decompressed_payload()
     let raw_len = fs::metadata(&raw_path)?.len();
     let capped_len = raw_len.checked_sub(1).ok_or("raw snapshot is empty")?;
 
-    let result = ZanzibarService::load_snapshot(
+    let result = ZanzibarEngine::load_snapshot(
         &zstd_path,
         SnapshotLoadOptions {
             compression: SnapshotCompression::Zstd,
@@ -210,8 +209,8 @@ fn test_should_match_tiny_golden_snapshot_fixture() -> Result<(), Box<dyn std::e
     let expected = decode_hex(include_str!("fixtures/snapshots/tiny.szsnap.hex"))?;
     assert_eq!(actual, expected);
 
-    let loaded = ZanzibarService::load_snapshot(&path, SnapshotLoadOptions::default())?;
-    assert!(loaded.check(
+    let loaded = ZanzibarEngine::load_snapshot(&path, SnapshotLoadOptions::default())?;
+    assert!(loaded.check_relation(
         &doc("readme"),
         &Relation("viewer".to_string()),
         &User::UserId("alice".to_string()),
@@ -285,17 +284,17 @@ fn test_should_support_external_integrity_only_for_trusted_fast_load()
 
     let path = temp_snapshot_path("external_integrity");
     fs::write(&path, bytes)?;
-    let loaded = ZanzibarService::load_snapshot(
+    let loaded = ZanzibarEngine::load_snapshot(
         &path,
         snapshot_external_load_options(SnapshotValidationMode::TrustedFastLoad),
     )?;
-    assert!(loaded.check(
+    assert!(loaded.check_relation(
         &doc("direct_doc"),
         &Relation("can_view".to_string()),
         &User::UserId("alice".to_string()),
     )?);
 
-    let unsupported = ZanzibarService::load_snapshot(
+    let unsupported = ZanzibarEngine::load_snapshot(
         &path,
         snapshot_external_load_options(SnapshotValidationMode::Full),
     );
@@ -314,7 +313,7 @@ fn test_should_reject_trusted_fast_load_with_latency_profile()
     let path = temp_snapshot_path("trusted_latency");
     fs::write(&path, bytes)?;
 
-    let result = ZanzibarService::load_snapshot(
+    let result = ZanzibarEngine::load_snapshot(
         &path,
         snapshot_load_options(
             SnapshotLoadProfile::Latency,
@@ -478,17 +477,17 @@ proptest! {
 }
 
 fn assert_equivalent_behavior(
-    original: &ZanzibarService,
-    loaded: &ZanzibarService,
+    original: &ZanzibarEngine,
+    loaded: &ZanzibarEngine,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let alice = User::UserId("alice".to_string());
     let can_view = Relation("can_view".to_string());
-    assert!(original.check(&doc("direct_doc"), &can_view, &alice)?);
-    assert!(loaded.check(&doc("direct_doc"), &can_view, &alice)?);
-    assert!(original.check(&doc("inherited_doc"), &can_view, &alice)?);
-    assert!(loaded.check(&doc("inherited_doc"), &can_view, &alice)?);
-    assert!(!original.check(&doc("denied_doc"), &can_view, &alice)?);
-    assert!(!loaded.check(&doc("denied_doc"), &can_view, &alice)?);
+    assert!(original.check_relation(&doc("direct_doc"), &can_view, &alice)?);
+    assert!(loaded.check_relation(&doc("direct_doc"), &can_view, &alice)?);
+    assert!(original.check_relation(&doc("inherited_doc"), &can_view, &alice)?);
+    assert!(loaded.check_relation(&doc("inherited_doc"), &can_view, &alice)?);
+    assert!(!original.check_relation(&doc("denied_doc"), &can_view, &alice)?);
+    assert!(!loaded.check_relation(&doc("denied_doc"), &can_view, &alice)?);
 
     for (resource, relation) in [
         ("direct_doc", "viewer"),
@@ -499,8 +498,8 @@ fn assert_equivalent_behavior(
         let object = doc(resource);
         let relation = Relation(relation.to_string());
         assert_eq!(
-            original.expand(&object, &relation)?,
-            loaded.expand(&object, &relation)?,
+            original.expand_relation(&object, &relation)?,
+            loaded.expand_relation(&object, &relation)?,
         );
     }
 
@@ -534,7 +533,7 @@ fn assert_equivalent_behavior(
 fn round_trip_random_direct_relationships(
     pairs: &[(u8, u8)],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(
         r"
     namespace doc {
@@ -562,7 +561,7 @@ fn round_trip_random_direct_relationships(
             SnapshotValidationMode::TrustedFastLoad,
         ),
     ] {
-        let loaded = ZanzibarService::load_snapshot(&path, options)?;
+        let loaded = ZanzibarEngine::load_snapshot(&path, options)?;
         assert_random_direct_equivalence(&service, &loaded, &unique_pairs)?;
     }
     remove_file(&path);
@@ -570,8 +569,8 @@ fn round_trip_random_direct_relationships(
 }
 
 fn assert_random_direct_equivalence(
-    original: &ZanzibarService,
-    loaded: &ZanzibarService,
+    original: &ZanzibarEngine,
+    loaded: &ZanzibarEngine,
     unique_pairs: &BTreeSet<(u8, u8)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let viewer = Relation("viewer".to_string());
@@ -579,16 +578,16 @@ fn assert_random_direct_equivalence(
         let object = doc(&format!("random_doc_{doc_id}"));
         let user = User::UserId(format!("user_{user_id}"));
         assert_eq!(
-            original.check(&object, &viewer, &user)?,
-            loaded.check(&object, &viewer, &user)?,
+            original.check_relation(&object, &viewer, &user)?,
+            loaded.check_relation(&object, &viewer, &user)?,
         );
     }
 
     for doc_id in 0_u8..16 {
         let object = doc(&format!("random_doc_{doc_id}"));
         assert_eq!(
-            original.expand(&object, &viewer)?,
-            loaded.expand(&object, &viewer)?,
+            original.expand_relation(&object, &viewer)?,
+            loaded.expand_relation(&object, &viewer)?,
         );
     }
 
@@ -607,15 +606,16 @@ fn assert_random_direct_equivalence(
     Ok(())
 }
 
-fn populated_service() -> Result<
-    (ZanzibarService, simple_zanzibar::revision::ConsistencyToken),
-    Box<dyn std::error::Error>,
-> {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: non_zero_u32(32),
-        max_fanout_per_step: non_zero_u32(10_000),
-        max_lookup_results: non_zero_u32(1_000),
-    });
+fn populated_service()
+-> Result<(ZanzibarEngine, simple_zanzibar::revision::ConsistencyToken), Box<dyn std::error::Error>>
+{
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: non_zero_u32(32),
+            max_fanout_per_step: non_zero_u32(10_000),
+            max_lookup_results: non_zero_u32(1_000),
+        })
+        .build();
     let mut token = service.add_dsl_with_token(schema())?;
     for relationship in [
         "group:eng#member@user:alice",
@@ -627,7 +627,8 @@ fn populated_service() -> Result<
         "doc:other_doc#viewer@user:carol",
     ] {
         let parsed = relationship.parse()?;
-        token = service.apply_relationship_mutations([RelationshipMutation::Touch(parsed)], [])?;
+        token = service
+            .write_relationships_with_preconditions([RelationshipMutation::Touch(parsed)], [])?;
     }
     Ok((service, token))
 }
@@ -641,8 +642,8 @@ fn snapshot_bytes() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     Ok(bytes)
 }
 
-fn tiny_service() -> Result<ZanzibarService, Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+fn tiny_service() -> Result<ZanzibarEngine, Box<dyn std::error::Error>> {
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(
         r"
     namespace doc {
@@ -669,7 +670,7 @@ fn assert_corrupt_rejected_with_options(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_snapshot_path(name);
     fs::write(&path, bytes)?;
-    let result = ZanzibarService::load_snapshot(&path, options);
+    let result = ZanzibarEngine::load_snapshot(&path, options);
     remove_file(&path);
     assert!(matches!(
         result,

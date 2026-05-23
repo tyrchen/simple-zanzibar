@@ -33,11 +33,10 @@ tracing = { version = "0.1.44", default-features = false, features = ["std"], op
 zstd = { version = "0.13.3", default-features = false }
 
 [features]
-default = ["std", "compat"]
+default = ["std"]
 std = []
 serde = ["dep:serde"]
 tracing = ["dep:tracing"]
-compat = []
 bench-internals = []
 
 [dev-dependencies]
@@ -63,6 +62,11 @@ test = false
 
 [[bench]]
 name = "public_api"
+harness = false
+test = false
+
+[[bench]]
+name = "concurrent_runtime"
 harness = false
 test = false
 

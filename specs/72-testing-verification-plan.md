@@ -47,12 +47,13 @@ This plan defines how each phase proves correctness, safety, compatibility, and 
 | Revision consistency | latest read, exact read, expired token, wrong datastore ID, schema hash mismatch. |
 | Evaluation | every expression variant, cross-namespace usersets, recursion cycles, depth exceeded, fanout limit. |
 | Expand/lookup | shared evaluator semantics, duplicate suppression, result limits. |
-| Compatibility | existing tests pass through `ZanzibarService` facade. |
+| Public runtime | existing tests pass through `ZanzibarEngine`; no legacy mutable facade remains public. |
 | Security | no panics on malformed external input, no unchecked indexing in boundary modules. |
 | Performance | criterion benchmarks for budgets in [71](./71-performance-budgets-design.md). |
 | Memory | peak RSS checks for compact relationship store budgets in [16](./16-compact-relationship-store-design.md). |
 | Snapshot artifact | save/load equivalence, corrupt file rejection, file size, load time, and load-time RSS for [17](./17-compact-snapshot-format-design.md) and trusted fast-load coverage for [18](./18-trusted-fast-snapshot-load-design.md). |
 | Public API completeness | zstd snapshot round trips, policy text import/export, schema replacement/deletion, permission enumeration, and public API benchmarks for [19](./19-public-api-completeness-design.md). |
+| Concurrent runtime | lock-free read acquisition, writer actor lifecycle, failed-write atomicity, concurrent read/write behaviour, tenant isolation, and mixed workload benchmarks for [20](./20-concurrent-engine-runtime-design.md). |
 
 ## 4. Command Gates
 
@@ -143,6 +144,12 @@ public_api/lookup_object_permissions/100k
 public_api/export_policy_text/100k
 public_api/snapshot_save_zstd/100k
 public_api/snapshot_load_zstd/100k
+concurrent_runtime/read_heavy_light_write
+concurrent_runtime/read_heavy_medium_write_unbatched
+concurrent_runtime/read_heavy_medium_write_batched
+concurrent_runtime/read_heavy_heavy_write_unbatched
+concurrent_runtime/read_heavy_heavy_write_batched
+concurrent_runtime/tenant_sharded_heavy_write
 ```
 
 Required corrupt-input tests:
@@ -167,7 +174,7 @@ uniqueness index is built.
 
 Required tests for [19](./19-public-api-completeness-design.md):
 
-- raw and zstd snapshot artifacts round trip through both `ZanzibarService` and `ZanzibarEngine`;
+- raw and zstd snapshot artifacts round trip through `ZanzibarEngine`;
 - zstd load rejects decompressed payloads beyond `SnapshotLoadOptions::max_file_bytes`;
 - `PolicyText` import/export preserves check, expand, lookup, and permission enumeration behavior;
 - exported policy files are deterministic, sorted, and grouped by resource namespace;
@@ -176,7 +183,19 @@ Required tests for [19](./19-public-api-completeness-design.md):
 - `lookup_permissions` and `lookup_object_permissions` cover direct, computed userset,
   tuple-to-userset, and exclusion behavior.
 
-## 10. Cross-References
+## 10. Concurrent Runtime Verification
+
+Required tests for [20](./20-concurrent-engine-runtime-design.md):
+
+- public API no longer exports the legacy mutable service facade;
+- latest read APIs work while a writer actor is processing write traffic;
+- failed relationship, schema, and policy writes publish no state;
+- exact consistency tokens remain valid for retained snapshots and reject foreign tenant tokens;
+- actor shutdown/drop does not leak writer threads in tests;
+- `ZanzibarTenantShards` returns the same engine for the same tenant, different engines for
+  different tenants, and isolates schema/relationship state by tenant.
+
+## 11. Cross-References
 
 - <- Depends on: [70-security-design.md](./70-security-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md)
 - -> Consumed by: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)

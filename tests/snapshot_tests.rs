@@ -10,7 +10,7 @@
 )]
 
 use simple_zanzibar::{
-    ZanzibarService,
+    ZanzibarEngine,
     model::{ExpandedUserset, Object, Relation, RelationTuple, User},
 };
 
@@ -79,8 +79,8 @@ fn test_snapshot_parse_tuple_to_userset() {
 
 // -- Expand snapshots --
 
-fn setup_expand_service() -> ZanzibarService {
-    let mut service = ZanzibarService::new();
+fn setup_expand_service() -> ZanzibarEngine {
+    let service = ZanzibarEngine::builder().build();
     service
         .add_dsl(
             r#"
@@ -150,7 +150,7 @@ fn setup_expand_service() -> ZanzibarService {
 fn test_snapshot_expand_union_with_hierarchy() {
     let service = setup_expand_service();
     let expanded = service
-        .expand(&Object::new("doc", "readme"), &Relation::new("viewer"))
+        .expand_relation(&Object::new("doc", "readme"), &Relation::new("viewer"))
         .unwrap();
     insta::assert_debug_snapshot!("expand_viewer_union_hierarchy", expanded);
 }
@@ -159,14 +159,14 @@ fn test_snapshot_expand_union_with_hierarchy() {
 fn test_snapshot_expand_direct_relation() {
     let service = setup_expand_service();
     let expanded = service
-        .expand(&Object::new("doc", "readme"), &Relation::new("owner"))
+        .expand_relation(&Object::new("doc", "readme"), &Relation::new("owner"))
         .unwrap();
     insta::assert_debug_snapshot!("expand_owner_direct", expanded);
 }
 
 #[test]
 fn test_snapshot_expand_exclusion() {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service
         .add_dsl(
             r#"
@@ -203,14 +203,14 @@ fn test_snapshot_expand_exclusion() {
         .unwrap();
 
     let expanded = service
-        .expand(&Object::new("doc", "1"), &Relation::new("viewer"))
+        .expand_relation(&Object::new("doc", "1"), &Relation::new("viewer"))
         .unwrap();
     insta::assert_debug_snapshot!("expand_exclusion_banned", expanded);
 }
 
 #[test]
 fn test_snapshot_expand_intersection() {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service
         .add_dsl(
             r#"
@@ -247,7 +247,7 @@ fn test_snapshot_expand_intersection() {
         .unwrap();
 
     let expanded = service
-        .expand(&Object::new("team", "eng"), &Relation::new("viewer"))
+        .expand_relation(&Object::new("team", "eng"), &Relation::new("viewer"))
         .unwrap();
     insta::assert_debug_snapshot!("expand_intersection", expanded);
 }
@@ -256,9 +256,12 @@ fn test_snapshot_expand_intersection() {
 
 #[test]
 fn test_snapshot_error_namespace_not_found() {
-    let service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
+    service
+        .add_dsl("namespace doc { relation viewer {} }")
+        .unwrap();
     let err = service
-        .check(
+        .check_relation(
             &Object::new("nonexistent", "1"),
             &Relation::new("viewer"),
             &User::user_id("alice"),
@@ -269,13 +272,13 @@ fn test_snapshot_error_namespace_not_found() {
 
 #[test]
 fn test_snapshot_error_relation_not_found() {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service
         .add_dsl("namespace doc { relation owner {} }")
         .unwrap();
 
     let err = service
-        .check(
+        .check_relation(
             &Object::new("doc", "1"),
             &Relation::new("nonexistent"),
             &User::user_id("alice"),
@@ -292,18 +295,16 @@ fn test_snapshot_error_parse_error() {
 
 #[test]
 fn test_snapshot_error_duplicate_tuple() {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service
         .add_dsl("namespace doc { relation owner {} }")
         .unwrap();
 
-    let tuple = RelationTuple::new(
-        Object::new("doc", "1"),
-        Relation::new("owner"),
-        User::user_id("alice"),
-    );
-    service.write_tuple(tuple.clone()).unwrap();
-    let err = service.write_tuple(tuple).unwrap_err();
+    let mutation =
+        simple_zanzibar::relationship::RelationshipMutation::create("doc:1#owner@user:alice")
+            .unwrap();
+    service.write_relationships([mutation.clone()]).unwrap();
+    let err = service.write_relationships([mutation]).unwrap_err();
     insta::assert_snapshot!("error_duplicate_tuple", err.to_string());
 }
 
@@ -337,7 +338,7 @@ fn collect_users_inner(expanded: &ExpandedUserset, out: &mut Vec<String>) {
 fn test_snapshot_expand_contains_all_users() {
     let service = setup_expand_service();
     let expanded = service
-        .expand(&Object::new("doc", "readme"), &Relation::new("viewer"))
+        .expand_relation(&Object::new("doc", "readme"), &Relation::new("viewer"))
         .unwrap();
 
     let users = collect_users(&expanded);

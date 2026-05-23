@@ -1,8 +1,7 @@
 use std::{num::NonZeroUsize, str::FromStr};
 
 use simple_zanzibar::{
-    ZanzibarService,
-    error::ZanzibarError,
+    EngineError, ZanzibarEngine,
     model::{NamespaceConfig, Object, Relation, RelationConfig, RelationTuple, User},
     revision::{Consistency, ConsistencyError, ConsistencyToken},
 };
@@ -15,7 +14,7 @@ const DOC_SCHEMA: &str = r"
 
 #[test]
 fn test_should_round_trip_consistency_token() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     let token = service.add_dsl_with_token(DOC_SCHEMA)?;
 
     let parsed = ConsistencyToken::from_str(&token.to_string())?;
@@ -30,12 +29,12 @@ fn test_should_hash_schema_independently_of_namespace_order()
     let doc = namespace("doc", "viewer");
     let folder = namespace("folder", "viewer");
 
-    let mut first = ZanzibarService::new();
-    first.add_config(doc.clone())?;
+    let first = ZanzibarEngine::builder().build();
+    first.apply_namespace_config(doc.clone())?;
     let first_token = first.add_config_with_token(folder.clone())?;
 
-    let mut second = ZanzibarService::new();
-    second.add_config(folder)?;
+    let second = ZanzibarEngine::builder().build();
+    second.apply_namespace_config(folder)?;
     let second_token = second.add_config_with_token(doc)?;
 
     assert_eq!(first_token.schema_hash(), second_token.schema_hash());
@@ -45,7 +44,7 @@ fn test_should_hash_schema_independently_of_namespace_order()
 #[test]
 fn test_should_read_exact_snapshot_without_later_writes() -> Result<(), Box<dyn std::error::Error>>
 {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(DOC_SCHEMA)?;
     let object = doc_object();
     let relation = Relation("viewer".to_string());
@@ -74,7 +73,7 @@ fn test_should_read_exact_snapshot_without_later_writes() -> Result<(), Box<dyn 
 #[test]
 fn test_should_read_exact_snapshot_without_later_delete() -> Result<(), Box<dyn std::error::Error>>
 {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(DOC_SCHEMA)?;
     let object = doc_object();
     let relation = Relation("viewer".to_string());
@@ -97,7 +96,7 @@ fn test_should_read_exact_snapshot_without_later_delete() -> Result<(), Box<dyn 
 #[test]
 fn test_should_read_exact_schema_snapshot_without_later_schema()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     let doc_only_token = service.add_dsl_with_token(DOC_SCHEMA)?;
     service.add_dsl(
         r"
@@ -118,7 +117,7 @@ fn test_should_read_exact_schema_snapshot_without_later_schema()
         Consistency::Exact(doc_only_token),
     );
 
-    assert!(matches!(result, Err(ZanzibarError::Schema(_))));
+    assert!(matches!(result, Err(EngineError::Schema(_))));
     assert!(!service.check_with_consistency(
         &folder,
         &Relation("viewer".to_string()),
@@ -130,7 +129,7 @@ fn test_should_read_exact_schema_snapshot_without_later_schema()
 
 #[test]
 fn test_should_reject_wrong_datastore_token() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(DOC_SCHEMA)?;
     let token = service.write_tuple_with_token(&tuple("readme", "alice"))?;
     let wrong_token = ConsistencyToken::from_str(&replace_token_field(
@@ -148,15 +147,16 @@ fn test_should_reject_wrong_datastore_token() -> Result<(), Box<dyn std::error::
 
     assert!(matches!(
         result,
-        Err(ZanzibarError::Consistency(ConsistencyError::WrongDatastore))
+        Err(EngineError::Consistency(ConsistencyError::WrongDatastore))
     ));
     Ok(())
 }
 
 #[test]
 fn test_should_reject_expired_revision_token() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service =
-        ZanzibarService::with_snapshot_retention(NonZeroUsize::new(1).ok_or("invalid retention")?);
+    let service = ZanzibarEngine::builder()
+        .retained_snapshots(NonZeroUsize::new(1).ok_or("invalid retention")?)
+        .build();
     let schema_token = service.add_dsl_with_token(DOC_SCHEMA)?;
     service.write_tuple_with_token(&tuple("readme", "alice"))?;
 
@@ -169,7 +169,7 @@ fn test_should_reject_expired_revision_token() -> Result<(), Box<dyn std::error:
 
     assert!(matches!(
         result,
-        Err(ZanzibarError::Consistency(
+        Err(EngineError::Consistency(
             ConsistencyError::RevisionExpired { .. }
         ))
     ));
@@ -178,7 +178,7 @@ fn test_should_reject_expired_revision_token() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn test_should_reject_future_revision_token() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(DOC_SCHEMA)?;
     let token = service.write_tuple_with_token(&tuple("readme", "alice"))?;
     let future = ConsistencyToken::new(
@@ -196,7 +196,7 @@ fn test_should_reject_future_revision_token() -> Result<(), Box<dyn std::error::
 
     assert!(matches!(
         result,
-        Err(ZanzibarError::Consistency(
+        Err(EngineError::Consistency(
             ConsistencyError::RevisionUnavailable { .. }
         ))
     ));
@@ -205,7 +205,7 @@ fn test_should_reject_future_revision_token() -> Result<(), Box<dyn std::error::
 
 #[test]
 fn test_should_reject_schema_hash_mismatch() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(DOC_SCHEMA)?;
     let token = service.write_tuple_with_token(&tuple("readme", "alice"))?;
     let mismatched = ConsistencyToken::from_str(&replace_token_field(
@@ -223,7 +223,7 @@ fn test_should_reject_schema_hash_mismatch() -> Result<(), Box<dyn std::error::E
 
     assert!(matches!(
         result,
-        Err(ZanzibarError::Consistency(
+        Err(EngineError::Consistency(
             ConsistencyError::SchemaHashMismatch { .. }
         ))
     ));

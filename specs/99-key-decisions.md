@@ -193,3 +193,37 @@ Each decision is load-bearing. Supersede with a new decision entry rather than s
   [14-evaluation-engine-design.md](./14-evaluation-engine-design.md),
   [71-performance-budgets-design.md](./71-performance-budgets-design.md)
 - Date: 2026-05-23
+
+## D18 - Remove the legacy mutable service facade before API stabilization
+
+- Context: the legacy mutable facade kept early compatibility while the strict engine API matured, but the
+  crate API is not yet stable and the mutable facade now encourages service-level locking and
+  duplicate examples.
+- Alternatives considered: keep the legacy mutable facade indefinitely; hide it behind a `compat` feature;
+  remove it and make `ZanzibarEngine` the only public runtime.
+- Decision: remove the legacy mutable facade from the public API, examples, tests, and benchmarks.
+- Why: the runtime contract should be one coherent engine: lock-free snapshot reads, typed request
+  APIs, actor-backed writes, and policy/snapshot import/export on the same facade. Keeping a second
+  mutable public type would force future compatibility work around a shape we already know is not
+  the intended API.
+- Pinned by: [20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md),
+  [15-public-api-design.md](./15-public-api-design.md),
+  [72-testing-verification-plan.md](./72-testing-verification-plan.md)
+- Date: 2026-05-23
+
+## D19 - Scale writes by batching and tenant sharding before fine-grained locks
+
+- Context: Relationship writes, preconditions, schema replacement, consistency tokens, and snapshot
+  publication all require a single linearized write order inside one authorization state.
+- Alternatives considered: per-object locks; per-namespace locks; optimistic CAS publish retries;
+  a bounded single writer actor with caller batching; tenant-level sharding.
+- Decision: use a single writer actor per `ZanzibarEngine`, make batch writes the throughput path,
+  and add `ZanzibarTenantShards` for applications with independent tenant authorization states.
+- Why: fine-grained locks would still need a global publish point and would complicate precondition
+  correctness. Batching reduces per-write fixed cost, and tenant sharding moves true independence
+  into separate revision/token spaces instead of pretending one tenant's global revision can be
+  partitioned by object.
+- Pinned by: [20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md),
+  [13-revision-consistency-design.md](./13-revision-consistency-design.md),
+  [71-performance-budgets-design.md](./71-performance-budgets-design.md)
+- Date: 2026-05-23

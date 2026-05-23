@@ -34,6 +34,9 @@ bench-snapshot:
 bench-public-api:
 	@cargo bench --bench public_api -- --sample-size 10
 
+bench-concurrent-runtime:
+	@cargo bench --bench concurrent_runtime -- --sample-size 10
+
 bench-snapshot-memory:
 	@cargo bench --bench snapshot --no-run
 	@target_dir=$${CARGO_TARGET_DIR:-$$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')}; \
@@ -51,7 +54,7 @@ bench-snapshot-memory:
 	done; \
 	rm -f "$$snapshot_file"
 
-bench-all: bench-baseline bench-org bench-snapshot bench-public-api
+bench-all: bench-baseline bench-org bench-snapshot bench-public-api bench-concurrent-runtime
 
 fmt:
 	@cargo +nightly fmt
@@ -75,4 +78,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-snapshot-memory bench-all fmt fmt-check clippy lint release update-submodule
+.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-snapshot-memory bench-all fmt fmt-check clippy lint release update-submodule

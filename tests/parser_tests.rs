@@ -1,6 +1,6 @@
 //! Tests for the DSL parser.
 
-use simple_zanzibar::{ZanzibarService, error::ZanzibarError, model::Relation};
+use simple_zanzibar::{ZanzibarEngine, error::ZanzibarError, model::Relation};
 
 const TEST_DSL: &str = r#"
     // Defines a document namespace with hierarchical permissions.
@@ -36,7 +36,7 @@ const TEST_DSL: &str = r#"
 
 #[test]
 fn test_parse_full_dsl() -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(TEST_DSL)?;
 
     // Retrieve the configs to check them. This requires making the field public
