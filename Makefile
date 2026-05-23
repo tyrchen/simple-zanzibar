@@ -9,6 +9,11 @@ test:
 bench-baseline:
 	@cargo bench --bench baseline -- --sample-size 10
 
+bench-org:
+	@cargo bench --bench org_authorization -- --sample-size 10
+
+bench-all: bench-baseline bench-org
+
 fmt:
 	@cargo +nightly fmt
 
@@ -31,4 +36,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build check test bench-baseline fmt fmt-check clippy lint release update-submodule
+.PHONY: build check test bench-baseline bench-org bench-all fmt fmt-check clippy lint release update-submodule
