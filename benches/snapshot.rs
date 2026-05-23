@@ -11,7 +11,8 @@ use std::{
 
 use criterion::{BatchSize, Criterion};
 use simple_zanzibar::{
-    SnapshotLoadOptions, SnapshotLoadProfile, SnapshotSaveOptions, ZanzibarService,
+    SnapshotIntegrityMode, SnapshotLoadOptions, SnapshotLoadProfile, SnapshotSaveOptions,
+    SnapshotValidationMode, ZanzibarService,
     domain::Relationship,
     eval::EvaluationLimits,
     model::{LookupResourcesRequest, Object, Relation, User},
@@ -129,6 +130,20 @@ fn bench_snapshot_load(criterion: &mut Criterion, filters: &[String]) {
         }
     }
 
+    let trusted_name = "snapshot_load_trusted_fast/1m";
+    if should_benchmark(trusted_name, filters) {
+        let path = prepared_snapshot_file(1_000_000, trusted_name);
+        criterion.bench_function(trusted_name, |bencher| {
+            bencher.iter(|| {
+                black_box(must(
+                    ZanzibarService::load_snapshot(&path, trusted_fast_load_options()),
+                    "failed to trusted-load compact snapshot",
+                ))
+            });
+        });
+        remove_file_if_owned(&path);
+    }
+
     let reindex_name = "snapshot_load_and_reindex/1m";
     if should_benchmark(reindex_name, filters) {
         let path = prepared_snapshot_file(1_000_000, reindex_name);
@@ -165,21 +180,63 @@ fn bench_snapshot_load(criterion: &mut Criterion, filters: &[String]) {
 }
 
 fn bench_snapshot_loaded_queries(criterion: &mut Criterion, filters: &[String]) {
-    let direct_name = "snapshot_loaded_check_direct/1m";
-    let inherited_name = "snapshot_loaded_check_inherited/1m";
-    let lookup_name = "snapshot_loaded_lookup_resources/1m";
-    if ![direct_name, inherited_name, lookup_name]
-        .iter()
-        .any(|name| should_benchmark(name, filters))
-    {
+    let full = LoadedQueryBenchNames {
+        direct: "snapshot_loaded_check_direct/1m",
+        inherited: "snapshot_loaded_check_inherited/1m",
+        lookup: "snapshot_loaded_lookup_resources/1m",
+    };
+    let trusted = LoadedQueryBenchNames {
+        direct: "snapshot_trusted_loaded_check_direct/1m",
+        inherited: "snapshot_trusted_loaded_check_inherited/1m",
+        lookup: "snapshot_trusted_loaded_lookup_resources/1m",
+    };
+    let full_requested = loaded_query_requested(full, filters);
+    let trusted_requested = loaded_query_requested(trusted, filters);
+    if !full_requested && !trusted_requested {
         return;
     }
 
     let path = prepared_snapshot_file(1_000_000, "snapshot_loaded_queries/1m");
-    let service = must(
-        ZanzibarService::load_snapshot(&path, SnapshotLoadOptions::default()),
-        "failed to load snapshot for loaded-query benchmarks",
-    );
+    if full_requested {
+        let service = must(
+            ZanzibarService::load_snapshot(&path, SnapshotLoadOptions::default()),
+            "failed to load snapshot for loaded-query benchmarks",
+        );
+        bench_loaded_query_set(criterion, filters, &service, full);
+    }
+    if trusted_requested {
+        let service = must(
+            ZanzibarService::load_snapshot(&path, trusted_fast_load_options()),
+            "failed to trusted-load snapshot for loaded-query benchmarks",
+        );
+        bench_loaded_query_set(criterion, filters, &service, trusted);
+    }
+    remove_file_if_owned(&path);
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LoadedQueryBenchNames {
+    direct: &'static str,
+    inherited: &'static str,
+    lookup: &'static str,
+}
+
+fn loaded_query_requested(names: LoadedQueryBenchNames, filters: &[String]) -> bool {
+    [names.direct, names.inherited, names.lookup]
+        .iter()
+        .any(|name| should_benchmark(name, filters))
+}
+
+fn bench_loaded_query_set(
+    criterion: &mut Criterion,
+    filters: &[String],
+    service: &ZanzibarService,
+    names: LoadedQueryBenchNames,
+) {
+    if !loaded_query_requested(names, filters) {
+        return;
+    }
+
     let target_user = User::UserId(TARGET_USER_ID.to_string());
     let can_view = relation("can_view");
     let direct_doc = object("doc", "direct_doc");
@@ -190,8 +247,8 @@ fn bench_snapshot_loaded_queries(criterion: &mut Criterion, filters: &[String]) 
         resource_type: "doc".to_string(),
     };
 
-    if should_benchmark(direct_name, filters) {
-        criterion.bench_function(direct_name, |bencher| {
+    if should_benchmark(names.direct, filters) {
+        criterion.bench_function(names.direct, |bencher| {
             bencher.iter(|| {
                 black_box(must(
                     service.check(
@@ -205,8 +262,8 @@ fn bench_snapshot_loaded_queries(criterion: &mut Criterion, filters: &[String]) 
         });
     }
 
-    if should_benchmark(inherited_name, filters) {
-        criterion.bench_function(inherited_name, |bencher| {
+    if should_benchmark(names.inherited, filters) {
+        criterion.bench_function(names.inherited, |bencher| {
             bencher.iter(|| {
                 black_box(must(
                     service.check(
@@ -220,8 +277,8 @@ fn bench_snapshot_loaded_queries(criterion: &mut Criterion, filters: &[String]) 
         });
     }
 
-    if should_benchmark(lookup_name, filters) {
-        criterion.bench_function(lookup_name, |bencher| {
+    if should_benchmark(names.lookup, filters) {
+        criterion.bench_function(names.lookup, |bencher| {
             bencher.iter(|| {
                 black_box(must(
                     service.lookup_resources(black_box(&lookup_request)),
@@ -230,7 +287,6 @@ fn bench_snapshot_loaded_queries(criterion: &mut Criterion, filters: &[String]) 
             });
         });
     }
-    remove_file_if_owned(&path);
 }
 
 fn bench_snapshot_file_size(criterion: &mut Criterion, filters: &[String]) {
@@ -271,6 +327,14 @@ fn remove_file_if_owned(path: &Path) {
         return;
     }
     remove_file(path);
+}
+
+fn trusted_fast_load_options() -> SnapshotLoadOptions {
+    SnapshotLoadOptions {
+        validation: SnapshotValidationMode::TrustedFastLoad,
+        integrity: SnapshotIntegrityMode::External,
+        ..SnapshotLoadOptions::default()
+    }
 }
 
 fn build_service_with_relationships(rules: usize) -> ZanzibarService {

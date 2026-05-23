@@ -185,6 +185,28 @@ The order is correct because:
 - benchmark gates are meaningful only after indexed store and evaluator exist
 - compact storage is valuable only after the full indexed/snapshot/evaluator path exists and benchmark evidence identifies memory as the limiting resource
 - compact snapshot serialization is valuable only after the in-memory compact representation is stable and memory evidence identifies cold load as the next bottleneck
+- trusted fast-load is valuable only after the fully validating snapshot format exists and profiling identifies repeated semantic validation as the dominant cost
+
+## 12a. Phase 9 - Trusted Fast Snapshot Load
+
+Closes M8.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 9.1 | Rev the pre-release `.szsnap` format to v2 and add serialized `symbol_hashes` and `symbol_lookup` sections. | [17](./17-compact-snapshot-format-design.md), [18](./18-trusted-fast-snapshot-load-design.md) | 1 day |
+| 9.2 | Add `SnapshotValidationMode` and `SnapshotIntegrityMode` with safe defaults and explicit trusted/external public docs. | [18](./18-trusted-fast-snapshot-load-design.md), [15](./15-public-api-design.md) | 0.5 day |
+| 9.3 | Keep full validation semantics while using v2 structural validation and symbol lookup validation. | [18](./18-trusted-fast-snapshot-load-design.md), [70](./70-security-design.md) | 1 day |
+| 9.4 | Implement trusted fast-load row/index adoption and lazy relationship uniqueness construction on first write. | [18](./18-trusted-fast-snapshot-load-design.md), [16](./16-compact-relationship-store-design.md) | 1.5 days |
+| 9.5 | Add trusted-mode equivalence, subsequent-write, and structural-corruption tests. | [18](./18-trusted-fast-snapshot-load-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+| 9.6 | Add trusted fast-load benchmarks and update measured performance evidence. | [18](./18-trusted-fast-snapshot-load-design.md), [71](./71-performance-budgets-design.md) | 1 day |
+
+Exit criteria:
+
+- M8 roadmap criteria pass.
+- `SnapshotValidationMode::Full` remains the default and corrupt semantic-file tests still pass.
+- `snapshot_load_trusted_fast/1m` Criterion upper estimate <= 200 ms on the reference machine with trusted fast-load and external integrity.
+- trusted loaded query benchmarks pass the loaded-query budgets.
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`, `cargo +nightly fmt --check`, strict clippy including boundary lints, `cargo audit`, and `cargo deny check` pass.
 
 ## 13. Cross-References
 

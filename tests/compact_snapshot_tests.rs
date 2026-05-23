@@ -9,8 +9,8 @@ use std::{
 
 use proptest::{prelude::*, test_runner::TestCaseError};
 use simple_zanzibar::{
-    SnapshotIoError, SnapshotLoadOptions, SnapshotLoadProfile, SnapshotSaveOptions, ZanzibarEngine,
-    ZanzibarService,
+    SnapshotIntegrityMode, SnapshotIoError, SnapshotLoadOptions, SnapshotLoadProfile,
+    SnapshotSaveOptions, SnapshotValidationMode, ZanzibarEngine, ZanzibarService,
     eval::EvaluationLimits,
     model::{LookupResourcesRequest, LookupSubjectsRequest, Object, Relation, RelationTuple, User},
     relationship::RelationshipMutation,
@@ -32,6 +32,9 @@ const SECTION_KIND_INDEX_DIRECTORY: u16 = 5;
 const SECTION_KIND_INDEX_KEYS: u16 = 6;
 const SECTION_KIND_POSTING_RANGES: u16 = 7;
 const SECTION_KIND_POSTING_ROW_IDS: u16 = 8;
+const SECTION_KIND_SYMBOL_HASHES: u16 = 9;
+const SECTION_KIND_SYMBOL_LOOKUP: u16 = 10;
+const DISK_SYMBOL_LOOKUP_LEN: usize = 4;
 
 #[test]
 fn test_should_save_and_load_snapshot_with_equivalent_behavior()
@@ -40,14 +43,15 @@ fn test_should_save_and_load_snapshot_with_equivalent_behavior()
     let path = temp_snapshot_path("equivalence");
     service.save_snapshot(&path, SnapshotSaveOptions::default())?;
 
-    for profile in [SnapshotLoadProfile::FastLoad, SnapshotLoadProfile::Latency] {
-        let mut loaded = ZanzibarService::load_snapshot(
-            &path,
-            SnapshotLoadOptions {
-                profile,
-                max_file_bytes: non_zero_u64(16 * 1024 * 1024),
-            },
-        )?;
+    for options in [
+        snapshot_load_options(SnapshotLoadProfile::FastLoad, SnapshotValidationMode::Full),
+        snapshot_load_options(SnapshotLoadProfile::Latency, SnapshotValidationMode::Full),
+        snapshot_load_options(
+            SnapshotLoadProfile::FastLoad,
+            SnapshotValidationMode::TrustedFastLoad,
+        ),
+    ] {
+        let mut loaded = ZanzibarService::load_snapshot(&path, options)?;
         assert_equivalent_behavior(&service, &loaded)?;
 
         let writer_token_result = loaded.check_with_consistency(
@@ -73,6 +77,15 @@ fn test_should_save_and_load_snapshot_with_equivalent_behavior()
             &User::UserId("bob".to_string()),
             Consistency::Exact(bob_token),
         )?);
+
+        let duplicate: simple_zanzibar::domain::Relationship =
+            "doc:direct_doc#viewer@group:eng#member".parse()?;
+        let duplicate_result =
+            loaded.apply_relationship_mutations([RelationshipMutation::Create(duplicate)], []);
+        assert!(matches!(
+            duplicate_result,
+            Err(simple_zanzibar::error::ZanzibarError::Store(_))
+        ));
     }
 
     remove_file(&path);
@@ -149,7 +162,7 @@ fn test_should_reject_bad_magic_version_and_header_length() -> Result<(), Box<dy
     assert_corrupt_rejected("bad_magic", &bad_magic)?;
 
     let mut bad_version = bytes.clone();
-    set_u16(&mut bad_version, 8, 2)?;
+    set_u16(&mut bad_version, 8, 1)?;
     assert_corrupt_rejected("bad_version", &bad_version)?;
 
     let mut bad_header = bytes;
@@ -191,11 +204,113 @@ fn test_should_reject_checksum_mismatch() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
+fn test_should_support_external_integrity_only_for_trusted_fast_load()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = snapshot_bytes()?;
+    let last = bytes
+        .len()
+        .checked_sub(1)
+        .ok_or("snapshot bytes unexpectedly empty")?;
+    let footer_byte = *bytes.get(last).ok_or("footer byte missing")?;
+    set_byte(&mut bytes, last, footer_byte ^ 0xFF)?;
+    assert_corrupt_rejected("footer_checksum_mismatch", &bytes)?;
+
+    let path = temp_snapshot_path("external_integrity");
+    fs::write(&path, bytes)?;
+    let loaded = ZanzibarService::load_snapshot(
+        &path,
+        snapshot_external_load_options(SnapshotValidationMode::TrustedFastLoad),
+    )?;
+    assert!(loaded.check(
+        &doc("direct_doc"),
+        &Relation("can_view".to_string()),
+        &User::UserId("alice".to_string()),
+    )?);
+
+    let unsupported = ZanzibarService::load_snapshot(
+        &path,
+        snapshot_external_load_options(SnapshotValidationMode::Full),
+    );
+    remove_file(&path);
+    assert!(matches!(
+        unsupported,
+        Err(SnapshotIoError::UnsupportedOption { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn test_should_reject_trusted_fast_load_with_latency_profile()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bytes = snapshot_bytes()?;
+    let path = temp_snapshot_path("trusted_latency");
+    fs::write(&path, bytes)?;
+
+    let result = ZanzibarService::load_snapshot(
+        &path,
+        snapshot_load_options(
+            SnapshotLoadProfile::Latency,
+            SnapshotValidationMode::TrustedFastLoad,
+        ),
+    );
+    remove_file(&path);
+    assert!(matches!(
+        result,
+        Err(SnapshotIoError::UnsupportedOption { .. })
+    ));
+    Ok(())
+}
+
+#[test]
 fn test_should_reject_missing_required_section_count() -> Result<(), Box<dyn std::error::Error>> {
     let mut bytes = snapshot_bytes()?;
-    set_u32(&mut bytes, SECTION_COUNT_OFFSET, 8)?;
+    set_u32(&mut bytes, SECTION_COUNT_OFFSET, 10)?;
 
     assert_corrupt_rejected("missing_required_section_count", &bytes)?;
+    Ok(())
+}
+
+#[test]
+fn test_should_reject_malformed_symbol_lookup() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = snapshot_bytes()?;
+    let hashes = section_range(&bytes, SECTION_KIND_SYMBOL_HASHES)?;
+    let lookup = section_range(&bytes, SECTION_KIND_SYMBOL_LOOKUP)?;
+    assert!(lookup.len() >= DISK_SYMBOL_LOOKUP_LEN * 2);
+
+    let mut unsorted = bytes.clone();
+    let first_id = read_u32(&unsorted, lookup.start)?;
+    let second_id = read_u32(&unsorted, lookup.start + DISK_SYMBOL_LOOKUP_LEN)?;
+    set_u32(&mut unsorted, lookup.start, second_id)?;
+    set_u32(
+        &mut unsorted,
+        lookup.start + DISK_SYMBOL_LOOKUP_LEN,
+        first_id,
+    )?;
+    rewrite_checksum(&mut unsorted)?;
+    assert_corrupt_rejected_with_options(
+        "unsorted_symbol_lookup",
+        &unsorted,
+        snapshot_load_options(
+            SnapshotLoadProfile::FastLoad,
+            SnapshotValidationMode::TrustedFastLoad,
+        ),
+    )?;
+
+    let mut bad_hash = bytes.clone();
+    let original_hash = read_u64(&bad_hash, hashes.start)?;
+    set_u64(&mut bad_hash, hashes.start, original_hash.wrapping_add(1))?;
+    rewrite_checksum(&mut bad_hash)?;
+    assert_corrupt_rejected("bad_symbol_lookup_hash", &bad_hash)?;
+
+    let mut duplicate_id = bytes;
+    let first_id = read_u32(&duplicate_id, lookup.start)?;
+    set_u32(
+        &mut duplicate_id,
+        lookup.start + DISK_SYMBOL_LOOKUP_LEN,
+        first_id,
+    )?;
+    rewrite_checksum(&mut duplicate_id)?;
+    assert_corrupt_rejected("duplicate_symbol_lookup_id", &duplicate_id)?;
     Ok(())
 }
 
@@ -371,14 +486,15 @@ fn round_trip_random_direct_relationships(
 
     let path = temp_snapshot_path("proptest");
     service.save_snapshot(&path, SnapshotSaveOptions::default())?;
-    for profile in [SnapshotLoadProfile::FastLoad, SnapshotLoadProfile::Latency] {
-        let loaded = ZanzibarService::load_snapshot(
-            &path,
-            SnapshotLoadOptions {
-                profile,
-                max_file_bytes: non_zero_u64(16 * 1024 * 1024),
-            },
-        )?;
+    for options in [
+        snapshot_load_options(SnapshotLoadProfile::FastLoad, SnapshotValidationMode::Full),
+        snapshot_load_options(SnapshotLoadProfile::Latency, SnapshotValidationMode::Full),
+        snapshot_load_options(
+            SnapshotLoadProfile::FastLoad,
+            SnapshotValidationMode::TrustedFastLoad,
+        ),
+    ] {
+        let loaded = ZanzibarService::load_snapshot(&path, options)?;
         assert_random_direct_equivalence(&service, &loaded, &unique_pairs)?;
     }
     remove_file(&path);
@@ -475,15 +591,44 @@ fn tiny_service() -> Result<ZanzibarService, Box<dyn std::error::Error>> {
 }
 
 fn assert_corrupt_rejected(name: &str, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    assert_corrupt_rejected_with_options(name, bytes, SnapshotLoadOptions::default())
+}
+
+fn assert_corrupt_rejected_with_options(
+    name: &str,
+    bytes: &[u8],
+    options: SnapshotLoadOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_snapshot_path(name);
     fs::write(&path, bytes)?;
-    let result = ZanzibarService::load_snapshot(&path, SnapshotLoadOptions::default());
+    let result = ZanzibarService::load_snapshot(&path, options);
     remove_file(&path);
     assert!(matches!(
         result,
         Err(SnapshotIoError::Format { .. } | SnapshotIoError::Domain { .. })
     ));
     Ok(())
+}
+
+fn snapshot_load_options(
+    profile: SnapshotLoadProfile,
+    validation: SnapshotValidationMode,
+) -> SnapshotLoadOptions {
+    SnapshotLoadOptions {
+        profile,
+        validation,
+        integrity: SnapshotIntegrityMode::Checksum,
+        max_file_bytes: non_zero_u64(16 * 1024 * 1024),
+    }
+}
+
+fn snapshot_external_load_options(validation: SnapshotValidationMode) -> SnapshotLoadOptions {
+    SnapshotLoadOptions {
+        profile: SnapshotLoadProfile::FastLoad,
+        validation,
+        integrity: SnapshotIntegrityMode::External,
+        max_file_bytes: non_zero_u64(16 * 1024 * 1024),
+    }
 }
 
 fn schema() -> &'static str {

@@ -25,25 +25,25 @@ use crate::{
     schema::{self, CompiledSchema},
 };
 
-const MAGIC: [u8; 8] = *b"SZSNAP\0\x01";
-const FORMAT_VERSION: u16 = 1;
+const MAGIC: [u8; 8] = *b"SZSNAP\0\x02";
+const FORMAT_VERSION: u16 = 2;
 const HEADER_LEN: usize = 76;
 const HEADER_LEN_U32: u32 = 76;
 const DIRECTORY_ENTRY_LEN: usize = 28;
 const FOOTER_LEN: usize = 32;
-const REQUIRED_SECTION_COUNT: usize = 9;
-const REQUIRED_SECTION_COUNT_U32: u32 = 9;
+const REQUIRED_SECTION_COUNT: usize = 11;
+const REQUIRED_SECTION_COUNT_U32: u32 = 11;
 const MAX_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Options used when saving a compact snapshot artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotSaveOptions {
-    /// Snapshot compression mode. Version 1 supports only uncompressed snapshots.
+    /// Snapshot compression mode. Version 2 supports only uncompressed snapshots.
     pub compression: SnapshotCompression,
     /// Whether serialized lookup indexes are included.
     ///
-    /// Version 1 requires indexes because fast loading depends on stable sorted index arrays.
+    /// Version 2 requires indexes because fast loading depends on stable sorted index arrays.
     pub include_indexes: bool,
 }
 
@@ -68,6 +68,10 @@ pub enum SnapshotCompression {
 pub struct SnapshotLoadOptions {
     /// Runtime index profile to construct from serialized sorted arrays.
     pub profile: SnapshotLoadProfile,
+    /// Validation mode to apply while loading the artifact.
+    pub validation: SnapshotValidationMode,
+    /// Integrity proof expected before publishing the loaded snapshot.
+    pub integrity: SnapshotIntegrityMode,
     /// Maximum accepted file size in bytes.
     pub max_file_bytes: NonZeroU64,
 }
@@ -76,6 +80,8 @@ impl Default for SnapshotLoadOptions {
     fn default() -> Self {
         Self {
             profile: SnapshotLoadProfile::FastLoad,
+            validation: SnapshotValidationMode::Full,
+            integrity: SnapshotIntegrityMode::Checksum,
             max_file_bytes: non_zero_u64(DEFAULT_MAX_FILE_BYTES),
         }
     }
@@ -88,6 +94,24 @@ pub enum SnapshotLoadProfile {
     FastLoad,
     /// Rebuild hash-backed in-memory indexes after validation.
     Latency,
+}
+
+/// Validation boundary to apply when loading a compact snapshot artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotValidationMode {
+    /// Treat the file as hostile input and revalidate all semantic row/index invariants.
+    Full,
+    /// Trust a build-pipeline validated artifact and perform only structural checks at startup.
+    TrustedFastLoad,
+}
+
+/// Integrity proof mode to apply to the snapshot envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotIntegrityMode {
+    /// Verify the file footer checksum during load.
+    Checksum,
+    /// Assume the artifact bytes were verified by an external content-address or signature layer.
+    External,
 }
 
 /// Errors returned by compact snapshot save/load operations.
@@ -184,7 +208,9 @@ pub(crate) enum SectionKind {
     IndexKeys = 6,
     PostingRanges = 7,
     PostingRowIds = 8,
-    Footer = 9,
+    SymbolHashes = 9,
+    SymbolLookup = 10,
+    Footer = 11,
 }
 
 impl SectionKind {
@@ -198,7 +224,9 @@ impl SectionKind {
             6 => Ok(Self::IndexKeys),
             7 => Ok(Self::PostingRanges),
             8 => Ok(Self::PostingRowIds),
-            9 => Ok(Self::Footer),
+            9 => Ok(Self::SymbolHashes),
+            10 => Ok(Self::SymbolLookup),
+            11 => Ok(Self::Footer),
             _ => Err(SnapshotIoError::Format {
                 reason: "unknown snapshot section kind",
             }),
@@ -246,7 +274,10 @@ pub(crate) struct SnapshotReader<'a> {
 
 impl<'a> SnapshotReader<'a> {
     /// Parses and validates the outer snapshot envelope.
-    pub(crate) fn parse(bytes: &'a [u8]) -> Result<Self, SnapshotIoError> {
+    pub(crate) fn parse(
+        bytes: &'a [u8],
+        integrity: SnapshotIntegrityMode,
+    ) -> Result<Self, SnapshotIoError> {
         let header = parse_header(bytes)?;
         let directory_start = checked_usize_from_u32(HEADER_LEN_U32)?;
         let section_count = parse_section_count(bytes)?;
@@ -307,7 +338,7 @@ impl<'a> SnapshotReader<'a> {
 
         validate_required_sections(&sections)?;
         validate_non_overlapping_sections(&mut entries)?;
-        validate_footer(bytes, &sections)?;
+        validate_footer(bytes, &sections, integrity)?;
         Ok(Self { header, sections })
     }
 
@@ -419,8 +450,22 @@ pub(crate) fn load_snapshot_file(
     path: &Path,
     options: SnapshotLoadOptions,
 ) -> Result<LoadedSnapshot, SnapshotIoError> {
+    if options.validation == SnapshotValidationMode::TrustedFastLoad
+        && options.profile != SnapshotLoadProfile::FastLoad
+    {
+        return Err(SnapshotIoError::UnsupportedOption {
+            option: "trusted validation with latency profile",
+        });
+    }
+    if options.integrity == SnapshotIntegrityMode::External
+        && options.validation != SnapshotValidationMode::TrustedFastLoad
+    {
+        return Err(SnapshotIoError::UnsupportedOption {
+            option: "external integrity without trusted validation",
+        });
+    }
     let bytes = read_capped_file(path, options.max_file_bytes)?;
-    let reader = SnapshotReader::parse(&bytes)?;
+    let reader = SnapshotReader::parse(&bytes, options.integrity)?;
     let schema_section = reader.section(SectionKind::Schema)?;
     if schema_section.bytes().len() > MAX_SCHEMA_BYTES {
         return Err(SnapshotIoError::LimitExceeded {
@@ -444,6 +489,7 @@ pub(crate) fn load_snapshot_file(
     let relationships = Arc::new(IndexedRelationshipStore::decode_snapshot_sections(
         &reader,
         options.profile,
+        options.validation,
     )?);
     let configs = configs_vec
         .into_iter()
@@ -666,6 +712,8 @@ fn validate_required_sections(
         SectionKind::IndexKeys,
         SectionKind::PostingRanges,
         SectionKind::PostingRowIds,
+        SectionKind::SymbolHashes,
+        SectionKind::SymbolLookup,
         SectionKind::Footer,
     ] {
         if !sections.contains_key(&kind) {
@@ -698,6 +746,7 @@ fn validate_non_overlapping_sections(
 fn validate_footer(
     bytes: &[u8],
     sections: &HashMap<SectionKind, SnapshotSection<'_>>,
+    integrity: SnapshotIntegrityMode,
 ) -> Result<(), SnapshotIoError> {
     let footer = sections
         .get(&SectionKind::Footer)
@@ -723,6 +772,9 @@ fn validate_footer(
         return Err(SnapshotIoError::Format {
             reason: "footer must be the final section",
         });
+    }
+    if integrity == SnapshotIntegrityMode::External {
+        return Ok(());
     }
     let digest = blake3::hash(bytes.get(..footer_start).ok_or(SnapshotIoError::Format {
         reason: "footer offset is invalid",

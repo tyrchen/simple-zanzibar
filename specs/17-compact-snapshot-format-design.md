@@ -99,8 +99,8 @@ Header fields:
 
 | Field | Type | Purpose |
 | --- | --- | --- |
-| magic | `[u8; 8]` | `SZSNAP\0\1` for quick file identification. |
-| format_version | `u16` | Initial version is `1`. Unsupported versions are rejected. |
+| magic | `[u8; 8]` | `SZSNAP\0\2` for quick file identification. |
+| format_version | `u16` | Current pre-release version is `2`. Unsupported versions are rejected. |
 | flags | `u16` | Compression/checksum/index-mode flags. Initial writer sets `0`. |
 | header_len | `u32` | Allows extending the header. |
 | section_count | `u32` | Number of directory entries. |
@@ -132,7 +132,9 @@ Required section ids:
 | 6 | `index_keys` | yes | Fixed-width compact keys grouped by index kind. |
 | 7 | `posting_ranges` | yes | `start: u32, len: u32` ranges into `posting_row_ids`. |
 | 8 | `posting_row_ids` | yes | Contiguous row ids for non-singleton postings. |
-| 9 | `footer` | yes | Checksum and optional writer metadata. |
+| 9 | `symbol_hashes` | yes | Version 2 `u64` hashes in symbol-id order. Full validation checks these against `symbol_bytes`. |
+| 10 | `symbol_lookup` | yes | Version 2 `u32 symbol_id` permutation sorted by `(symbol_hashes[id], symbol_id)` for trusted fast-load. |
+| 11 | `footer` | yes | Checksum and optional writer metadata. |
 
 Unknown required sections are rejected. Unknown optional sections are skipped only when a future section flag explicitly marks them optional.
 
@@ -164,7 +166,8 @@ Load rules:
 
 - `start + len` must be in bounds of `symbol_bytes`.
 - Every symbol byte range must be valid UTF-8.
-- Identifier domain validation is skipped only if the writer records a trusted `validated` flag and the checksum passes. The first implementation should revalidate in debug/test builds and may revalidate in release until benchmarks show it matters.
+- Version 2 adds `symbol_hashes` and `symbol_lookup` sections. Full validation computes hashes while scanning the symbol table and checks `symbol_hashes`; trusted fast-load adopts `symbol_hashes + symbol_lookup` directly as described in [18](./18-trusted-fast-snapshot-load-design.md).
+- Identifier domain validation is performed by the full loader and skipped only by explicit `SnapshotValidationMode::TrustedFastLoad`.
 - Duplicate symbols are a writer bug and must be rejected unless the reader can prove row semantics remain equivalent. The first reader rejects duplicates to keep invariants simple.
 
 ### 6.3 Relationship Rows
@@ -259,12 +262,24 @@ pub enum SnapshotCompression {
 
 pub struct SnapshotLoadOptions {
     pub profile: SnapshotLoadProfile,
+    pub validation: SnapshotValidationMode,
+    pub integrity: SnapshotIntegrityMode,
     pub max_file_bytes: NonZeroU64,
 }
 
 pub enum SnapshotLoadProfile {
     FastLoad,
     Latency,
+}
+
+pub enum SnapshotValidationMode {
+    Full,
+    TrustedFastLoad,
+}
+
+pub enum SnapshotIntegrityMode {
+    Checksum,
+    External,
 }
 
 impl ZanzibarService {
@@ -317,7 +332,7 @@ Validation requirements:
 - Reject files larger than `SnapshotLoadOptions::max_file_bytes`.
 - Reject bad magic, unsupported version, duplicate required sections, overlapping sections, out-of-bounds sections, malformed UTF-8, invalid symbol ids, invalid row ids, unsorted keys, and posting ranges outside `posting_row_ids`.
 - Reject arithmetic overflow with checked arithmetic.
-- Compute a BLAKE3 checksum over all bytes except the footer checksum field. The footer stores the expected digest.
+- By default, compute a BLAKE3 checksum over all bytes except the footer checksum field. The footer stores the expected digest. `SnapshotIntegrityMode::External` may skip this rehash only with `SnapshotValidationMode::TrustedFastLoad`, when an external content-address or signature layer has already verified the exact bytes.
 - Do not log full relationship identifiers by default.
 - No `unsafe`, no unchecked indexing, no `unwrap()`/`expect()` in production loader code.
 

@@ -89,6 +89,7 @@ the benchmark matrix expands from steady-state query latency to cold-load behavi
 | direct check after load | 1M org rules | Criterion upper estimate <= 10 us |
 | inherited check after load | 1M org rules | Criterion upper estimate <= 25 us |
 | lookup resources after load | 1M org rules | Criterion upper estimate <= 10 ms |
+| trusted fast-load compact snapshot (`TrustedFastLoad + External`) | 1M org rules | Criterion upper estimate <= 200 ms |
 
 The current 1M `org_authorization/1m_rules/check_direct_group_viewer` wall time of roughly
 2.32 s is not a load benchmark. It includes process startup, schema parse/compile, generated
@@ -114,6 +115,18 @@ relationship generation, schema authoring, compact-store construction, and snaps
 | `snapshot_loaded_check_inherited/1m` | 1M org rules | 7.09 us | passes <= 25 us |
 | `snapshot_loaded_lookup_resources/1m` | 1M org rules | 3.69 ms | passes <= 10 ms |
 
+M8 revised the pre-release v2 file layout from interleaved `(hash, symbol_id)` lookup rows to
+separate `symbol_hashes` and sorted `symbol_lookup` id permutation sections. This recovers the
+default full-load path while giving trusted load a compact query table:
+
+| Operation | Dataset | Measurement | Target status |
+| --- | --- | ---: | --- |
+| `snapshot_load_compact/1m` full mode | 1M org rules | `[575.82 ms, 580.38 ms, 585.11 ms]` | passes <= 700 ms; no meaningful regression versus M7 |
+| `snapshot_file_size/1m` | 1M org rules | 124,422,241 bytes | recorded v2 size |
+| `snapshot_loaded_check_direct/1m` | 1M org rules | `[2.9493 us, 2.9625 us, 2.9746 us]` | passes <= 10 us |
+| `snapshot_loaded_check_inherited/1m` | 1M org rules | `[7.0179 us, 7.0895 us, 7.1458 us]` | passes <= 25 us |
+| `snapshot_loaded_lookup_resources/1m` | 1M org rules | `[3.4836 ms, 3.7007 ms, 3.8729 ms]` | passes <= 10 ms |
+
 The initial 500 ms fast-load target was optimistic for the first safe checked loader because the
 loader validates every serialized index posting against compact rows and rejects incomplete or
 mis-keyed indexes. The M7 gate is recalibrated to a Criterion upper estimate <= 700 ms for the
@@ -121,6 +134,25 @@ first version. A future
 optimization pass can attempt to recover the original <= 500 ms target by making index validation
 single-pass over grouped row ids or by adding a trusted-writer validation mode, but the default
 untrusted-file loader keeps full validation.
+
+## 3.4 Trusted Fast-Load Target
+
+[18-trusted-fast-snapshot-load-design.md](./18-trusted-fast-snapshot-load-design.md) adds an
+explicit trusted load mode for build-pipeline artifacts. Its gate is
+`snapshot_load_trusted_fast/1m` Criterion upper estimate <= 200 ms while the default full loader
+keeps the <= 700 ms gate. The benchmark uses `SnapshotValidationMode::TrustedFastLoad` with
+`SnapshotIntegrityMode::External`; deployments choosing `Checksum` keep an in-process BLAKE3 rehash
+and are expected to land just above the hard 200 ms gate. Trusted loaded direct/inherited/lookup
+benchmarks must still satisfy the loaded-query budgets in § 3.2.
+
+2026-05-23 evidence:
+
+| Operation | Dataset | Measurement | Target status |
+| --- | --- | ---: | --- |
+| `snapshot_load_trusted_fast/1m` | 1M org rules | `[151.06 ms, 152.23 ms, 153.35 ms]` | passes <= 200 ms |
+| `snapshot_trusted_loaded_check_direct/1m` | 1M org rules | `[3.0610 us, 3.1232 us, 3.1971 us]` | passes <= 10 us |
+| `snapshot_trusted_loaded_check_inherited/1m` | 1M org rules | `[7.2171 us, 7.2732 us, 7.3198 us]` | passes <= 25 us |
+| `snapshot_trusted_loaded_lookup_resources/1m` | 1M org rules | `[3.8150 ms, 3.9764 ms, 4.1401 ms]` | passes <= 10 ms |
 
 ## 4. Design Constraints
 

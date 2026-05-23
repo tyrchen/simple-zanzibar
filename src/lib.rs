@@ -88,8 +88,8 @@ use arc_swap::ArcSwapOption;
 pub use crate::{
     api::{EngineError, ZanzibarEngine, ZanzibarEngineBuilder},
     snapshot::{
-        SnapshotCompression, SnapshotIoError, SnapshotLoadOptions, SnapshotLoadProfile,
-        SnapshotSaveOptions,
+        SnapshotCompression, SnapshotIntegrityMode, SnapshotIoError, SnapshotLoadOptions,
+        SnapshotLoadProfile, SnapshotSaveOptions, SnapshotValidationMode,
     },
 };
 use crate::{
