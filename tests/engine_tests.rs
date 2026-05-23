@@ -5,13 +5,15 @@ use std::{
 };
 
 use simple_zanzibar::{
-    ZanzibarEngine,
+    EngineError, ZanzibarEngine,
     domain::Relationship,
     model::{
         CheckRequest, ExpandRequest, ExpandedUserset, LookupResourcesRequest,
         LookupSubjectsRequest, Object, Relation, User,
     },
-    relationship::{Precondition, RelationshipFilter, RelationshipMutation, SubjectFilter},
+    relationship::{
+        Precondition, RelationshipFilter, RelationshipMutation, StoreError, SubjectFilter,
+    },
     revision::Consistency,
     schema::SchemaSource,
 };
@@ -96,6 +98,35 @@ fn test_should_use_public_engine_request_response_api() -> Result<(), Box<dyn st
             .subjects,
         vec![alice],
     );
+    Ok(())
+}
+
+#[test]
+fn test_should_persist_direct_non_user_subject_relationships()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.apply_schema(SchemaSource {
+        name: Some("doc-schema"),
+        text: DOC_SCHEMA,
+    })?;
+    let relationship: Relationship = "doc:readme#viewer@group:eng".parse()?;
+
+    engine.write_relationships([RelationshipMutation::Create(relationship.clone())])?;
+    let duplicate =
+        engine.write_relationships([RelationshipMutation::Create(relationship.clone())]);
+
+    assert!(matches!(
+        duplicate,
+        Err(EngineError::Store(
+            StoreError::RelationshipAlreadyExists { .. }
+        ))
+    ));
+
+    engine.apply_schema(SchemaSource {
+        name: Some("doc-schema"),
+        text: DOC_SCHEMA,
+    })?;
+    engine.write_relationships([RelationshipMutation::Delete(relationship)])?;
     Ok(())
 }
 

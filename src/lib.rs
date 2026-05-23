@@ -201,7 +201,7 @@ impl ZanzibarService {
             next_configs.insert(config.name.clone(), config);
         }
         let compiled_schema = schema::compile_legacy_configs(next_configs.values().cloned())?;
-        let next_relationships = self.rebuild_relationship_store(&compiled_schema)?;
+        let next_relationships = self.relationship_store_for_schema(&compiled_schema)?;
         self.publish_snapshot(next_configs, compiled_schema, next_relationships)
     }
 
@@ -226,7 +226,7 @@ impl ZanzibarService {
         let mut next_configs = self.configs.clone();
         next_configs.insert(config.name.clone(), config);
         let compiled_schema = schema::compile_legacy_configs(next_configs.values().cloned())?;
-        let next_relationships = self.rebuild_relationship_store(&compiled_schema)?;
+        let next_relationships = self.relationship_store_for_schema(&compiled_schema)?;
         self.publish_snapshot(next_configs, compiled_schema, next_relationships)
     }
 
@@ -317,8 +317,8 @@ impl ZanzibarService {
         let tuples = candidate
             .rows()
             .iter()
-            .map(relation_tuple_from_relationship)
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter_map(legacy_relation_tuple_from_relationship)
+            .collect::<Vec<_>>();
 
         self.store.replace_all(tuples);
         self.publish_snapshot(self.configs.clone(), schema, candidate)
@@ -507,7 +507,30 @@ impl ZanzibarService {
         eval::lookup_subjects_with_snapshot(&snapshot, request, self.evaluation_limits)
     }
 
-    fn rebuild_relationship_store(
+    fn relationship_store_for_schema(
+        &self,
+        schema: &CompiledSchema,
+    ) -> Result<IndexedRelationshipStore, ZanzibarError> {
+        if self.schema.is_some() {
+            return self.revalidate_relationship_store(schema);
+        }
+        self.rebuild_relationship_store_from_legacy_tuples(schema)
+    }
+
+    fn revalidate_relationship_store(
+        &self,
+        schema: &CompiledSchema,
+    ) -> Result<IndexedRelationshipStore, ZanzibarError> {
+        let mut relationships = IndexedRelationshipStore::default();
+        for relationship in self.relationships.rows() {
+            schema.validate_relationship(relationship)?;
+            relationships
+                .apply_mutations([RelationshipMutation::Touch(relationship.clone())], [])?;
+        }
+        Ok(relationships)
+    }
+
+    fn rebuild_relationship_store_from_legacy_tuples(
         &self,
         schema: &CompiledSchema,
     ) -> Result<IndexedRelationshipStore, ZanzibarError> {
@@ -644,28 +667,23 @@ fn validate_subject_filter(
     Ok(())
 }
 
-fn relation_tuple_from_relationship(
+fn legacy_relation_tuple_from_relationship(
     relationship: &domain::Relationship,
-) -> Result<RelationTuple, ZanzibarError> {
+) -> Option<RelationTuple> {
     let object = legacy_object_from_domain(relationship.resource());
     let relation = Relation(relationship.relation().as_str().to_string());
     let user = match relationship.subject() {
         domain::SubjectRef::Object(subject) if subject.object_type().as_str() == "user" => {
             User::UserId(subject.object_id().as_str().to_string())
         }
-        domain::SubjectRef::Object(subject) => {
-            return Err(ZanzibarError::StorageError(format!(
-                "legacy tuple store cannot represent direct subject type '{}'",
-                subject.object_type()
-            )));
-        }
+        domain::SubjectRef::Object(_) => return None,
         domain::SubjectRef::Userset { object, relation } => User::Userset(
             legacy_object_from_domain(object),
             Relation(relation.as_str().to_string()),
         ),
     };
 
-    Ok(RelationTuple {
+    Some(RelationTuple {
         object,
         relation,
         user,
