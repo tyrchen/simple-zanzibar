@@ -23,6 +23,7 @@ Read the v2 specs in numeric order. The order is also the implementation depende
 | [15-public-api-design.md](./15-public-api-design.md) | Design | Crate-facing API, compatibility facade, error mapping, examples. |
 | [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md) | Design | Compact row storage, identifier interning, `Vec<RowId>` postings, snapshot ownership cleanup, memory targets. |
 | [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md) | Design | Versioned compact snapshot artifact for fast load, bounded load-time RSS, and practical disk size. |
+| [18-trusted-fast-snapshot-load-design.md](./18-trusted-fast-snapshot-load-design.md) | Design | Trusted `.szsnap` v2 load mode, serialized symbol hashes/lookups, and <= 200 ms 1M-rule cold-load path. |
 | [60-crates-features-design.md](./60-crates-features-design.md) | Design | Crate layout, feature flags, dependency policy, current crate-version survey. |
 | [70-security-design.md](./70-security-design.md) | Design | Threat model, validation limits, panic policy, unsafe policy, logging/data exposure. |
 | [71-performance-budgets-design.md](./71-performance-budgets-design.md) | Design | Performance targets, benchmark matrix, profiling rules, CI gates. |
@@ -80,6 +81,12 @@ Read the v2 specs in numeric order. The order is also the implementation depende
                                             +----------------------+
                                             | 17 Snapshot Format   |
                                             | fast cold load       |
+                                            +----------+-----------+
+                                                       |
+                                                       v
+                                            +----------------------+
+                                            | 18 Trusted Fast Load |
+                                            | <=200ms cold start   |
                                             +----------+-----------+
                                                        |
                 +------------------------------+-------+------------------------------+

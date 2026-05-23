@@ -120,6 +120,24 @@ Exit criteria:
 - 1M load-time max RSS <= 1.25x loaded steady-state RSS
 - loaded 1M direct, inherited, and lookup latency budgets in [71](./71-performance-budgets-design.md) pass
 
+### M8 - Trusted 200 ms Snapshot Load
+
+User-visible outcome: applications that ship build-pipeline validated `.szsnap` artifacts can opt
+into a trusted fast-load mode that targets sub-200 ms 1M-rule cold starts.
+
+Specs touched: [17](./17-compact-snapshot-format-design.md), [18](./18-trusted-fast-snapshot-load-design.md), [70](./70-security-design.md), [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- `.szsnap` v2 includes stable serialized symbol hash and lookup permutation sections
+- `SnapshotValidationMode::Full` remains the default and keeps corrupt semantic-file rejection
+- `SnapshotValidationMode::TrustedFastLoad` is explicit in public load options and documented as a build-pipeline trust boundary
+- `SnapshotIntegrityMode::External` is explicit, restricted to trusted fast-load, and documented as requiring a prior content-address or signature proof
+- trusted loaded snapshots produce equivalent check, expand, lookup, and exact consistency behavior for valid artifacts
+- subsequent writes after trusted load preserve create/touch/delete uniqueness semantics
+- `snapshot_load_trusted_fast/1m` Criterion upper estimate <= 200 ms with trusted fast-load and external integrity
+- trusted loaded direct, inherited, and lookup latency budgets in [71](./71-performance-budgets-design.md) pass
+
 ## 3. Calendar Shape
 
 One experienced Rust developer:
@@ -132,12 +150,15 @@ One experienced Rust developer:
 - M5: 1 week
 - M6: 2 to 3 weeks
 - M7: 2 to 3 weeks
+- M8: 1 week
 
 Total through M5: 8.5 to 11 weeks, assuming no persistent backend and no caveats.
 
 Total through M6: 10.5 to 14 weeks.
 
 Total through M7: 12.5 to 17 weeks.
+
+Total through M8: 13.5 to 18 weeks.
 
 ## 4. Cross-References
 

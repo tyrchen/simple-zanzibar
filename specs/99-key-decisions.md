@@ -122,3 +122,38 @@ Each decision is load-bearing. Supersede with a new decision entry rather than s
 - Why: stable sectioned bytes can be loaded with checked parsing and minimal per-relationship allocation, while avoiding unstable Rust collection internals and preserving future format evolution. The first implementation prioritizes load speed and bounded load-time RSS; compression and mmap are deferred until benchmark evidence justifies their complexity and safety tradeoffs.
 - Pinned by: [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Date: 2026-05-23
+
+## D14 - Split full validation from trusted fast-load
+
+- Context: Profiling the first `.szsnap` loader showed the 1M-rule load path spends roughly 313 ms
+  in row semantic validation, 113 ms in index semantic validation, and 85 ms rebuilding symbol
+  lookup maps. A controlled experiment that kept checksum and structural parsing but trusted
+  row/index semantics measured about 188 ms, proving the 200 ms goal is viable only when repeated
+  semantic proof moves out of process startup.
+- Alternatives considered: weaken the default loader; unconditionally skip checksum; add mmap; keep
+  one loader and accept ~600 ms; add an explicit trusted mode with serialized lookup tables.
+- Decision: keep full validation as the default for hostile files and add
+  `SnapshotValidationMode::TrustedFastLoad` for build-pipeline validated artifacts. `.szsnap` v2
+  includes serialized symbol hash and lookup permutation sections so trusted mode can query without
+  rebuilding Rust `HashMap` internals.
+- Why: this matches the rsync-like principle of doing expensive proof once and reusing a stable
+  artifact identity, while keeping the runtime trust boundary explicit. Checksum remains the safe
+  default; external byte identity is a separate explicit choice.
+- Pinned by: [18-trusted-fast-snapshot-load-design.md](./18-trusted-fast-snapshot-load-design.md), [70-security-design.md](./70-security-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
+- Date: 2026-05-23
+
+## D15 - Use external artifact integrity for the hard 200 ms load path
+
+- Context: After moving symbol lookup to stable v2 sections, trusted fast-load with checksum stayed
+  close to but above the hard 200 ms gate because BLAKE3 still rehashed the whole artifact at
+  startup. The measured `TrustedFastLoad + External` path reached `[151.06 ms, 152.23 ms, 153.35 ms]`.
+- Alternatives considered: weaken full validation; drop checksum for every trusted load; accept
+  ~205 ms; require mmap; add a separate integrity mode restricted to trusted artifacts.
+- Decision: add `SnapshotIntegrityMode::{Checksum, External}`. `Checksum` remains the default.
+  `External` is accepted only with `SnapshotValidationMode::TrustedFastLoad` and means byte identity
+  was already proven by a content-address, signed manifest, release checksum, or equivalent layer.
+- Why: the application should not repeat an O(file-size) proof if deployment has already pinned the
+  exact artifact. Keeping this as an explicit option preserves the untrusted-file default and makes
+  the supply-chain tradeoff visible in code review.
+- Pinned by: [18-trusted-fast-snapshot-load-design.md](./18-trusted-fast-snapshot-load-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md), [72-testing-verification-plan.md](./72-testing-verification-plan.md)
+- Date: 2026-05-23

@@ -51,7 +51,7 @@ This plan defines how each phase proves correctness, safety, compatibility, and 
 | Security | no panics on malformed external input, no unchecked indexing in boundary modules. |
 | Performance | criterion benchmarks for budgets in [71](./71-performance-budgets-design.md). |
 | Memory | peak RSS checks for compact relationship store budgets in [16](./16-compact-relationship-store-design.md). |
-| Snapshot artifact | save/load equivalence, corrupt file rejection, file size, load time, and load-time RSS for [17](./17-compact-snapshot-format-design.md). |
+| Snapshot artifact | save/load equivalence, corrupt file rejection, file size, load time, and load-time RSS for [17](./17-compact-snapshot-format-design.md) and trusted fast-load coverage for [18](./18-trusted-fast-snapshot-load-design.md). |
 
 ## 4. Command Gates
 
@@ -128,6 +128,10 @@ Required benchmark filters:
 snapshot_build_from_relationships/1m
 snapshot_save_uncompressed/1m
 snapshot_load_compact/1m
+snapshot_load_trusted_fast/1m
+snapshot_trusted_loaded_check_direct/1m
+snapshot_trusted_loaded_check_inherited/1m
+snapshot_trusted_loaded_lookup_resources/1m
 snapshot_load_peak_rss/1m
 snapshot_file_size/1m
 ```
@@ -142,8 +146,13 @@ Required corrupt-input tests:
 - invalid symbol id or row id
 - unsorted index keys
 - posting range outside the posting row id section
+- malformed symbol lookup section for v2 artifacts
+- external integrity accepted only with explicit trusted fast-load and never as the default
 
-Loaded snapshots must pass check, expand, lookup, and exact-consistency equivalence tests against a snapshot built from the same relationship set.
+Loaded snapshots must pass check, expand, lookup, and exact-consistency equivalence tests against a
+snapshot built from the same relationship set. Trusted fast-load snapshots must additionally prove
+that subsequent create/touch/delete writes preserve relationship uniqueness semantics after the lazy
+uniqueness index is built.
 
 ## 9. Cross-References
 
