@@ -95,3 +95,21 @@ Each decision is load-bearing. Supersede with a new decision entry rather than s
 - Why: the benchmark makes the Phase 2 performance delta observable and prevents the project from inventing targets without measurement.
 - Pinned by: [71-performance-budgets-design.md](./71-performance-budgets-design.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Date: 2026-05-23
+
+## D11 - Compact relationship storage before advanced query planning
+
+- Context: The `org_authorization` benchmark showed direct checks remain around 2-7 us from 1k to 1M rules, but 1M rules consume roughly 3.12 GiB max RSS. The limiting factor is memory, not check latency.
+- Alternatives considered: add a query planner first; add caching; use compressed roaring bitmaps immediately; compact the existing indexed store.
+- Decision: compact the existing store first by removing duplicate ownership, replacing `BTreeSet<usize>` postings with `Vec<RowId>`, and interning identifiers into fixed-width rows.
+- Why: the evaluator and indexes already provide the right asymptotic read path. Query planning and caching would not remove cloned strings, cloned snapshots, legacy tuple mirrors, or pointer-heavy posting lists.
+- Pinned by: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
+- Date: 2026-05-23
+
+## D12 - Use append-only `Vec<RowId>` postings with tombstones before compressed bitmaps
+
+- Context: Current indexes use `BTreeSet<usize>` postings. This gives uniqueness and deletion support but allocates heavily and has poor locality. Store-level uniqueness already prevents duplicate live rows.
+- Alternatives considered: keep `BTreeSet`; switch directly to `roaring = 0.11.4`; use append-only `Vec<RowId>` plus tombstones and periodic compaction.
+- Decision: use `Vec<RowId>` postings, `HashMap<RelationshipRow, RowId>` uniqueness, a compact live-row bitset, and write-path compaction for tombstone-heavy workloads.
+- Why: direct check and lookup need fast iteration over candidate rows, not general set algebra over posting lists. Contiguous vectors are simpler, smaller, and likely faster. Roaring remains a future option if measured sparse-posting workloads need it.
+- Pinned by: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md), [72-testing-verification-plan.md](./72-testing-verification-plan.md)
+- Date: 2026-05-23

@@ -50,6 +50,7 @@ This plan defines how each phase proves correctness, safety, compatibility, and 
 | Compatibility | existing tests pass through `ZanzibarService` facade. |
 | Security | no panics on malformed external input, no unchecked indexing in boundary modules. |
 | Performance | criterion benchmarks for budgets in [71](./71-performance-budgets-design.md). |
+| Memory | peak RSS checks for compact relationship store budgets in [16](./16-compact-relationship-store-design.md). |
 
 ## 4. Command Gates
 
@@ -90,8 +91,33 @@ Property tests cover:
 - set algebra laws for allowed/denied membership
 - canonical schema hash stability under source definition order changes
 - exact snapshot isolation across random write/read interleavings
+- compact store query equivalence against a reference `HashSet<Relationship>` after random create/touch/delete batches
+- tombstone compaction preserves all live relationships and removes deleted relationships
 
-## 7. Cross-References
+## 7. Memory Verification
+
+Memory-sensitive phases add a release-mode measurement script or Makefile target rather than ad hoc shell notes. The target records:
+
+- command line
+- relationship count
+- benchmark filter
+- maximum resident set size
+- peak memory footprint where the platform reports it
+- commit SHA
+
+Minimum required filters:
+
+```text
+building_blocks/relationship_parse
+org_authorization/1k_rules/check_direct_group_viewer
+org_authorization/100k_rules/check_direct_group_viewer
+org_authorization/1m_rules/check_direct_group_viewer
+```
+
+The lightweight parse benchmark is the process/harness baseline. The org-rule measurements are compared against [71-performance-budgets-design.md § 3](./71-performance-budgets-design.md#3-initial-targets).
+
+## 8. Cross-References
 
 - <- Depends on: [70-security-design.md](./70-security-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md)
 - -> Consumed by: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
+- Memory layout: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)

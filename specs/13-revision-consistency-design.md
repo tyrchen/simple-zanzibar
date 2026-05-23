@@ -40,6 +40,8 @@ pub struct PublishedSnapshot {
 
 Reads clone the current `Arc<PublishedSnapshot>` and never block writes except for atomic pointer publication.
 
+The current service head and the newest history entry must share the same `Arc<PublishedSnapshot>`. Relationship stores must not be cloned during publication; large-dataset memory ownership is refined in [16-compact-relationship-store-design.md § 10](./16-compact-relationship-store-design.md#10-snapshot-publication).
+
 ## 3. Revision and Token Types
 
 ```rust
@@ -120,4 +122,5 @@ Failures before step 4 publish nothing.
 
 - <- Depends on: [11-schema-system-design.md](./11-schema-system-design.md), [12-relationship-store-design.md](./12-relationship-store-design.md)
 - -> Consumed by: [14-evaluation-engine-design.md](./14-evaluation-engine-design.md), [15-public-api-design.md](./15-public-api-design.md)
+- Refined by: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
 - Related research: [../docs/research/study-spicedb.md § Revision Tokens](../docs/research/study-spicedb.md#revision-tokens), `vendors/spicedb/internal/datastore/memdb/memdb.go:116-152`

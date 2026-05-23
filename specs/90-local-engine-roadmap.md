@@ -89,6 +89,21 @@ Exit criteria:
 - strict clippy, audit, deny, and benchmarks pass
 - legacy modules are removed or explicitly compatibility-only
 
+### M6 - Large Org Memory Efficiency
+
+User-visible outcome: applications can load medium-to-large local org authorization datasets without multi-GiB resident memory while preserving the current microsecond-level check latency.
+
+Specs touched: [12](./12-relationship-store-design.md), [13](./13-revision-consistency-design.md), [16](./16-compact-relationship-store-design.md), [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- current service head and newest published snapshot share relationship storage instead of cloning it
+- compatibility tuple-store mirror is cleared after schema publication
+- relationship indexes use compact `Vec<RowId>` postings, not `BTreeSet<usize>`
+- relationship rows use interned identifier ids on the hot path
+- 1M-rule org authorization benchmark max RSS <= 400 MiB
+- direct and inherited check latency budgets in [71](./71-performance-budgets-design.md) still pass
+
 ## 3. Calendar Shape
 
 One experienced Rust developer:
@@ -99,8 +114,11 @@ One experienced Rust developer:
 - M3: 2 to 3 weeks
 - M4: 1.5 to 2 weeks
 - M5: 1 week
+- M6: 2 to 3 weeks
 
-Total: 8.5 to 11 weeks, assuming no persistent backend and no caveats.
+Total through M5: 8.5 to 11 weeks, assuming no persistent backend and no caveats.
+
+Total through M6: 10.5 to 14 weeks.
 
 ## 4. Cross-References
 

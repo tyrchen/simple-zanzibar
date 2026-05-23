@@ -132,7 +132,28 @@ Closes M5.
 
 Exit criteria: M5 roadmap criteria pass.
 
-## 10. Correctness of the Order
+## 10. Phase 7 - Compact Relationship Store
+
+Closes M6.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 7.1 | Add memory measurement Makefile target for org authorization RSS baselines. | [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md) | 0.5 day |
+| 7.2 | Remove duplicate relationship-store clone during snapshot publication. | [13](./13-revision-consistency-design.md), [16](./16-compact-relationship-store-design.md) | 1 day |
+| 7.3 | Drain and clear the compatibility tuple store after first schema publication; materialize legacy tuples only on demand. | [15](./15-public-api-design.md), [16](./16-compact-relationship-store-design.md) | 1 day |
+| 7.4 | Replace `BTreeSet<usize>` posting lists with `Vec<RowId>` and live-row tombstones. | [12](./12-relationship-store-design.md), [16](./16-compact-relationship-store-design.md) | 2 days |
+| 7.5 | Add delete compaction thresholds and property tests for tombstone-heavy workloads. | [16](./16-compact-relationship-store-design.md), [72](./72-testing-verification-plan.md) | 1.5 days |
+| 7.6 | Add `IdentifierInterner`, compact row ids, and compact index keys. | [16](./16-compact-relationship-store-design.md) | 3 days |
+| 7.7 | Move evaluator hot paths to borrowed `RelationshipRef<'_>` accessors and avoid owned relationship materialization. | [14](./14-evaluation-engine-design.md), [16](./16-compact-relationship-store-design.md) | 2 days |
+| 7.8 | Re-run full latency and memory benchmarks at 1k, 100k, and 1M rules; recalibrate spec only with measured evidence. | [71](./71-performance-budgets-design.md) | 1 day |
+
+Exit criteria:
+
+- M6 roadmap criteria pass.
+- Existing public API, compatibility, exact snapshot, lookup, expand, and property tests remain green.
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`, `cargo +nightly fmt --check`, strict clippy, `cargo audit`, and `cargo deny check` pass.
+
+## 11. Correctness of the Order
 
 The order is correct because:
 
@@ -141,9 +162,11 @@ The order is correct because:
 - snapshot publication blocks consistency tokens
 - membership algebra blocks shared check/expand/lookup semantics
 - benchmark gates are meaningful only after indexed store and evaluator exist
+- compact storage is valuable only after the full indexed/snapshot/evaluator path exists and benchmark evidence identifies memory as the limiting resource
 
-## 11. Cross-References
+## 12. Cross-References
 
 - Stakeholder roadmap: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md)
 - Key decisions: [99-key-decisions.md](./99-key-decisions.md)
 - Verification gates: [72-testing-verification-plan.md](./72-testing-verification-plan.md)
+- Compact store design: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)

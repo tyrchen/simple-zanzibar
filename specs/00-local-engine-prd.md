@@ -42,6 +42,7 @@ The public API remains ergonomic, but internally every request flows through val
 | G4 | Support core Zanzibar APIs as a library. | `check`, `expand`, `lookup_resources`, and `lookup_subjects` are backed by one engine and share validation, snapshots, and membership algebra. |
 | G5 | Preserve a compatibility path. | Existing `ZanzibarService` examples and tests either keep working or fail with documented migration errors. |
 | G6 | Meet project engineering policy. | `cargo build`, `cargo test`, `cargo +nightly fmt --check`, `cargo clippy -- -D warnings -W clippy::pedantic`, `cargo audit`, and `cargo deny check` pass before each implementation phase closes. |
+| G7 | Keep large local authorization datasets memory-efficient. | The 1M-rule org authorization benchmark has steady-state max RSS <= 400 MiB after the compact relationship store lands. |
 
 ## 4. Non-Goals
 
@@ -75,6 +76,7 @@ Anti-personas:
 - At least 20 schema-validation negative tests reject invalid computed-userset, tuple-to-userset, and duplicate relation definitions.
 - At least 10 property tests cover relationship-store index consistency.
 - Direct-check benchmark demonstrates indexed lookup rather than scan behavior at 10k, 100k, and 1M relationship scales.
+- Memory benchmark demonstrates the compact relationship store can hold the 1M-rule org authorization dataset under the budget in [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md).
 - Exact snapshot read test proves a pre-write token cannot observe later writes.
 - Public docs include one compile-tested example for each core API.
 

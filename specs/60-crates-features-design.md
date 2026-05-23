@@ -62,6 +62,9 @@ Dependency versions checked with `cargo search` on 2026-05-23:
 | `smol_str` | `0.3.6` | compact validated identifiers | Candidate only if benchmarks show clone/storage pressure. |
 | `arrayvec` | `0.7.6` | bounded small arrays | Prefer over `smallvec` initially because latest `smallvec` observed is alpha. |
 | `rustc-hash` | `2.1.2` | fast internal hash maps | Candidate for benchmarked hot paths only. |
+| `lasso` | `0.7.3` | optional string interner | Defer; compact store starts with a std-only interner. |
+| `string-interner` | `0.20.0` | optional string interner | Defer; candidate only if local interner becomes maintenance-heavy. |
+| `roaring` | `0.11.4` | optional compressed postings | Defer; use `Vec<RowId>` postings first. |
 | `criterion` | `0.8.2` | performance benchmarks | Adopt as dev-dependency when benchmark phase starts. |
 | `proptest` | `1.11.0` | property tests | Adopt as dev-dependency for store/schema invariants. |
 | `rstest` | `0.26.1` | parameterized tests | Adopt as dev-dependency for validation matrices. |

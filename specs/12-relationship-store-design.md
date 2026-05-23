@@ -27,6 +27,8 @@ RelationshipStore
 
 Rows are immutable inside a snapshot. Write transactions build a new snapshot or structurally shared snapshot, then the revision layer publishes it.
 
+Memory layout note: this file defines the logical store contract. The compact physical layout, identifier interning, `Vec<RowId>` postings, tombstones, and duplicate-ownership cleanup are specified in [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md). Implementations must satisfy both specs: this one for semantics, `16` for large-dataset memory shape.
+
 ## 3. Query Interface
 
 ```rust
@@ -115,4 +117,5 @@ The store does not decide revisions. It returns a `RelationshipSnapshot` candida
 
 - <- Depends on: [10-local-engine-data-model-design.md](./10-local-engine-data-model-design.md), [11-schema-system-design.md](./11-schema-system-design.md)
 - -> Consumed by: [13-revision-consistency-design.md](./13-revision-consistency-design.md), [14-evaluation-engine-design.md](./14-evaluation-engine-design.md)
+- Refined by: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
 - Related research: [../docs/research/study-spicedb.md § Query Filters and Indexes](../docs/research/study-spicedb.md#query-filters-and-indexes), `vendors/spicedb/internal/datastore/memdb/readonly.go:108-232`
