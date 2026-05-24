@@ -80,6 +80,11 @@ name = "perf_optimization"
 harness = false
 test = false
 
+[[bench]]
+name = "snapshot_section_size"
+harness = false
+test = false
+
 [[example]]
 name = "file_permissions"
 path = "examples/file_permissions.rs"

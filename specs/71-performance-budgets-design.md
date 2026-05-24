@@ -343,6 +343,34 @@ plus symbol/index decoding. The remaining realistic mixed-read target needs anot
 profile pass because the synthetic mixed read/write harness now spends negligible time cloning the
 relationship store.
 
+## 3.10 Snapshot Section-Size Measurements
+
+[22-snapshot-file-size-optimization-design.md](./22-snapshot-file-size-optimization-design.md)
+turns the Phase 12 file-size result into a section-driven format plan. The benchmark target is
+`make bench-snapshot-section-size`; it reports raw/zstd bytes, section bytes, index group bytes, and
+profile deltas. The Criterion timings for `snapshot_section_size/*/total_bytes` are not latency
+evidence because the benchmark reports constant byte counts after generating the artifacts.
+
+Measured 2026-05-24 on the 1M org fixture:
+
+| Profile | Raw bytes | Zstd bytes | Index payload | Non-index payload | Saved vs `Full` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `Full` | 124,422,114 | 33,116,811 | 63,867,328 | 60,554,402 | baseline |
+| `CheckOnly` | 78,188,326 | 18,873,001 | 17,633,540 | 60,554,402 | 46,233,788 bytes / 37.15% |
+| `CheckAndObjectAudit` | 78,188,326 | 18,873,001 | 17,633,540 | 60,554,402 | 46,233,788 bytes / 37.15% |
+
+Full-profile index group payload:
+
+| Index group | Payload bytes | Total postings |
+| --- | ---: | ---: |
+| `resource` | 17,633,400 | 1,000,000 |
+| `resource_object` | 17,633,380 | 1,000,000 |
+| `resource_type_relation` | 4,000,140 | 1,000,000 |
+| `resource_type` | 4,000,060 | 1,000,000 |
+| `subject` | 13,933,444 | 1,666,666 |
+| `subject_type_relation` | 2,666,704 | 666,666 |
+| `subject_type` | 4,000,060 | 1,000,000 |
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.

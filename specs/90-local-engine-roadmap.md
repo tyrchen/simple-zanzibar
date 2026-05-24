@@ -208,6 +208,51 @@ Exit criteria:
 - performance results are posted to the PR comment
 - full build, test, fmt, strict clippy, docs, audit, and deny gates pass
 
+### M12 - Smaller Snapshot Artifacts
+
+User-visible outcome: applications can ship smaller raw and zstd snapshot artifacts while keeping
+the safe default loader and explicit trusted fast-load profile.
+
+Specs touched: [17](./17-compact-snapshot-format-design.md),
+[18](./18-trusted-fast-snapshot-load-design.md),
+[22](./22-snapshot-file-size-optimization-design.md),
+[71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- `bench-snapshot-section-size` records raw/zstd bytes, section bytes, index-group bytes, and
+  profile deltas for `Full`, `CheckOnly`, and `CheckAndObjectAudit`
+- v3 index encoding reduces `Full` raw 1M snapshot size to <= 100 MB or recalibrates with
+  section-size evidence
+- `CheckOnly` raw 1M snapshot size reaches <= 65 MB or the remaining row/symbol floor is documented
+- `snapshot_load_trusted_fast/1m` remains <= 200 ms
+- default full snapshot load regresses by no more than 5% unless a profile explains the tradeoff
+- profile capability behavior remains typed and documented
+- full build, test, fmt, strict clippy, docs, audit, and deny gates pass
+
+### M13 - Read Path Refinement
+
+User-visible outcome: read-heavy applications get lower realistic mixed-read latency without public
+API changes and without relying on weaker snapshot profiles.
+
+Specs touched: [14](./14-evaluation-engine-design.md),
+[16](./16-compact-relationship-store-design.md),
+[20](./20-concurrent-engine-runtime-design.md),
+[23](./23-read-performance-optimization-design.md),
+[71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- CPU profile/counters identify the dominant cost in inherited and mixed-read workloads
+- schema expression recursion no longer materializes public `Relation(String)` on hot paths
+- segment-native lookup plans keep reads efficient after delta writes
+- reusable evaluation contexts reduce allocation in lookup verification loops
+- exact-proof shortcuts are covered by deny, intersection, fanout, depth, and cycle tests
+- `realworld_authorization/1m_rules/mixed_read_workload` upper estimate <= 55 us
+- inherited-check and lookup benchmarks regress by no more than the gates in
+  [23](./23-read-performance-optimization-design.md)
+- full build, test, fmt, strict clippy, docs, audit, and deny gates pass
+
 ## 3. Calendar Shape
 
 One experienced Rust developer:
@@ -224,6 +269,8 @@ One experienced Rust developer:
 - M9: 1 week
 - M10: 1.5 to 2 weeks
 - M11: 3 to 5 weeks
+- M12: 2 to 4 weeks
+- M13: 2 to 4 weeks
 
 Total through M5: 8.5 to 11 weeks, assuming no persistent backend and no caveats.
 
@@ -239,8 +286,14 @@ Total through M10: 16 to 21 weeks.
 
 Total through M11: 19 to 26 weeks.
 
+Total through M12: 21 to 30 weeks.
+
+Total through M13: 23 to 34 weeks.
+
 ## 4. Cross-References
 
 - Paired engineer plan: [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Verification gates: [72-testing-verification-plan.md](./72-testing-verification-plan.md)
 - Performance optimization design: [21-performance-optimization-design.md](./21-performance-optimization-design.md)
+- Snapshot file-size optimization design: [22-snapshot-file-size-optimization-design.md](./22-snapshot-file-size-optimization-design.md)
+- Read performance optimization design: [23-read-performance-optimization-design.md](./23-read-performance-optimization-design.md)

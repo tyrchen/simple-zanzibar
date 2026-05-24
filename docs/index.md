@@ -3,6 +3,7 @@
 ## Research
 
 - [SpiceDB implementation study](research/study-spicedb.md): architecture, algorithms, and Simple Zanzibar adoption guidance based on `vendors/spicedb`.
+- [Snapshot section-size spike](research/spike-snapshot-section-size.md): measured `.szsnap` v2 section and index-group byte breakdown for 1M `Full`, `CheckOnly`, and `CheckAndObjectAudit` artifacts.
 
 ## Performance
 
