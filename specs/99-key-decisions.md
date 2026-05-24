@@ -227,3 +227,22 @@ Each decision is load-bearing. Supersede with a new decision entry rather than s
   [13-revision-consistency-design.md](./13-revision-consistency-design.md),
   [71-performance-budgets-design.md](./71-performance-budgets-design.md)
 - Date: 2026-05-23
+
+## D20 - Benchmark and optimize realistic deny-list checks
+
+- Context: the stable org benchmark covered direct checks, inherited usersets, lookup, and snapshot
+  load, but it did not exercise a realistic denied-user path where `can_view` subtracts a plain
+  `banned` relation from a deeper allow graph. The new real-world 1M benchmark measured that path at
+  roughly 607 us before optimization.
+- Alternatives considered: keep the benchmark synthetic; require schema authors to order rules
+  differently; always evaluate the exclude side before the base side; use a cheap-expression
+  heuristic.
+- Decision: add `realworld_authorization` benchmarks and evaluate the exclude side first only when
+  it is a cheap plain relation on the current object, such as a direct deny list.
+- Why: `A - B` is semantically denied when `B` is allowed, so a direct deny hit can skip an
+  expensive inherited allow graph. Limiting the reorder to cheap plain relations avoids regressing
+  cases where the base side is cheap and the exclude side is recursive or high-fanout.
+- Pinned by: [14-evaluation-engine-design.md](./14-evaluation-engine-design.md),
+  [71-performance-budgets-design.md](./71-performance-budgets-design.md),
+  [72-testing-verification-plan.md](./72-testing-verification-plan.md)
+- Date: 2026-05-23

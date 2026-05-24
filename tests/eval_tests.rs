@@ -254,6 +254,57 @@ fn test_should_evaluate_intersection_and_exclusion() -> Result<(), ZanzibarError
 }
 
 #[test]
+fn test_should_short_circuit_plain_exclusion_before_recursive_base() -> Result<(), ZanzibarError> {
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: non_zero(2),
+            max_fanout_per_step: non_zero(100),
+            max_lookup_results: non_zero(100),
+        })
+        .build();
+    let parent = Relation("parent".to_string());
+    let banned = Relation("banned".to_string());
+    let can_view = Relation("can_view".to_string());
+    service.apply_namespace_config(NamespaceConfig {
+        name: "doc".to_string(),
+        relations: HashMap::from([
+            plain_relation(parent.clone()),
+            plain_relation(banned.clone()),
+            (
+                can_view.clone(),
+                RelationConfig {
+                    name: can_view.clone(),
+                    userset_rewrite: Some(UsersetExpression::Exclusion {
+                        base: Box::new(UsersetExpression::TupleToUserset {
+                            tupleset_relation: parent.clone(),
+                            computed_userset_relation: can_view.clone(),
+                        }),
+                        exclude: Box::new(UsersetExpression::ComputedUserset {
+                            relation: banned.clone(),
+                        }),
+                    }),
+                },
+            ),
+        ]),
+    })?;
+
+    let doc = Object {
+        namespace: "doc".to_string(),
+        id: "recursive".to_string(),
+    };
+    let bob = User::UserId("bob".to_string());
+    service.write_tuple(tuple(
+        doc.clone(),
+        parent,
+        User::Userset(doc.clone(), can_view.clone()),
+    ))?;
+    service.write_tuple(tuple(doc.clone(), banned, bob.clone()))?;
+
+    assert!(!service.check_relation(&doc, &can_view, &bob)?);
+    Ok(())
+}
+
+#[test]
 fn test_should_return_depth_exceeded_distinct_from_denied() -> Result<(), ZanzibarError> {
     let service = ZanzibarEngine::builder()
         .evaluation_limits(EvaluationLimits {

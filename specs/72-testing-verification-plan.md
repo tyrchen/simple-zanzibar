@@ -136,6 +136,9 @@ snapshot_trusted_loaded_check_inherited/1m
 snapshot_trusted_loaded_lookup_resources/1m
 snapshot_load_peak_rss/1m
 snapshot_file_size/1m
+snapshot_save_zstd/1m
+snapshot_load_zstd/1m
+snapshot_file_size_zstd/1m
 public_api/check/100k
 public_api/lookup_resources/100k
 public_api/lookup_subjects/100k
@@ -150,6 +153,11 @@ concurrent_runtime/read_heavy_medium_write_batched
 concurrent_runtime/read_heavy_heavy_write_unbatched
 concurrent_runtime/read_heavy_heavy_write_batched
 concurrent_runtime/tenant_sharded_heavy_write
+realworld_authorization/1m_rules/check_doc_inherited_workspace_member
+realworld_authorization/1m_rules/check_doc_denied_by_ban
+realworld_authorization/1m_rules/mixed_read_workload
+realworld_authorization/1m_rules/snapshot_load_compact
+realworld_authorization/1m_rules/snapshot_load_trusted_fast
 ```
 
 Required corrupt-input tests:

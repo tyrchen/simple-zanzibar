@@ -11,8 +11,8 @@ use std::{
 
 use criterion::{BatchSize, Criterion};
 use simple_zanzibar::{
-    SnapshotIntegrityMode, SnapshotLoadOptions, SnapshotLoadProfile, SnapshotSaveOptions,
-    SnapshotValidationMode, ZanzibarEngine,
+    SnapshotCompression, SnapshotIntegrityMode, SnapshotLoadOptions, SnapshotLoadProfile,
+    SnapshotSaveOptions, SnapshotValidationMode, ZanzibarEngine,
     domain::Relationship,
     eval::EvaluationLimits,
     model::{LookupResourcesRequest, Object, Relation, User},
@@ -92,25 +92,44 @@ fn bench_snapshot_build(criterion: &mut Criterion, filters: &[String]) {
 
 fn bench_snapshot_save(criterion: &mut Criterion, filters: &[String]) {
     let name = "snapshot_save_uncompressed/1m";
-    if !should_benchmark(name, filters) {
-        return;
+    if should_benchmark(name, filters) {
+        let service = build_service_with_relationships(1_000_000);
+        criterion.bench_function(name, |bencher| {
+            bencher.iter_batched(
+                || unique_snapshot_path("save_1m"),
+                |path| {
+                    must(
+                        service.save_snapshot(&path, SnapshotSaveOptions::default()),
+                        "failed to save snapshot",
+                    );
+                    let metadata = must(fs::metadata(&path), "failed to stat saved snapshot");
+                    remove_file(&path);
+                    black_box(metadata.len())
+                },
+                BatchSize::LargeInput,
+            );
+        });
     }
-    let service = build_service_with_relationships(1_000_000);
-    criterion.bench_function(name, |bencher| {
-        bencher.iter_batched(
-            || unique_snapshot_path("save_1m"),
-            |path| {
-                must(
-                    service.save_snapshot(&path, SnapshotSaveOptions::default()),
-                    "failed to save snapshot",
-                );
-                let metadata = must(fs::metadata(&path), "failed to stat saved snapshot");
-                remove_file(&path);
-                black_box(metadata.len())
-            },
-            BatchSize::LargeInput,
-        );
-    });
+
+    let zstd_name = "snapshot_save_zstd/1m";
+    if should_benchmark(zstd_name, filters) {
+        let service = build_service_with_relationships(1_000_000);
+        criterion.bench_function(zstd_name, |bencher| {
+            bencher.iter_batched(
+                || unique_snapshot_path("save_zstd_1m"),
+                |path| {
+                    must(
+                        service.save_snapshot(&path, zstd_save_options()),
+                        "failed to save zstd snapshot",
+                    );
+                    let metadata = must(fs::metadata(&path), "failed to stat zstd snapshot");
+                    remove_file(&path);
+                    black_box(metadata.len())
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
 }
 
 fn bench_snapshot_load(criterion: &mut Criterion, filters: &[String]) {
@@ -158,6 +177,20 @@ fn bench_snapshot_load(criterion: &mut Criterion, filters: &[String]) {
                         },
                     ),
                     "failed to load and reindex snapshot",
+                ))
+            });
+        });
+        remove_file_if_owned(&path);
+    }
+
+    let zstd_name = "snapshot_load_zstd/1m";
+    if should_benchmark(zstd_name, filters) {
+        let path = prepared_snapshot_file_with_options(1_000_000, zstd_name, zstd_save_options());
+        criterion.bench_function(zstd_name, |bencher| {
+            bencher.iter(|| {
+                black_box(must(
+                    ZanzibarEngine::load_snapshot(&path, zstd_load_options()),
+                    "failed to load zstd compact snapshot",
                 ))
             });
         });
@@ -291,19 +324,37 @@ fn bench_loaded_query_set(
 
 fn bench_snapshot_file_size(criterion: &mut Criterion, filters: &[String]) {
     let name = "snapshot_file_size/1m";
-    if !should_benchmark(name, filters) {
-        return;
+    if should_benchmark(name, filters) {
+        let path = prepared_snapshot_file(1_000_000, name);
+        let len = must(fs::metadata(&path), "failed to stat snapshot file").len();
+        eprintln!("{name}: {len} bytes");
+        criterion.bench_function(name, |bencher| {
+            bencher.iter(|| black_box(len));
+        });
+        remove_file_if_owned(&path);
     }
-    let path = prepared_snapshot_file(1_000_000, name);
-    let len = must(fs::metadata(&path), "failed to stat snapshot file").len();
-    eprintln!("{name}: {len} bytes");
-    criterion.bench_function(name, |bencher| {
-        bencher.iter(|| black_box(len));
-    });
-    remove_file_if_owned(&path);
+
+    let zstd_name = "snapshot_file_size_zstd/1m";
+    if should_benchmark(zstd_name, filters) {
+        let path = prepared_snapshot_file_with_options(1_000_000, zstd_name, zstd_save_options());
+        let len = must(fs::metadata(&path), "failed to stat zstd snapshot file").len();
+        eprintln!("{zstd_name}: {len} bytes");
+        criterion.bench_function(zstd_name, |bencher| {
+            bencher.iter(|| black_box(len));
+        });
+        remove_file_if_owned(&path);
+    }
 }
 
 fn prepared_snapshot_file(rules: usize, benchmark_name: &str) -> PathBuf {
+    prepared_snapshot_file_with_options(rules, benchmark_name, SnapshotSaveOptions::default())
+}
+
+fn prepared_snapshot_file_with_options(
+    rules: usize,
+    benchmark_name: &str,
+    options: SnapshotSaveOptions,
+) -> PathBuf {
     if benchmark_name == "snapshot_load_peak_rss/1m"
         && let Ok(path) = env::var(LOAD_PATH_ENV)
     {
@@ -313,7 +364,7 @@ fn prepared_snapshot_file(rules: usize, benchmark_name: &str) -> PathBuf {
     let path = unique_snapshot_path(rule_label(rules));
     let service = build_service_with_relationships(rules);
     must(
-        service.save_snapshot(&path, SnapshotSaveOptions::default()),
+        service.save_snapshot(&path, options),
         "failed to prepare snapshot file",
     );
     path
@@ -333,6 +384,20 @@ fn trusted_fast_load_options() -> SnapshotLoadOptions {
     SnapshotLoadOptions {
         validation: SnapshotValidationMode::TrustedFastLoad,
         integrity: SnapshotIntegrityMode::External,
+        ..SnapshotLoadOptions::default()
+    }
+}
+
+fn zstd_save_options() -> SnapshotSaveOptions {
+    SnapshotSaveOptions {
+        compression: SnapshotCompression::Zstd,
+        ..SnapshotSaveOptions::default()
+    }
+}
+
+fn zstd_load_options() -> SnapshotLoadOptions {
+    SnapshotLoadOptions {
+        compression: SnapshotCompression::Zstd,
         ..SnapshotLoadOptions::default()
     }
 }

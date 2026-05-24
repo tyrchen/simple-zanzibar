@@ -411,12 +411,49 @@ impl<'a> EvaluationContext<'a> {
         base: &SchemaUsersetExpression,
         exclude: &SchemaUsersetExpression,
     ) -> Result<Membership, ZanzibarError> {
+        if self.should_eval_exclude_first(object, exclude) {
+            let exclude_result = self.eval_schema_expression(object, relation, user, exclude)?;
+            if exclude_result == Membership::Allowed {
+                return Ok(Membership::Denied);
+            }
+            let base_result = self.eval_schema_expression(object, relation, user, base)?;
+            return Ok(base_result.exclusion(exclude_result));
+        }
+
         let base = self.eval_schema_expression(object, relation, user, base)?;
         if base == Membership::Denied {
             return Ok(Membership::Denied);
         }
         let exclude = self.eval_schema_expression(object, relation, user, exclude)?;
         Ok(base.exclusion(exclude))
+    }
+
+    fn should_eval_exclude_first(
+        &self,
+        object: &Object,
+        exclude: &SchemaUsersetExpression,
+    ) -> bool {
+        match exclude {
+            SchemaUsersetExpression::This => true,
+            SchemaUsersetExpression::ComputedUserset { relation } => {
+                self.computed_userset_is_plain_relation(object, relation)
+            }
+            SchemaUsersetExpression::TupleToUserset { .. }
+            | SchemaUsersetExpression::Union(_)
+            | SchemaUsersetExpression::Intersection(_)
+            | SchemaUsersetExpression::Exclusion { .. } => false,
+        }
+    }
+
+    fn computed_userset_is_plain_relation(&self, object: &Object, relation: &RelationName) -> bool {
+        let Ok(object_type) = ObjectType::try_from(object.namespace.as_str()) else {
+            return false;
+        };
+        self.snapshot
+            .schema()
+            .resolver()
+            .relation(&object_type, relation)
+            .is_ok_and(|definition| definition.userset_rewrite().is_none())
     }
 
     fn expand_schema_expression(

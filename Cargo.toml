@@ -70,6 +70,11 @@ name = "concurrent_runtime"
 harness = false
 test = false
 
+[[bench]]
+name = "realworld_authorization"
+harness = false
+test = false
+
 [[example]]
 name = "file_permissions"
 path = "examples/file_permissions.rs"
