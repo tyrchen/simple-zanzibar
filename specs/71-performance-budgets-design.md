@@ -272,6 +272,30 @@ load. It is intentionally stable, but it over-represents a small set of hot obje
 | `realworld_authorization/1m_rules/snapshot_load_trusted_fast` | 1M realworld rules | `[136.47 ms, 137.53 ms, 138.62 ms]` | passes <= 200 ms trusted gate |
 | `realworld_authorization/1m_rules/snapshot_file_size` | 1M realworld rules | `123,983,263 bytes` | comparable to org 1M artifact |
 
+## 3.8 Structural Performance Optimization Targets
+
+[21-performance-optimization-design.md](./21-performance-optimization-design.md) turns the
+post-M10 performance review into explicit gates. The implementation must first record 1M baselines
+for every new `perf_optimization` filter before claiming an improvement.
+
+| Area | Benchmark | Target |
+| --- | --- | ---: |
+| prepared check / ID-native eval | `perf_optimization/check_prepared_1m` | no public check regression; allocation count lower than baseline |
+| realistic inherited read | `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | >= 10% improvement or profile-backed recalibration |
+| realistic mixed read | `realworld_authorization/1m_rules/mixed_read_workload` | upper estimate <= 55 us |
+| streaming lookup | `perf_optimization/lookup_subjects_streaming_1m` and `perf_optimization/lookup_resources_streaming_1m` | no latency regression; lower allocation count |
+| full snapshot load | `snapshot_load_compact/1m` | upper estimate <= 450 ms after loader optimization |
+| load-time RSS | `snapshot_load_peak_rss/1m` | max RSS <= 400 MiB |
+| trusted fast load | `snapshot_load_trusted_fast/1m` | upper estimate <= 200 ms |
+| single write over 1M base | `perf_optimization/write_single_touch_1m` | p95 improves >= 3x versus pre-change 1M baseline |
+| mixed batch write over 1M base | `perf_optimization/write_mixed_batch_1m` | p95 improves >= 3x versus pre-change 1M baseline |
+| read-heavy heavy writes | `perf_optimization/read_heavy_heavy_write_batched_1m` | read throughput no > 5% regression; write p95 improves >= 2x |
+| index profiles | `snapshot_file_size_check_only/1m` plus RSS equivalent | >= 20% reduction versus `Full` |
+
+The hard <= 200 ms target is intentionally scoped to trusted artifacts. A default full loader that
+continues to prove hostile-file row and index semantics at startup is not expected to hit <= 200 ms
+without changing the trust boundary.
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.
@@ -288,6 +312,9 @@ load. It is intentionally stable, but it over-represents a small set of hot obje
 - Write throughput guidance must distinguish unbatched, batched, and tenant-sharded cases.
 - Real-world benchmark coverage must include deny-list, inheritance, group userset, and audit helper
   cases; synthetic hot-path benchmarks alone are not sufficient evidence.
+- No full relationship-store clone per successful write after [21](./21-performance-optimization-design.md) Phase 12.4.
+- Index-profile optimizations must return typed unsupported-operation errors instead of silently
+  falling back to full scans.
 
 ## 5. Profiling Rules
 
@@ -302,4 +329,5 @@ load. It is intentionally stable, but it over-represents a small set of hot obje
 - <- Depends on: [12-relationship-store-design.md](./12-relationship-store-design.md), [14-evaluation-engine-design.md](./14-evaluation-engine-design.md), [60-crates-features-design.md](./60-crates-features-design.md)
 - -> Consumed by: [72-testing-verification-plan.md](./72-testing-verification-plan.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Memory layout: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
+- Performance optimization roadmap: [21-performance-optimization-design.md](./21-performance-optimization-design.md)
 - Related research: [../docs/research/study-spicedb.md § Query Filters and Indexes](../docs/research/study-spicedb.md#query-filters-and-indexes)

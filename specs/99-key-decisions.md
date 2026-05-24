@@ -2,7 +2,7 @@
 
 Status: draft v1
 Owner: Simple Zanzibar
-Last updated: 2026-05-23
+Last updated: 2026-05-24
 
 Each decision is load-bearing. Supersede with a new decision entry rather than silently rewriting history.
 
@@ -246,3 +246,23 @@ Each decision is load-bearing. Supersede with a new decision entry rather than s
   [71-performance-budgets-design.md](./71-performance-budgets-design.md),
   [72-testing-verification-plan.md](./72-testing-verification-plan.md)
 - Date: 2026-05-23
+
+## D21 - Optimize by reusable proofs and deltas before unsafe or weaker defaults
+
+- Context: after M10, measured 1M performance is already good for trusted raw load and reads, but
+  full writes still clone too much state, some evaluator/lookup paths allocate legacy objects, and
+  the default full loader repeats semantic validation on every startup.
+- Alternatives considered: add mmap/unsafe zero-copy, weaken the default full loader, add
+  fine-grained relationship locks, keep clone-on-write and rely only on tenant sharding, or optimize
+  by reusing prior proof and publishing small immutable deltas.
+- Decision: keep safe full validation as the default, preserve the trusted fast-load boundary for
+  <= 200 ms cold starts, remove avoidable hot-path allocation, and replace full-store write cloning
+  with segmented immutable deltas plus checkpointing.
+- Why: this applies the rsync-like principle that unchanged data and already-proven facts should
+  not be recopied or revalidated. It improves write amplification, load time, and memory without
+  changing the security boundary or introducing unsafe code.
+- Pinned by: [21-performance-optimization-design.md](./21-performance-optimization-design.md),
+  [71-performance-budgets-design.md](./71-performance-budgets-design.md),
+  [72-testing-verification-plan.md](./72-testing-verification-plan.md),
+  [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
+- Date: 2026-05-24

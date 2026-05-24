@@ -2,7 +2,7 @@
 
 Status: draft v1
 Owner: Simple Zanzibar
-Last updated: 2026-05-23
+Last updated: 2026-05-24
 
 ## 1. Principles
 
@@ -180,6 +180,34 @@ Exit criteria:
 - benchmark results are posted to the PR comment
 - full build, test, fmt, strict clippy, docs, audit, and deny gates pass
 
+### M11 - Structural Performance Optimization
+
+User-visible outcome: the engine keeps the current complete public API while lowering write
+amplification, reducing evaluator/lookup allocation, improving safe full snapshot load, preserving
+the trusted <= 200 ms path, and offering explicit lower-memory index profiles for check-heavy
+deployments.
+
+Specs touched: [14](./14-evaluation-engine-design.md), [16](./16-compact-relationship-store-design.md),
+[17](./17-compact-snapshot-format-design.md), [18](./18-trusted-fast-snapshot-load-design.md),
+[20](./20-concurrent-engine-runtime-design.md), [21](./21-performance-optimization-design.md),
+[71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- writer submit path no longer holds a mutex while blocked on a full queue
+- public read behavior remains equivalent while prepared checks and ID-native recursive evaluation
+  reduce hot-path allocation
+- lookup internals stream bounded candidates and reuse evaluation context state
+- full snapshot load phase timers are recorded and `snapshot_load_compact/1m` upper estimate is
+  <= 450 ms or recalibrated with profile evidence
+- `snapshot_load_trusted_fast/1m` remains <= 200 ms
+- segmented write-store publication avoids full-store clone per successful write and improves
+  1M-base write p95 by the gates in [21](./21-performance-optimization-design.md)
+- index profiles support `Full`, `CheckOnly`, and `CheckAndObjectAudit` with typed errors for
+  unsupported operations
+- performance results are posted to the PR comment
+- full build, test, fmt, strict clippy, docs, audit, and deny gates pass
+
 ## 3. Calendar Shape
 
 One experienced Rust developer:
@@ -195,6 +223,7 @@ One experienced Rust developer:
 - M8: 1 week
 - M9: 1 week
 - M10: 1.5 to 2 weeks
+- M11: 3 to 5 weeks
 
 Total through M5: 8.5 to 11 weeks, assuming no persistent backend and no caveats.
 
@@ -208,7 +237,10 @@ Total through M9: 14.5 to 19 weeks.
 
 Total through M10: 16 to 21 weeks.
 
+Total through M11: 19 to 26 weeks.
+
 ## 4. Cross-References
 
 - Paired engineer plan: [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Verification gates: [72-testing-verification-plan.md](./72-testing-verification-plan.md)
+- Performance optimization design: [21-performance-optimization-design.md](./21-performance-optimization-design.md)
