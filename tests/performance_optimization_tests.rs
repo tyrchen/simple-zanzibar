@@ -198,6 +198,128 @@ fn test_should_save_canonical_snapshot_from_segmented_delta_view()
     Ok(())
 }
 
+#[test]
+fn test_should_preserve_delta_tombstone_masking_for_lookup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = seeded_engine()?;
+    engine.write_relationships([
+        RelationshipMutation::delete("doc:one#viewer@user:alice")?,
+        RelationshipMutation::touch("doc:three#viewer@user:alice")?,
+    ])?;
+
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("viewer"),
+        "doc",
+    ))?;
+
+    let actual = resources.resources.into_iter().collect::<HashSet<_>>();
+    let expected = HashSet::from([object("doc", "two"), object("doc", "three")]);
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[test]
+fn test_should_keep_plain_computed_shortcut_conservative_for_deny_and_intersection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace doc {
+            relation owner {}
+            relation reviewer {}
+            relation banned {}
+            relation visible {
+                rewrite exclusion(
+                    computed_userset(relation: "owner"),
+                    computed_userset(relation: "banned")
+                )
+            }
+            relation approved {
+                rewrite intersection(
+                    computed_userset(relation: "owner"),
+                    computed_userset(relation: "reviewer")
+                )
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("doc:one#owner@user:alice")?,
+        RelationshipMutation::touch("doc:one#banned@user:alice")?,
+        RelationshipMutation::touch("doc:one#reviewer@user:bob")?,
+    ])?;
+
+    assert!(!engine.check_relation(
+        &object("doc", "one"),
+        &relation("visible"),
+        &User::user_id("alice"),
+    )?);
+    assert!(!engine.check_relation(
+        &object("doc", "one"),
+        &relation("approved"),
+        &User::user_id("alice"),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn test_should_not_leak_reusable_lookup_context_between_candidates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace doc {
+            relation viewer {}
+            relation can_view {
+                rewrite computed_userset(relation: "viewer")
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("doc:one#viewer@user:alice")?,
+        RelationshipMutation::touch("doc:two#viewer@user:alice")?,
+    ])?;
+
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("can_view"),
+        "doc",
+    ))?;
+
+    assert_eq!(
+        resources.resources,
+        vec![object("doc", "one"), object("doc", "two")]
+    );
+    Ok(())
+}
+
+#[test]
+fn test_should_preserve_cycle_denial_with_compiled_relation_ids()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace doc {
+            relation first {
+                rewrite computed_userset(relation: "second")
+            }
+            relation second {
+                rewrite computed_userset(relation: "first")
+            }
+        }
+        "#,
+    )?;
+
+    assert!(!engine.check_relation(
+        &object("doc", "one"),
+        &relation("first"),
+        &User::user_id("alice"),
+    )?);
+    Ok(())
+}
+
 proptest! {
     #[test]
     fn test_should_match_reference_set_for_segmented_delta_publication(

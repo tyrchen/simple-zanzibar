@@ -135,7 +135,9 @@ impl CompiledSchema {
         let definitions = definitions.into_iter().collect::<Vec<_>>();
         let compiled = Self::new(Arc::from(definitions.into_boxed_slice()))?;
         validate_references(&compiled)?;
-        Ok(compiled)
+        Self::new(Arc::from(
+            compile_resolved_definitions(&compiled)?.into_boxed_slice(),
+        ))
     }
 
     /// Returns all namespace definitions in source order.
@@ -201,6 +203,7 @@ pub struct RelationDefinition {
     name: RelationName,
     allowed_subject_types: AllowedSubjectTypes,
     userset_rewrite: Option<UsersetExpression>,
+    compiled_userset_rewrite: Option<CompiledUsersetExpression>,
 }
 
 impl RelationDefinition {
@@ -211,6 +214,7 @@ impl RelationDefinition {
             name,
             allowed_subject_types: AllowedSubjectTypes::Unspecified,
             userset_rewrite,
+            compiled_userset_rewrite: None,
         }
     }
 
@@ -225,6 +229,7 @@ impl RelationDefinition {
             name,
             allowed_subject_types: AllowedSubjectTypes::Explicit(allowed_subject_types),
             userset_rewrite,
+            compiled_userset_rewrite: None,
         }
     }
 
@@ -244,6 +249,10 @@ impl RelationDefinition {
     #[must_use]
     pub fn userset_rewrite(&self) -> Option<&UsersetExpression> {
         self.userset_rewrite.as_ref()
+    }
+
+    pub(crate) fn compiled_userset_rewrite(&self) -> Option<&CompiledUsersetExpression> {
+        self.compiled_userset_rewrite.as_ref()
     }
 }
 
@@ -283,6 +292,58 @@ pub enum UsersetExpression {
         base: Box<UsersetExpression>,
         /// Expression to subtract.
         exclude: Box<UsersetExpression>,
+    },
+}
+
+/// Stable relation identifier inside one compiled schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SchemaRelationId {
+    namespace_index: usize,
+    relation_index: usize,
+}
+
+impl SchemaRelationId {
+    const fn new(namespace_index: usize, relation_index: usize) -> Self {
+        Self {
+            namespace_index,
+            relation_index,
+        }
+    }
+}
+
+/// Userset expression with same-namespace relation edges resolved to schema ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompiledUsersetExpression {
+    /// Direct relationships stored on this object and relation.
+    This,
+    /// A relation on the same object.
+    ComputedUserset {
+        /// Referenced relation name retained for store lookup.
+        relation: RelationName,
+        /// Referenced relation id retained for schema lookup.
+        relation_id: SchemaRelationId,
+    },
+    /// A relation reached through userset subjects on another relation.
+    TupleToUserset {
+        /// Relation containing intermediate userset subjects.
+        tupleset_relation: RelationName,
+        /// Same-namespace id for the tupleset relation.
+        tupleset_relation_id: SchemaRelationId,
+        /// Relation to evaluate on each intermediate object. This remains name-based because the
+        /// intermediate object's namespace determines the target schema relation at evaluation
+        /// time.
+        computed_userset_relation: RelationName,
+    },
+    /// Union of child expressions.
+    Union(Vec<CompiledUsersetExpression>),
+    /// Intersection of child expressions.
+    Intersection(Vec<CompiledUsersetExpression>),
+    /// Exclusion of one expression from another.
+    Exclusion {
+        /// Base expression.
+        base: Box<CompiledUsersetExpression>,
+        /// Expression to subtract.
+        exclude: Box<CompiledUsersetExpression>,
     },
 }
 
@@ -396,6 +457,43 @@ impl SchemaResolver {
                 namespace: object_type.to_string(),
                 relation: relation.to_string(),
             })
+    }
+
+    pub(crate) fn relation_id(
+        &self,
+        object_type: &ObjectType,
+        relation: &RelationName,
+    ) -> Result<SchemaRelationId, SchemaError> {
+        let namespace_index = self
+            .namespace_indexes
+            .get(object_type)
+            .copied()
+            .ok_or_else(|| SchemaError::NamespaceNotFound {
+                namespace: object_type.to_string(),
+            })?;
+        let relations = self.relation_indexes.get(object_type).ok_or_else(|| {
+            SchemaError::NamespaceNotFound {
+                namespace: object_type.to_string(),
+            }
+        })?;
+        let relation_index =
+            relations
+                .get(relation)
+                .copied()
+                .ok_or_else(|| SchemaError::RelationNotFound {
+                    namespace: object_type.to_string(),
+                    relation: relation.to_string(),
+                })?;
+        Ok(SchemaRelationId::new(namespace_index, relation_index))
+    }
+
+    pub(crate) fn relation_by_id(
+        &self,
+        relation_id: SchemaRelationId,
+    ) -> Option<&RelationDefinition> {
+        self.definitions
+            .get(relation_id.namespace_index)
+            .and_then(|namespace| namespace.relations().get(relation_id.relation_index))
     }
 
     pub(crate) fn sorted_relations(
@@ -541,6 +639,74 @@ fn compile_legacy_expression(
             base: Box::new(compile_legacy_expression(*base)?),
             exclude: Box::new(compile_legacy_expression(*exclude)?),
         }),
+    }
+}
+
+fn compile_resolved_definitions(
+    compiled: &CompiledSchema,
+) -> Result<Vec<NamespaceDefinition>, SchemaError> {
+    let mut namespaces = Vec::with_capacity(compiled.definitions().len());
+    for namespace in compiled.definitions() {
+        let mut relations = Vec::with_capacity(namespace.relations().len());
+        for relation in namespace.relations() {
+            let compiled_userset_rewrite = relation
+                .userset_rewrite()
+                .map(|expression| {
+                    compile_resolved_expression(compiled.resolver(), namespace.name(), expression)
+                })
+                .transpose()?;
+            relations.push(RelationDefinition {
+                name: relation.name.clone(),
+                allowed_subject_types: relation.allowed_subject_types.clone(),
+                userset_rewrite: relation.userset_rewrite.clone(),
+                compiled_userset_rewrite,
+            });
+        }
+        namespaces.push(NamespaceDefinition::new(
+            namespace.name.clone(),
+            Arc::from(relations.into_boxed_slice()),
+        ));
+    }
+    Ok(namespaces)
+}
+
+fn compile_resolved_expression(
+    resolver: &SchemaResolver,
+    namespace: &ObjectType,
+    expression: &UsersetExpression,
+) -> Result<CompiledUsersetExpression, SchemaError> {
+    match expression {
+        UsersetExpression::This => Ok(CompiledUsersetExpression::This),
+        UsersetExpression::ComputedUserset { relation } => {
+            Ok(CompiledUsersetExpression::ComputedUserset {
+                relation: relation.clone(),
+                relation_id: resolver.relation_id(namespace, relation)?,
+            })
+        }
+        UsersetExpression::TupleToUserset {
+            tupleset_relation,
+            computed_userset_relation,
+        } => Ok(CompiledUsersetExpression::TupleToUserset {
+            tupleset_relation: tupleset_relation.clone(),
+            tupleset_relation_id: resolver.relation_id(namespace, tupleset_relation)?,
+            computed_userset_relation: computed_userset_relation.clone(),
+        }),
+        UsersetExpression::Union(expressions) => expressions
+            .iter()
+            .map(|expression| compile_resolved_expression(resolver, namespace, expression))
+            .collect::<Result<Vec<_>, _>>()
+            .map(CompiledUsersetExpression::Union),
+        UsersetExpression::Intersection(expressions) => expressions
+            .iter()
+            .map(|expression| compile_resolved_expression(resolver, namespace, expression))
+            .collect::<Result<Vec<_>, _>>()
+            .map(CompiledUsersetExpression::Intersection),
+        UsersetExpression::Exclusion { base, exclude } => {
+            Ok(CompiledUsersetExpression::Exclusion {
+                base: Box::new(compile_resolved_expression(resolver, namespace, base)?),
+                exclude: Box::new(compile_resolved_expression(resolver, namespace, exclude)?),
+            })
+        }
     }
 }
 
