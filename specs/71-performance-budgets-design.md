@@ -420,6 +420,45 @@ Phase 13 gate evidence:
 | `snapshot_load_peak_rss/1m` | `343,851,008-byte max RSS; 312,705,672-byte peak footprint` | passes <= 400 MiB RSS target |
 | `perf_optimization/snapshot_load_phase_timers_1m` | `[578.05 ms, 586.63 ms, 597.34 ms]`; `file_read=7.85 ms`, `checksum=32.79 ms`, `symbols=87.53 ms`, `rows=314.50 ms`, `indexes=145.07 ms` | recorded post-v3 load phase costs |
 
+## 3.12 M13 Read/Load and Zstd-Aware Layout Measurements
+
+Measured 2026-05-24 after [24](./24-zstd-aware-snapshot-load-design.md)'s zstd-aware inner layout,
+row-chunk relationship decode, and evaluator recursion-stack optimization. Diffs below compare to
+Phase 13 evidence, not to Criterion's previous local run cache.
+
+| Benchmark | Phase 13 | Current | Diff |
+| --- | ---: | ---: | ---: |
+| `snapshot_file_size/1m` | `77,573,646 bytes` | `77,573,646 bytes` | unchanged |
+| `snapshot_file_size_zstd/1m` | `22,384,838 bytes` | `21,512,241 bytes` | `-872,597 bytes / -3.90%` |
+| section-size `Full` zstd | `22,317,770 bytes` | `21,471,681 bytes` | `-846,089 bytes / -3.79%` |
+| section-size `CheckOnly` zstd | `19,031,692 bytes` | `18,182,828 bytes` | `-848,864 bytes / -4.46%` |
+| `snapshot_load_compact/1m` | `[579.68 ms, 585.81 ms, 593.91 ms]` | `[547.67 ms, 550.62 ms, 553.98 ms]` | upper `-6.72%` |
+| `snapshot_load_trusted_fast/1m` | `[183.45 ms, 185.11 ms, 186.84 ms]` | `[171.85 ms, 172.70 ms, 173.52 ms]` | upper `-7.13%` |
+| `snapshot_load_zstd/1m` | `[625.59 ms, 629.45 ms, 633.10 ms]` | `[610.46 ms, 614.59 ms, 618.59 ms]` | upper `-2.29%` |
+| `perf_optimization/snapshot_load_phase_timers_1m` | `[578.05 ms, 586.63 ms, 597.34 ms]` | `[546.45 ms, 548.01 ms, 549.63 ms]` | upper `-7.99%` |
+| `snapshot_load_peak_rss/1m` raw | `343,851,008-byte max RSS; 312,705,672-byte peak footprint` | `354,959,360-byte max RSS; 315,638,456-byte peak footprint` | max RSS `+3.23%`; still under 400 MiB |
+| `snapshot_load_peak_rss/1m` zstd | no Phase 13 zstd RSS baseline | `415,055,872-byte max RSS; 367,100,648-byte peak footprint` | direct-zstd load remains under 400 MiB |
+| `realworld_authorization/1m_rules/mixed_read_workload` | `[57.221 us, 57.733 us, 58.164 us]` | `[52.474 us, 52.895 us, 53.489 us]` | upper `-8.04%`; passes <=55 us |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | `[14.793 us, 14.966 us, 15.110 us]` | `[14.473 us, 14.655 us, 14.833 us]` | upper `-1.83%`; still above 13.5 us stretch |
+| `perf_optimization/check_prepared_1m` | `[5.8971 us, 5.9513 us, 6.0009 us]` | `[5.2677 us, 5.3115 us, 5.3424 us]` | upper `-10.97%` |
+| `perf_optimization/lookup_resources_streaming_1m` | `[3.0446 ms, 3.1188 ms, 3.1883 ms]` | `[2.6849 ms, 2.7143 ms, 2.7544 ms]` | upper `-13.61%` |
+| `perf_optimization/lookup_subjects_streaming_1m` | `[6.2956 us, 6.3200 us, 6.3451 us]` | `[5.4088 us, 5.4472 us, 5.4722 us]` | upper `-13.75%` |
+| `perf_optimization/read_heavy_heavy_write_batched_1m` | `[15.181 us, 16.530 us, 17.844 us]` | `[10.810 us, 11.567 us, 12.365 us]` | upper `-30.70%` |
+
+Representative phase timer:
+
+| Phase | Duration |
+| --- | ---: |
+| `file_read` | `7.600375 ms` |
+| `decompression` | `42 ns` |
+| `header_and_sections` | `4.333 us` |
+| `checksum` | `32.422542 ms` |
+| `schema_parse_compile` | `42 us` |
+| `symbols` | `86.127084 ms` |
+| `rows` | `277.822584 ms` |
+| `indexes` | `135.971417 ms` |
+| `publish` | `1.75 us` |
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.

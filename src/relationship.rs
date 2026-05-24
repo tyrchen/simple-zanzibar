@@ -23,10 +23,10 @@ use crate::{
     error::ZanzibarError,
     model::{Object, Relation, User},
     snapshot::{
-        BinaryCursor, IndexProfile, SectionKind, SnapshotFormatVersion, SnapshotIoError,
-        SnapshotLoadPhaseTimings, SnapshotLoadProfile, SnapshotReader, SnapshotSectionWriter,
-        SnapshotValidationMode, checked_add_usize, checked_mul_usize, checked_u32_from_usize,
-        checked_usize_from_u32, checked_usize_from_u64, insert_unique,
+        BinaryCursor, IndexProfile, SectionKind, SnapshotEncodingLayout, SnapshotFormatVersion,
+        SnapshotIoError, SnapshotLoadPhaseTimings, SnapshotLoadProfile, SnapshotReader,
+        SnapshotSectionWriter, SnapshotValidationMode, checked_add_usize, checked_mul_usize,
+        checked_u32_from_usize, checked_usize_from_u32, checked_usize_from_u64, insert_unique,
     },
 };
 
@@ -616,9 +616,10 @@ impl RelationshipStoreView {
         &self,
         writer: &mut SnapshotSectionWriter,
         index_profile: IndexProfile,
+        layout: SnapshotEncodingLayout,
     ) -> Result<(), SnapshotIoError> {
         self.canonical_store()?
-            .encode_snapshot_sections(writer, index_profile)
+            .encode_snapshot_sections(writer, index_profile, layout)
     }
 
     pub(crate) fn query_compact_relationships(
@@ -1074,10 +1075,12 @@ impl IndexedRelationshipStore {
         &self,
         writer: &mut SnapshotSectionWriter,
         index_profile: IndexProfile,
+        layout: SnapshotEncodingLayout,
     ) -> Result<(), SnapshotIoError> {
         let (symbol_table, symbol_table_flags) = encode_v3_symbol_table(
             &self.interner.entries,
             checked_u32_from_usize(self.interner.bytes.len())?,
+            layout,
         )?;
         writer.add_section(
             SectionKind::SymbolBytes,
@@ -1099,7 +1102,7 @@ impl IndexedRelationshipStore {
             })?,
         )?;
         let (symbol_hashes, symbol_lookup, symbol_lookup_flags) =
-            self.interner.encode_symbol_acceleration()?;
+            self.interner.encode_symbol_acceleration(layout)?;
         let symbol_count = u64::try_from(self.interner.entries.len()).map_err(|_| {
             SnapshotIoError::LimitExceeded {
                 component: "symbol lookup",
@@ -1115,7 +1118,7 @@ impl IndexedRelationshipStore {
 
         let disk_rows = self.live_disk_rows();
         let row_symbol_width =
-            SnapshotKeyWidth::for_max(checked_u32_from_usize(self.interner.entries.len())?);
+            snapshot_symbol_width(checked_u32_from_usize(self.interner.entries.len())?, layout);
         let mut rows = Vec::with_capacity(
             disk_rows
                 .len()
@@ -2125,7 +2128,10 @@ struct IdentifierInterner {
 }
 
 impl IdentifierInterner {
-    fn encode_symbol_acceleration(&self) -> Result<(Vec<u8>, Vec<u8>, u16), SnapshotIoError> {
+    fn encode_symbol_acceleration(
+        &self,
+        layout: SnapshotEncodingLayout,
+    ) -> Result<(Vec<u8>, Vec<u8>, u16), SnapshotIoError> {
         let mut hashes_by_id = Vec::with_capacity(self.entries.len());
         for index in 0..self.entries.len() {
             let id = SymbolId::from_index(index)?;
@@ -2141,7 +2147,8 @@ impl IdentifierInterner {
             .map(SymbolId::from_index)
             .collect::<Result<Vec<_>, _>>()?;
         lookup.sort_by_key(|id| (hashes_by_id.get(id.index()).copied(), *id));
-        let lookup_width = SnapshotKeyWidth::for_max(checked_u32_from_usize(self.entries.len())?);
+        let lookup_width =
+            snapshot_symbol_width(checked_u32_from_usize(self.entries.len())?, layout);
         let mut lookup_bytes =
             Vec::with_capacity(checked_mul_usize(lookup.len(), lookup_width.byte_len())?);
         for id in lookup {
@@ -2378,10 +2385,11 @@ struct InternedString {
 fn encode_v3_symbol_table(
     entries: &[InternedString],
     symbol_bytes_len: u32,
+    layout: SnapshotEncodingLayout,
 ) -> Result<(Vec<u8>, u16), SnapshotIoError> {
-    let start_width = SnapshotKeyWidth::for_max(symbol_bytes_len);
+    let start_width = snapshot_symbol_width(symbol_bytes_len, layout);
     let max_len = entries.iter().map(|entry| entry.len).max().unwrap_or(0);
-    let len_width = SnapshotKeyWidth::for_max(max_len);
+    let len_width = snapshot_symbol_width(max_len, layout);
     let entry_width = checked_add_usize(start_width.byte_len(), len_width.byte_len())?;
     let mut table = Vec::with_capacity(checked_mul_usize(entries.len(), entry_width)?);
     for entry in entries {
@@ -2389,6 +2397,13 @@ fn encode_v3_symbol_table(
         len_width.encode_value(entry.len, &mut table);
     }
     Ok((table, symbol_table_flags(start_width, len_width)))
+}
+
+const fn snapshot_symbol_width(max_value: u32, layout: SnapshotEncodingLayout) -> SnapshotKeyWidth {
+    match layout {
+        SnapshotEncodingLayout::Compact => SnapshotKeyWidth::for_max(max_value),
+        SnapshotEncodingLayout::CompressionFriendly => SnapshotKeyWidth::U32,
+    }
 }
 
 fn decode_symbol_hashes(
@@ -4852,35 +4867,41 @@ fn decode_snapshot_rows(
             reason: "relationship row length does not match row count",
         });
     }
-    let mut cursor = BinaryCursor::new(section.bytes());
+    let row_byte_len = checked_mul_usize(symbol_width.byte_len(), 6)?;
     let mut rows = Vec::with_capacity(row_count);
     let mut duplicate_detector = RelationshipIdentityIndex::default();
     let validate_semantics = validation == SnapshotValidationMode::Full;
-    for index in 0..row_count {
+    for (index, row_bytes) in section.bytes().chunks_exact(row_byte_len).enumerate() {
         let row_id = RowId::from_len(index)?;
+        let fields = decode_snapshot_row_fields(row_bytes, symbol_width)?;
+        let [
+            resource_type,
+            resource_id,
+            relation,
+            subject_type,
+            subject_id,
+            subject_relation,
+        ] = fields;
         let row = RelationshipRow {
             row_id,
             resource_type: ObjectTypeId(SymbolId::from_snapshot_raw(
-                symbol_width.read_value(&mut cursor)?,
+                resource_type,
                 header.symbol_count,
             )?),
             resource_id: ObjectIdId(SymbolId::from_snapshot_raw(
-                symbol_width.read_value(&mut cursor)?,
+                resource_id,
                 header.symbol_count,
             )?),
-            relation: RelationId(SymbolId::from_snapshot_raw(
-                symbol_width.read_value(&mut cursor)?,
-                header.symbol_count,
-            )?),
+            relation: RelationId(SymbolId::from_snapshot_raw(relation, header.symbol_count)?),
             subject_type: SubjectTypeId(SymbolId::from_snapshot_raw(
-                symbol_width.read_value(&mut cursor)?,
+                subject_type,
                 header.symbol_count,
             )?),
             subject_id: SubjectIdId(SymbolId::from_snapshot_raw(
-                symbol_width.read_value(&mut cursor)?,
+                subject_id,
                 header.symbol_count,
             )?),
-            subject_relation: match symbol_width.read_value(&mut cursor)? {
+            subject_relation: match subject_relation {
                 0 => None,
                 value => Some(RelationId(SymbolId::from_snapshot_raw(
                     value,
@@ -4908,6 +4929,129 @@ fn decode_snapshot_rows(
         rows,
         live_rows: LiveRows::full(row_count),
         uniqueness,
+    })
+}
+
+fn decode_snapshot_row_fields(
+    row_bytes: &[u8],
+    symbol_width: SnapshotKeyWidth,
+) -> Result<[u32; 6], SnapshotIoError> {
+    match symbol_width {
+        SnapshotKeyWidth::U8 => decode_snapshot_row_fields_u8(row_bytes),
+        SnapshotKeyWidth::U16 => decode_snapshot_row_fields_u16(row_bytes),
+        SnapshotKeyWidth::U24 => decode_snapshot_row_fields_u24(row_bytes),
+        SnapshotKeyWidth::U32 => decode_snapshot_row_fields_u32(row_bytes),
+    }
+}
+
+fn decode_snapshot_row_fields_u8(row_bytes: &[u8]) -> Result<[u32; 6], SnapshotIoError> {
+    let [first, second, third, fourth, fifth, sixth] = row_bytes_to_array(row_bytes)?;
+    Ok([
+        u32::from(first),
+        u32::from(second),
+        u32::from(third),
+        u32::from(fourth),
+        u32::from(fifth),
+        u32::from(sixth),
+    ])
+}
+
+fn decode_snapshot_row_fields_u16(row_bytes: &[u8]) -> Result<[u32; 6], SnapshotIoError> {
+    let [
+        first_a,
+        first_b,
+        second_a,
+        second_b,
+        third_a,
+        third_b,
+        fourth_a,
+        fourth_b,
+        fifth_a,
+        fifth_b,
+        sixth_a,
+        sixth_b,
+    ] = row_bytes_to_array(row_bytes)?;
+    Ok([
+        u32::from(u16::from_le_bytes([first_a, first_b])),
+        u32::from(u16::from_le_bytes([second_a, second_b])),
+        u32::from(u16::from_le_bytes([third_a, third_b])),
+        u32::from(u16::from_le_bytes([fourth_a, fourth_b])),
+        u32::from(u16::from_le_bytes([fifth_a, fifth_b])),
+        u32::from(u16::from_le_bytes([sixth_a, sixth_b])),
+    ])
+}
+
+fn decode_snapshot_row_fields_u24(row_bytes: &[u8]) -> Result<[u32; 6], SnapshotIoError> {
+    let [
+        first_a,
+        first_b,
+        first_c,
+        second_a,
+        second_b,
+        second_c,
+        third_a,
+        third_b,
+        third_c,
+        fourth_a,
+        fourth_b,
+        fourth_c,
+        fifth_a,
+        fifth_b,
+        fifth_c,
+        sixth_a,
+        sixth_b,
+        sixth_c,
+    ] = row_bytes_to_array(row_bytes)?;
+    Ok([
+        u32::from_le_bytes([first_a, first_b, first_c, 0]),
+        u32::from_le_bytes([second_a, second_b, second_c, 0]),
+        u32::from_le_bytes([third_a, third_b, third_c, 0]),
+        u32::from_le_bytes([fourth_a, fourth_b, fourth_c, 0]),
+        u32::from_le_bytes([fifth_a, fifth_b, fifth_c, 0]),
+        u32::from_le_bytes([sixth_a, sixth_b, sixth_c, 0]),
+    ])
+}
+
+fn decode_snapshot_row_fields_u32(row_bytes: &[u8]) -> Result<[u32; 6], SnapshotIoError> {
+    let [
+        first_a,
+        first_b,
+        first_c,
+        first_d,
+        second_a,
+        second_b,
+        second_c,
+        second_d,
+        third_a,
+        third_b,
+        third_c,
+        third_d,
+        fourth_a,
+        fourth_b,
+        fourth_c,
+        fourth_d,
+        fifth_a,
+        fifth_b,
+        fifth_c,
+        fifth_d,
+        sixth_a,
+        sixth_b,
+        sixth_c,
+        sixth_d,
+    ] = row_bytes_to_array(row_bytes)?;
+    Ok([
+        u32::from_le_bytes([first_a, first_b, first_c, first_d]),
+        u32::from_le_bytes([second_a, second_b, second_c, second_d]),
+        u32::from_le_bytes([third_a, third_b, third_c, third_d]),
+        u32::from_le_bytes([fourth_a, fourth_b, fourth_c, fourth_d]),
+        u32::from_le_bytes([fifth_a, fifth_b, fifth_c, fifth_d]),
+        u32::from_le_bytes([sixth_a, sixth_b, sixth_c, sixth_d]),
+    ])
+}
+
+fn row_bytes_to_array<const LEN: usize>(row_bytes: &[u8]) -> Result<[u8; LEN], SnapshotIoError> {
+    row_bytes.try_into().map_err(|_| SnapshotIoError::Format {
+        reason: "relationship row width is invalid",
     })
 }
 

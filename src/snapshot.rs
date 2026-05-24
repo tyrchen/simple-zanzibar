@@ -8,7 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
     fs::{self, File},
-    io::{self, BufWriter, Read, Write},
+    io::{self, BufReader, BufWriter, Read, Write},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
@@ -89,6 +89,13 @@ impl SnapshotSaveOptions {
         self.zstd_level = zstd_level;
         self
     }
+
+    pub(crate) const fn section_layout(self) -> SnapshotEncodingLayout {
+        match self.compression {
+            SnapshotCompression::None => SnapshotEncodingLayout::Compact,
+            SnapshotCompression::Zstd => SnapshotEncodingLayout::CompressionFriendly,
+        }
+    }
 }
 
 /// Snapshot compression mode.
@@ -96,8 +103,20 @@ impl SnapshotSaveOptions {
 pub enum SnapshotCompression {
     /// Store all sections uncompressed.
     None,
-    /// Wrap the raw `.szsnap` payload in a single zstd frame.
+    /// Wrap a valid `.szsnap` payload in a single zstd frame.
+    ///
+    /// The inner payload may use section widths chosen for better compression while remaining a
+    /// normal versioned snapshot parsed by the same reader.
     Zstd,
+}
+
+/// Internal section layout used before any outer compression is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotEncodingLayout {
+    /// Minimize the raw `.szsnap` artifact size with variable-width section fields.
+    Compact,
+    /// Preserve fixed-width row and symbol metadata when an outer compressor can absorb zeros.
+    CompressionFriendly,
 }
 
 /// Supported compact snapshot artifact format versions.
@@ -211,6 +230,11 @@ pub struct SnapshotLoadOptions {
     /// Integrity proof expected before publishing the loaded snapshot.
     pub integrity: SnapshotIntegrityMode,
     /// Maximum accepted file size in bytes.
+    ///
+    /// For zstd snapshots this cap is enforced against both the compressed file and the
+    /// decompressed inner snapshot payload. The inner payload is a normal versioned snapshot and
+    /// may be larger than an independently saved uncompressed artifact because zstd saves can
+    /// choose compression-friendly section widths.
     pub max_file_bytes: NonZeroU64,
     /// Minimum index capability required by the caller.
     pub required_index_profile: IndexProfile,
@@ -658,9 +682,11 @@ pub(crate) fn save_snapshot_file(
         });
     }
     writer.add_section(SectionKind::Schema, schema_source.into_bytes(), 1)?;
-    snapshot
-        .relationships()
-        .encode_snapshot_sections(&mut writer, options.index_profile)?;
+    snapshot.relationships().encode_snapshot_sections(
+        &mut writer,
+        options.index_profile,
+        options.section_layout(),
+    )?;
     match options.compression {
         SnapshotCompression::None => {
             write_uncompressed_snapshot_file(path, snapshot, writer, options.index_profile)
@@ -763,6 +789,10 @@ fn read_decode_payload(
     options: SnapshotLoadOptions,
     timings: &mut Option<&mut SnapshotLoadPhaseTimings>,
 ) -> Result<Vec<u8>, SnapshotIoError> {
+    if options.compression == SnapshotCompression::Zstd {
+        return read_decode_zstd_payload(path, options.max_file_bytes, timings);
+    }
+
     let phase_start = Instant::now();
     let bytes = read_capped_file(path, options.max_file_bytes)?;
     record_phase(
@@ -772,6 +802,30 @@ fn read_decode_payload(
     );
     let phase_start = Instant::now();
     let bytes = decode_payload(bytes, options)?;
+    record_phase(
+        timings,
+        |timings, elapsed| {
+            timings.decompression = elapsed;
+        },
+        phase_start,
+    );
+    Ok(bytes)
+}
+
+fn read_decode_zstd_payload(
+    path: &Path,
+    max_file_bytes: NonZeroU64,
+    timings: &mut Option<&mut SnapshotLoadPhaseTimings>,
+) -> Result<Vec<u8>, SnapshotIoError> {
+    let phase_start = Instant::now();
+    let (file, metadata_len) = open_capped_file(path, max_file_bytes)?;
+    record_phase(
+        timings,
+        |timings, elapsed| timings.file_read = elapsed,
+        phase_start,
+    );
+    let phase_start = Instant::now();
+    let bytes = decode_zstd_bounded(BufReader::new(file.take(metadata_len)), max_file_bytes)?;
     record_phase(
         timings,
         |timings, elapsed| {
@@ -895,21 +949,21 @@ fn decode_payload(
 ) -> Result<Vec<u8>, SnapshotIoError> {
     match options.compression {
         SnapshotCompression::None => Ok(bytes),
-        SnapshotCompression::Zstd => decode_zstd_bounded(&bytes, options.max_file_bytes),
+        SnapshotCompression::Zstd => decode_zstd_bounded(bytes.as_slice(), options.max_file_bytes),
     }
 }
 
-fn decode_zstd_bounded(
-    bytes: &[u8],
-    max_file_bytes: NonZeroU64,
-) -> Result<Vec<u8>, SnapshotIoError> {
+fn decode_zstd_bounded<R>(reader: R, max_file_bytes: NonZeroU64) -> Result<Vec<u8>, SnapshotIoError>
+where
+    R: Read,
+{
     let read_limit = max_file_bytes
         .get()
         .checked_add(1)
         .ok_or(SnapshotIoError::LimitExceeded {
             component: "decompressed snapshot file",
         })?;
-    let decoder = zstd::stream::read::Decoder::new(bytes)?;
+    let decoder = zstd::stream::read::Decoder::new(reader)?;
     let mut limited_decoder = decoder.take(read_limit);
     let mut output = Vec::new();
     limited_decoder.read_to_end(&mut output)?;
@@ -922,6 +976,21 @@ fn decode_zstd_bounded(
 }
 
 fn read_capped_file(path: &Path, max_file_bytes: NonZeroU64) -> Result<Vec<u8>, SnapshotIoError> {
+    let (file, metadata_len) = open_capped_file(path, max_file_bytes)?;
+    let mut bytes = Vec::with_capacity(checked_usize_from_u64(metadata_len)?);
+    file.take(metadata_len).read_to_end(&mut bytes)?;
+    if checked_u64_from_usize(bytes.len())? != metadata_len {
+        return Err(SnapshotIoError::Format {
+            reason: "snapshot file changed during read",
+        });
+    }
+    Ok(bytes)
+}
+
+fn open_capped_file(
+    path: &Path,
+    max_file_bytes: NonZeroU64,
+) -> Result<(File, u64), SnapshotIoError> {
     let file = File::open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -935,15 +1004,7 @@ fn read_capped_file(path: &Path, max_file_bytes: NonZeroU64) -> Result<Vec<u8>, 
             component: "snapshot file",
         });
     }
-
-    let mut bytes = Vec::with_capacity(checked_usize_from_u64(metadata_len)?);
-    file.take(metadata_len).read_to_end(&mut bytes)?;
-    if checked_u64_from_usize(bytes.len())? != metadata_len {
-        return Err(SnapshotIoError::Format {
-            reason: "snapshot file changed during read",
-        });
-    }
-    Ok(bytes)
+    Ok((file, metadata_len))
 }
 
 fn write_uncompressed_snapshot_file(

@@ -67,10 +67,13 @@ struct SnapshotSizeReport {
     profile: IndexProfile,
     raw_bytes: u64,
     zstd_bytes: u64,
+    zstd_inner_raw_bytes: u64,
     relationship_count: u32,
     symbol_count: u32,
     sections: Vec<SectionReport>,
+    zstd_inner_sections: Vec<SectionReport>,
     index_groups: Vec<IndexGroupReport>,
+    zstd_inner_index_groups: Vec<IndexGroupReport>,
 }
 
 impl SnapshotSizeReport {
@@ -87,12 +90,38 @@ impl SnapshotSizeReport {
             .saturating_sub(self.index_payload_bytes())
     }
 
-    fn section_len(&self, kind: SectionKind) -> u64 {
-        self.sections
-            .iter()
-            .find(|section| section.kind == kind)
-            .map_or(0, |section| section.len)
+    fn zstd_inner_index_payload_bytes(&self) -> u64 {
+        section_len(&self.zstd_inner_sections, SectionKind::IndexDirectory)
+            .saturating_add(section_len(
+                &self.zstd_inner_sections,
+                SectionKind::IndexKeys,
+            ))
+            .saturating_add(section_len(
+                &self.zstd_inner_sections,
+                SectionKind::PostingRanges,
+            ))
+            .saturating_add(section_len(
+                &self.zstd_inner_sections,
+                SectionKind::PostingRowIds,
+            ))
     }
+
+    fn zstd_inner_non_index_payload_bytes(&self) -> u64 {
+        self.zstd_inner_raw_bytes
+            .saturating_sub(snapshot_envelope_bytes())
+            .saturating_sub(self.zstd_inner_index_payload_bytes())
+    }
+
+    fn section_len(&self, kind: SectionKind) -> u64 {
+        section_len(&self.sections, kind)
+    }
+}
+
+fn section_len(sections: &[SectionReport], kind: SectionKind) -> u64 {
+    sections
+        .iter()
+        .find(|section| section.kind == kind)
+        .map_or(0, |section| section.len)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -296,9 +325,17 @@ fn snapshot_size_report(
     );
 
     let raw_bytes = must(fs::read(&raw_path), "failed to read raw snapshot");
-    let zstd_len = must(fs::metadata(&zstd_path), "failed to stat zstd snapshot").len();
+    let zstd_bytes = must(fs::read(&zstd_path), "failed to read zstd snapshot");
+    let zstd_len = must(
+        u64::try_from(zstd_bytes.len()).map_err(|_| "zstd length overflowed"),
+        "failed to measure zstd snapshot",
+    );
+    let zstd_inner_bytes = must(
+        zstd::stream::decode_all(zstd_bytes.as_slice()),
+        "failed to decode zstd snapshot",
+    );
     let report = must(
-        parse_snapshot_report(label, profile, &raw_bytes, zstd_len),
+        parse_snapshot_report(label, profile, &raw_bytes, zstd_len, &zstd_inner_bytes),
         "failed to parse raw snapshot",
     );
     remove_file(&raw_path);
@@ -311,17 +348,22 @@ fn parse_snapshot_report(
     profile: IndexProfile,
     bytes: &[u8],
     zstd_bytes: u64,
+    zstd_inner_bytes: &[u8],
 ) -> Result<SnapshotSizeReport, String> {
     let relationship_count = read_u32(bytes, 60)?;
     let symbol_count = read_u32(bytes, 64)?;
     let sections = parse_sections(bytes)?;
     let index_groups = parse_index_groups(bytes, &sections)?;
+    let zstd_inner_sections = parse_sections(zstd_inner_bytes)?;
+    let zstd_inner_index_groups = parse_index_groups(zstd_inner_bytes, &zstd_inner_sections)?;
     Ok(SnapshotSizeReport {
         label,
         profile,
         raw_bytes: u64::try_from(bytes.len())
             .map_err(|_| "snapshot length does not fit u64".to_string())?,
         zstd_bytes,
+        zstd_inner_raw_bytes: u64::try_from(zstd_inner_bytes.len())
+            .map_err(|_| "zstd inner snapshot length does not fit u64".to_string())?,
         relationship_count,
         symbol_count,
         sections: sections
@@ -332,7 +374,16 @@ fn parse_snapshot_report(
                 row_count: entry.row_count,
             })
             .collect(),
+        zstd_inner_sections: zstd_inner_sections
+            .iter()
+            .map(|entry| SectionReport {
+                kind: entry.kind,
+                len: entry.len,
+                row_count: entry.row_count,
+            })
+            .collect(),
         index_groups,
+        zstd_inner_index_groups,
     })
 }
 
@@ -650,9 +701,25 @@ fn print_reports(reports: &[SnapshotSizeReport]) {
             report.index_payload_bytes(),
             report.non_index_payload_bytes(),
         );
+        eprintln!(
+            "snapshot_section_size/{}/zstd_inner: raw={} index_payload={} non_index_payload={}",
+            report.label,
+            report.zstd_inner_raw_bytes,
+            report.zstd_inner_index_payload_bytes(),
+            report.zstd_inner_non_index_payload_bytes(),
+        );
         for section in &report.sections {
             eprintln!(
                 "snapshot_section_size/{}/section/{}: bytes={} rows={}",
+                report.label,
+                section.kind.name(),
+                section.len,
+                section.row_count,
+            );
+        }
+        for section in &report.zstd_inner_sections {
+            eprintln!(
+                "snapshot_section_size/{}/zstd_inner_section/{}: bytes={} rows={}",
                 report.label,
                 section.kind.name(),
                 section.len,
@@ -663,6 +730,23 @@ fn print_reports(reports: &[SnapshotSizeReport]) {
             eprintln!(
                 "snapshot_section_size/{}/index_group/{}: keys={} ranges={} overflow_row_ids={} \
                  total_postings={} payload_bytes={} key_bytes={} range_bytes={} overflow_bytes={}",
+                report.label,
+                group.kind.name(),
+                group.key_count,
+                group.range_count,
+                group.overflow_row_id_count,
+                group.total_postings(),
+                group.payload_bytes(),
+                group.key_bytes(),
+                group.range_bytes(),
+                group.overflow_bytes(),
+            );
+        }
+        for group in &report.zstd_inner_index_groups {
+            eprintln!(
+                "snapshot_section_size/{}/zstd_inner_index_group/{}: keys={} ranges={} \
+                 overflow_row_ids={} total_postings={} payload_bytes={} key_bytes={} \
+                 range_bytes={} overflow_bytes={}",
                 report.label,
                 group.kind.name(),
                 group.key_count,

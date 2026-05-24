@@ -156,27 +156,54 @@ fn test_should_save_and_load_zstd_snapshot_through_service_and_engine()
 }
 
 #[test]
+fn test_should_use_compression_friendly_inner_layout_for_zstd_snapshots()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = populated_service()?.0;
+    let raw_path = temp_snapshot_path("zstd_layout_raw");
+    let zstd_path = temp_snapshot_path("zstd_layout_compressed");
+    service.save_snapshot(&raw_path, SnapshotSaveOptions::default())?;
+    service.save_snapshot(&zstd_path, SnapshotSaveOptions::zstd())?;
+
+    let raw_bytes = fs::read(&raw_path)?;
+    let zstd_bytes = fs::read(&zstd_path)?;
+    let zstd_inner = zstd::stream::decode_all(zstd_bytes.as_slice())?;
+
+    assert!(zstd_inner.len() > raw_bytes.len());
+    assert!(section_width(&raw_bytes, SECTION_KIND_RELATIONSHIP_ROWS)? < 4);
+    assert!(section_width(&raw_bytes, SECTION_KIND_SYMBOL_LOOKUP)? < 4);
+    assert_eq!(
+        section_width(&zstd_inner, SECTION_KIND_RELATIONSHIP_ROWS)?,
+        4
+    );
+    assert_eq!(section_width(&zstd_inner, SECTION_KIND_SYMBOL_LOOKUP)?, 4);
+    assert_eq!(symbol_table_widths(&zstd_inner)?, (4, 4));
+
+    remove_file(&raw_path);
+    remove_file(&zstd_path);
+    Ok(())
+}
+
+#[test]
 fn test_should_apply_snapshot_size_cap_to_zstd_decompressed_payload()
 -> Result<(), Box<dyn std::error::Error>> {
     let service = populated_service()?.0;
     let raw_path = temp_snapshot_path("zstd_cap_raw");
     let zstd_path = temp_snapshot_path("zstd_cap_compressed");
     service.save_snapshot(&raw_path, SnapshotSaveOptions::default())?;
-    service.save_snapshot(
-        &zstd_path,
-        SnapshotSaveOptions {
-            compression: SnapshotCompression::Zstd,
-            ..SnapshotSaveOptions::default()
-        },
-    )?;
+    service.save_snapshot(&zstd_path, SnapshotSaveOptions::zstd())?;
     let raw_len = fs::metadata(&raw_path)?.len();
-    let capped_len = raw_len.checked_sub(1).ok_or("raw snapshot is empty")?;
+    let zstd_bytes = fs::read(&zstd_path)?;
+    let zstd_inner = zstd::stream::decode_all(zstd_bytes.as_slice())?;
+    let zstd_len = u64::try_from(zstd_bytes.len())?;
+    let zstd_inner_len = u64::try_from(zstd_inner.len())?;
+    assert!(zstd_len <= raw_len);
+    assert!(raw_len < zstd_inner_len);
 
     let result = ZanzibarEngine::load_snapshot(
         &zstd_path,
         SnapshotLoadOptions {
             compression: SnapshotCompression::Zstd,
-            max_file_bytes: non_zero_u64(capped_len),
+            max_file_bytes: non_zero_u64(raw_len),
             ..SnapshotLoadOptions::default()
         },
     );

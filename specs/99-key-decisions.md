@@ -283,3 +283,25 @@ Each decision is load-bearing. Supersede with a new decision entry rather than s
   [23-read-performance-optimization-design.md](./23-read-performance-optimization-design.md),
   [71-performance-budgets-design.md](./71-performance-budgets-design.md)
 - Date: 2026-05-24
+
+## D23 - Let zstd snapshots choose a compression-friendly inner layout
+
+- Context: Phase 13 compacted raw v3 snapshots with variable-width row and symbol fields. The raw
+  artifacts got smaller, but zstd does not always reward minimal raw bytes: fixed-width fields add
+  predictable zero bytes and alignment that can compress better, while also being cheaper for the
+  loader to decode.
+- Alternatives considered: raise zstd level, compress each section independently, add a v4 snapshot
+  format, keep zstd wrapping the exact same compact raw bytes, or make every raw snapshot fixed
+  width again.
+- Decision: keep `SnapshotCompression::Zstd` as a single outer frame, but choose a
+  compression-friendly v3 inner layout for row and symbol metadata. Raw `.szsnap` keeps the compact
+  Phase 13 layout, zstd inner rows/symbol tables/lookups use fixed `u32` widths, and compact index
+  sections stay unchanged. Direct zstd load streams decompression from the file so the compressed
+  frame does not remain resident alongside the larger inner payload.
+- Why: existing v3 section flags already describe width choices, so no format bump or public API
+  change is needed. The measured 1M Full zstd artifact improves from 22,317,770 bytes to
+  21,471,681 bytes in the section-size harness while raw Full remains 77,573,519 bytes.
+- Pinned by: [24-zstd-aware-snapshot-load-design.md](./24-zstd-aware-snapshot-load-design.md),
+  [22-snapshot-file-size-optimization-design.md](./22-snapshot-file-size-optimization-design.md),
+  [71-performance-budgets-design.md](./71-performance-budgets-design.md)
+- Date: 2026-05-24
