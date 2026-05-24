@@ -266,3 +266,20 @@ Each decision is load-bearing. Supersede with a new decision entry rather than s
   [72-testing-verification-plan.md](./72-testing-verification-plan.md),
   [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Date: 2026-05-24
+
+## D22 - Separate snapshot-size work from read-latency work
+
+- Context: the 2026-05-24 section-size benchmark shows `CheckOnly` saves 46,233,788 bytes by
+  omitting broad/reverse index groups, but the retained exact resource index is the one used by hot
+  `check` paths. File-size reductions therefore do not automatically improve read latency.
+- Alternatives considered: treat smaller snapshots as the next read-performance pass; focus only on
+  zstd distribution size; split file-size and read-path optimization into separate specs.
+- Decision: track snapshot file-size optimization in [22](./22-snapshot-file-size-optimization-design.md)
+  and read-performance optimization in [23](./23-read-performance-optimization-design.md).
+- Why: file-size work should be section-accounted and format-safe, while read latency needs
+  evaluator/store-view changes such as schema ID IR, segment-native keys, reusable contexts, and
+  exact-proof shortcuts.
+- Pinned by: [22-snapshot-file-size-optimization-design.md](./22-snapshot-file-size-optimization-design.md),
+  [23-read-performance-optimization-design.md](./23-read-performance-optimization-design.md),
+  [71-performance-budgets-design.md](./71-performance-budgets-design.md)
+- Date: 2026-05-24

@@ -21,7 +21,7 @@ use simple_zanzibar::{
     parser,
     relationship::{
         IndexedRelationshipStore, QueryLimit, RelationshipFilter, RelationshipMutation,
-        RelationshipReader, SubjectFilter,
+        RelationshipReader, RelationshipStoreView, SubjectFilter,
     },
     revision::{PublishedSnapshot, Revision, SchemaHash},
     schema,
@@ -404,7 +404,9 @@ fn build_org_snapshot(rules: usize) -> Arc<PublishedSnapshot> {
         SchemaHash::for_schema(&schema),
         Arc::new(configs),
         Arc::new(schema),
-        Arc::new(relationships),
+        Arc::new(RelationshipStoreView::from_checkpoint(Arc::new(
+            relationships,
+        ))),
     ))
 }
 

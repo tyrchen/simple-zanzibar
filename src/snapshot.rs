@@ -6,11 +6,13 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     fs::{self, File},
-    io::{self, Read},
+    io::{self, BufWriter, Read, Write},
     num::{NonZeroU64, NonZeroUsize},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
@@ -20,7 +22,7 @@ use crate::{
     error::ZanzibarError,
     model::NamespaceConfig,
     policy,
-    relationship::{IndexedRelationshipStore, StoreError},
+    relationship::{IndexedRelationshipStore, RelationshipStoreView, StoreError},
     revision::{Revision, SchemaHash},
     schema::{self, CompiledSchema},
 };
@@ -48,6 +50,8 @@ pub struct SnapshotSaveOptions {
     ///
     /// Version 2 requires indexes because fast loading depends on stable sorted index arrays.
     pub include_indexes: bool,
+    /// Index profile encoded in the snapshot artifact.
+    pub index_profile: IndexProfile,
 }
 
 impl Default for SnapshotSaveOptions {
@@ -56,6 +60,7 @@ impl Default for SnapshotSaveOptions {
             compression: SnapshotCompression::None,
             zstd_level: DEFAULT_ZSTD_LEVEL,
             include_indexes: true,
+            index_profile: IndexProfile::Full,
         }
     }
 }
@@ -93,6 +98,60 @@ pub enum SnapshotCompression {
     Zstd,
 }
 
+/// Relationship index profile encoded in runtime state and snapshot artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexProfile {
+    /// All indexes required by the complete public API.
+    Full,
+    /// Resource-side indexes for check, expand, and object-bounded permission audit.
+    CheckOnly,
+    /// Resource-side indexes plus object-bounded audit support.
+    CheckAndObjectAudit,
+}
+
+impl IndexProfile {
+    pub(crate) const fn flag_bits(self) -> u16 {
+        match self {
+            Self::Full => 0,
+            Self::CheckOnly => 1,
+            Self::CheckAndObjectAudit => 2,
+        }
+    }
+
+    fn from_flag_bits(value: u16) -> Result<Self, SnapshotIoError> {
+        match value {
+            0 => Ok(Self::Full),
+            1 => Ok(Self::CheckOnly),
+            2 => Ok(Self::CheckAndObjectAudit),
+            _ => Err(SnapshotIoError::Format {
+                reason: "snapshot index profile is unsupported",
+            }),
+        }
+    }
+
+    /// Returns true when subject reverse lookup indexes are present.
+    #[must_use]
+    pub const fn supports_subject_reverse_lookup(self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    pub(crate) const fn satisfies(self, required: Self) -> bool {
+        matches!(
+            (self, required),
+            (Self::Full, _)
+                | (
+                    Self::CheckAndObjectAudit,
+                    Self::CheckAndObjectAudit | Self::CheckOnly
+                )
+                | (Self::CheckOnly, Self::CheckOnly)
+        )
+    }
+
+    pub(crate) const fn supports_broad_resource_indexes(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 /// Options used when loading a compact snapshot artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotLoadOptions {
@@ -106,6 +165,8 @@ pub struct SnapshotLoadOptions {
     pub integrity: SnapshotIntegrityMode,
     /// Maximum accepted file size in bytes.
     pub max_file_bytes: NonZeroU64,
+    /// Minimum index capability required by the caller.
+    pub required_index_profile: IndexProfile,
 }
 
 impl Default for SnapshotLoadOptions {
@@ -116,6 +177,7 @@ impl Default for SnapshotLoadOptions {
             validation: SnapshotValidationMode::Full,
             integrity: SnapshotIntegrityMode::Checksum,
             max_file_bytes: non_zero_u64(DEFAULT_MAX_FILE_BYTES),
+            required_index_profile: IndexProfile::Full,
         }
     }
 }
@@ -162,6 +224,30 @@ pub enum SnapshotIntegrityMode {
     Checksum,
     /// Assume the artifact bytes were verified by an external content-address or signature layer.
     External,
+}
+
+/// Benchmark-only snapshot load phase timing evidence.
+#[cfg_attr(not(feature = "bench-internals"), doc(hidden))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SnapshotLoadPhaseTimings {
+    /// Reading bytes from the filesystem.
+    pub file_read: Duration,
+    /// Decompressing a zstd payload, if configured.
+    pub decompression: Duration,
+    /// Parsing header and section directory metadata.
+    pub header_and_sections: Duration,
+    /// Verifying the snapshot footer checksum.
+    pub checksum: Duration,
+    /// Parsing and compiling the schema section.
+    pub schema_parse_compile: Duration,
+    /// Decoding symbol sections.
+    pub symbols: Duration,
+    /// Decoding relationship rows.
+    pub rows: Duration,
+    /// Decoding relationship indexes.
+    pub indexes: Duration,
+    /// Publishing the loaded structures into the returned value.
+    pub publish: Duration,
 }
 
 /// Errors returned by compact snapshot save/load operations.
@@ -242,7 +328,7 @@ impl From<DomainError> for SnapshotIoError {
 pub(crate) struct LoadedSnapshot {
     pub(crate) configs: HashMap<String, NamespaceConfig>,
     pub(crate) schema: CompiledSchema,
-    pub(crate) relationships: Arc<IndexedRelationshipStore>,
+    pub(crate) relationships: Arc<RelationshipStoreView>,
     pub(crate) revision: Revision,
     pub(crate) schema_hash: SchemaHash,
 }
@@ -294,6 +380,7 @@ pub(crate) struct SnapshotHeader {
     pub(crate) relationship_count: u32,
     pub(crate) symbol_count: u32,
     pub(crate) created_revision: Revision,
+    pub(crate) index_profile: IndexProfile,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -319,14 +406,17 @@ impl<'a> SnapshotSection<'a> {
 #[derive(Debug)]
 pub(crate) struct SnapshotReader<'a> {
     header: SnapshotHeader,
-    sections: HashMap<SectionKind, SnapshotSection<'a>>,
+    sections: SnapshotSections<'a>,
 }
+
+type SnapshotSections<'a> = [Option<SnapshotSection<'a>>; REQUIRED_SECTION_COUNT];
 
 impl<'a> SnapshotReader<'a> {
     /// Parses and validates the outer snapshot envelope.
     pub(crate) fn parse(
         bytes: &'a [u8],
         integrity: SnapshotIntegrityMode,
+        timings: Option<&mut SnapshotLoadPhaseTimings>,
     ) -> Result<Self, SnapshotIoError> {
         let header = parse_header(bytes)?;
         let directory_start = checked_usize_from_u32(HEADER_LEN_U32)?;
@@ -347,7 +437,7 @@ impl<'a> SnapshotReader<'a> {
 
         let mut cursor = BinaryCursor::new(directory_bytes);
         let mut entries = Vec::with_capacity(section_count);
-        let mut sections = HashMap::with_capacity(section_count);
+        let mut sections = empty_sections();
         for _ in 0..section_count {
             let raw_kind = cursor.read_u16()?;
             let kind = SectionKind::from_raw(raw_kind)?;
@@ -360,7 +450,8 @@ impl<'a> SnapshotReader<'a> {
             let offset = cursor.read_u64()?;
             let len = cursor.read_u64()?;
             let row_count = cursor.read_u64()?;
-            if sections.contains_key(&kind) {
+            let slot = section_slot(kind);
+            if sections.get(slot).copied().flatten().is_some() {
                 return Err(SnapshotIoError::Format {
                     reason: "duplicate snapshot section",
                 });
@@ -376,19 +467,22 @@ impl<'a> SnapshotReader<'a> {
             let section_bytes = bytes.get(start..end).ok_or(SnapshotIoError::Format {
                 reason: "snapshot section range is invalid",
             })?;
-            sections.insert(
-                kind,
-                SnapshotSection {
+            if let Some(section) = sections.get_mut(slot) {
+                *section = Some(SnapshotSection {
                     bytes: section_bytes,
                     row_count,
-                },
-            );
+                });
+            }
             entries.push((offset, len, kind));
         }
 
         validate_required_sections(&sections)?;
         validate_non_overlapping_sections(&mut entries)?;
+        let checksum_start = Instant::now();
         validate_footer(bytes, &sections, integrity)?;
+        if let Some(timings) = timings {
+            timings.checksum = checksum_start.elapsed();
+        }
         Ok(Self { header, sections })
     }
 
@@ -404,12 +498,21 @@ impl<'a> SnapshotReader<'a> {
         kind: SectionKind,
     ) -> Result<SnapshotSection<'a>, SnapshotIoError> {
         self.sections
-            .get(&kind)
+            .get(section_slot(kind))
             .copied()
+            .flatten()
             .ok_or(SnapshotIoError::Format {
                 reason: "missing required snapshot section",
             })
     }
+}
+
+const fn empty_sections<'a>() -> SnapshotSections<'a> {
+    [None; REQUIRED_SECTION_COUNT]
+}
+
+const fn section_slot(kind: SectionKind) -> usize {
+    kind as usize - 1
 }
 
 #[derive(Debug, Default)]
@@ -491,16 +594,87 @@ pub(crate) fn save_snapshot_file(
     writer.add_section(SectionKind::Schema, schema_source.into_bytes(), 1)?;
     snapshot
         .relationships()
-        .encode_snapshot_sections(&mut writer)?;
-    let bytes = encode_file(snapshot, writer)?;
-    fs::write(path, encode_payload(bytes, options)?)?;
-    Ok(())
+        .encode_snapshot_sections(&mut writer, options.index_profile)?;
+    match options.compression {
+        SnapshotCompression::None => {
+            write_uncompressed_snapshot_file(path, snapshot, writer, options.index_profile)
+        }
+        SnapshotCompression::Zstd => {
+            let bytes = encode_file(snapshot, writer, options.index_profile)?;
+            fs::write(path, encode_payload(bytes, options)?)?;
+            Ok(())
+        }
+    }
 }
 
 pub(crate) fn load_snapshot_file(
     path: &Path,
     options: SnapshotLoadOptions,
 ) -> Result<LoadedSnapshot, SnapshotIoError> {
+    load_snapshot_file_inner(path, options, None)
+}
+
+#[cfg(feature = "bench-internals")]
+/// Loads a snapshot and returns benchmark-only phase timing evidence.
+///
+/// # Errors
+///
+/// Returns [`SnapshotIoError`] when the artifact cannot be read or fails validation.
+pub fn load_snapshot_phase_timings(
+    path: &Path,
+    options: SnapshotLoadOptions,
+) -> Result<SnapshotLoadPhaseTimings, SnapshotIoError> {
+    let mut timings = SnapshotLoadPhaseTimings::default();
+    let _loaded = load_snapshot_file_inner(path, options, Some(&mut timings))?;
+    Ok(timings)
+}
+
+fn load_snapshot_file_inner(
+    path: &Path,
+    options: SnapshotLoadOptions,
+    mut timings: Option<&mut SnapshotLoadPhaseTimings>,
+) -> Result<LoadedSnapshot, SnapshotIoError> {
+    validate_load_options(options)?;
+    let bytes = read_decode_payload(path, options, &mut timings)?;
+    let reader = parse_reader(&bytes, options, &mut timings)?;
+    let phase_start = Instant::now();
+    let (configs_vec, schema, schema_hash) = compile_snapshot_schema(&reader)?;
+    record_phase(
+        &mut timings,
+        |timings, elapsed| {
+            timings.schema_parse_compile = elapsed;
+        },
+        phase_start,
+    );
+    let relationships = decode_relationships_with_optional_timings(
+        &reader,
+        options.profile,
+        options.validation,
+        timings.as_deref_mut(),
+    )?;
+    let phase_start = Instant::now();
+    let configs = configs_vec
+        .into_iter()
+        .map(|config| (config.name.clone(), config))
+        .collect::<HashMap<_, _>>();
+    let loaded = LoadedSnapshot {
+        configs,
+        schema,
+        relationships,
+        revision: reader.header().created_revision,
+        schema_hash,
+    };
+    record_phase(
+        &mut timings,
+        |timings, elapsed| {
+            timings.publish = elapsed;
+        },
+        phase_start,
+    );
+    Ok(loaded)
+}
+
+fn validate_load_options(options: SnapshotLoadOptions) -> Result<(), SnapshotIoError> {
     if options.validation == SnapshotValidationMode::TrustedFastLoad
         && options.profile != SnapshotLoadProfile::FastLoad
     {
@@ -515,9 +689,62 @@ pub(crate) fn load_snapshot_file(
             option: "external integrity without trusted validation",
         });
     }
+    Ok(())
+}
+
+fn read_decode_payload(
+    path: &Path,
+    options: SnapshotLoadOptions,
+    timings: &mut Option<&mut SnapshotLoadPhaseTimings>,
+) -> Result<Vec<u8>, SnapshotIoError> {
+    let phase_start = Instant::now();
     let bytes = read_capped_file(path, options.max_file_bytes)?;
+    record_phase(
+        timings,
+        |timings, elapsed| timings.file_read = elapsed,
+        phase_start,
+    );
+    let phase_start = Instant::now();
     let bytes = decode_payload(bytes, options)?;
-    let reader = SnapshotReader::parse(&bytes, options.integrity)?;
+    record_phase(
+        timings,
+        |timings, elapsed| {
+            timings.decompression = elapsed;
+        },
+        phase_start,
+    );
+    Ok(bytes)
+}
+
+fn parse_reader<'a>(
+    bytes: &'a [u8],
+    options: SnapshotLoadOptions,
+    timings: &mut Option<&mut SnapshotLoadPhaseTimings>,
+) -> Result<SnapshotReader<'a>, SnapshotIoError> {
+    let phase_start = Instant::now();
+    let reader = SnapshotReader::parse(bytes, options.integrity, timings.as_deref_mut())?;
+    if !reader
+        .header()
+        .index_profile
+        .satisfies(options.required_index_profile)
+    {
+        return Err(SnapshotIoError::UnsupportedOption {
+            option: "snapshot index profile does not satisfy load requirements",
+        });
+    }
+    record_phase(
+        timings,
+        |timings, elapsed| {
+            timings.header_and_sections = elapsed.saturating_sub(timings.checksum);
+        },
+        phase_start,
+    );
+    Ok(reader)
+}
+
+fn compile_snapshot_schema(
+    reader: &SnapshotReader<'_>,
+) -> Result<(Vec<NamespaceConfig>, CompiledSchema, SchemaHash), SnapshotIoError> {
     let schema_section = reader.section(SectionKind::Schema)?;
     if schema_section.bytes().len() > MAX_SCHEMA_BYTES {
         return Err(SnapshotIoError::LimitExceeded {
@@ -538,22 +765,39 @@ pub(crate) fn load_snapshot_file(
             reason: "schema hash does not match schema section",
         });
     }
-    let relationships = Arc::new(IndexedRelationshipStore::decode_snapshot_sections(
-        &reader,
-        options.profile,
-        options.validation,
+    Ok((configs_vec, schema, schema_hash))
+}
+
+fn decode_relationships_with_optional_timings(
+    reader: &SnapshotReader<'_>,
+    profile: SnapshotLoadProfile,
+    validation: SnapshotValidationMode,
+    timings: Option<&mut SnapshotLoadPhaseTimings>,
+) -> Result<Arc<RelationshipStoreView>, SnapshotIoError> {
+    #[cfg(feature = "bench-internals")]
+    if let Some(timings) = timings {
+        let store = Arc::new(
+            IndexedRelationshipStore::decode_snapshot_sections_with_timings(
+                reader, profile, validation, timings,
+            )?,
+        );
+        return Ok(Arc::new(RelationshipStoreView::from_checkpoint(store)));
+    }
+    let _ = timings;
+    let store = Arc::new(IndexedRelationshipStore::decode_snapshot_sections(
+        reader, profile, validation,
     )?);
-    let configs = configs_vec
-        .into_iter()
-        .map(|config| (config.name.clone(), config))
-        .collect::<HashMap<_, _>>();
-    Ok(LoadedSnapshot {
-        configs,
-        schema,
-        relationships,
-        revision: reader.header().created_revision,
-        schema_hash,
-    })
+    Ok(Arc::new(RelationshipStoreView::from_checkpoint(store)))
+}
+
+fn record_phase(
+    timings: &mut Option<&mut SnapshotLoadPhaseTimings>,
+    record: impl FnOnce(&mut SnapshotLoadPhaseTimings, Duration),
+    phase_start: Instant,
+) {
+    if let Some(timings) = timings.as_deref_mut() {
+        record(timings, phase_start.elapsed());
+    }
 }
 
 fn validate_compression_options(options: SnapshotSaveOptions) -> Result<(), SnapshotIoError> {
@@ -636,13 +880,81 @@ fn read_capped_file(path: &Path, max_file_bytes: NonZeroU64) -> Result<Vec<u8>, 
     Ok(bytes)
 }
 
-fn encode_file(
+fn write_uncompressed_snapshot_file(
+    path: &Path,
     snapshot: &crate::revision::PublishedSnapshot,
     writer: SnapshotSectionWriter,
-) -> Result<Vec<u8>, SnapshotIoError> {
+    index_profile: IndexProfile,
+) -> Result<(), SnapshotIoError> {
+    let tmp_path = snapshot_tmp_path(path, snapshot.revision());
+    let result = write_uncompressed_snapshot_file_inner(&tmp_path, snapshot, writer, index_profile)
+        .and_then(|()| fs::rename(&tmp_path, path).map_err(Into::into));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+fn write_uncompressed_snapshot_file_inner(
+    path: &Path,
+    snapshot: &crate::revision::PublishedSnapshot,
+    writer: SnapshotSectionWriter,
+    index_profile: IndexProfile,
+) -> Result<(), SnapshotIoError> {
     let relationship_count =
         checked_u32_from_u64(writer.row_count(SectionKind::RelationshipRows)?)?;
     let symbol_count = checked_u32_from_u64(writer.row_count(SectionKind::SymbolTable)?)?;
+    let sections = snapshot_sections_with_footer(writer)?;
+    let directory = section_directory(&sections)?;
+    let file_len = directory_file_len(&directory)?;
+
+    let mut header = Vec::with_capacity(HEADER_LEN);
+    write_header(
+        &mut header,
+        snapshot.schema_hash(),
+        relationship_count,
+        symbol_count,
+        snapshot.revision(),
+        file_len,
+        index_profile,
+    );
+    let mut directory_bytes =
+        Vec::with_capacity(checked_mul_usize(directory.len(), DIRECTORY_ENTRY_LEN)?);
+    for entry in &directory {
+        write_directory_entry(&mut directory_bytes, entry);
+    }
+
+    let file = File::create(path)?;
+    let mut file = BufWriter::new(file);
+    let mut hasher = blake3::Hasher::new();
+    let mut written = 0_u64;
+    write_hashed(&mut file, &mut hasher, &mut written, &header)?;
+    write_hashed(&mut file, &mut hasher, &mut written, &directory_bytes)?;
+    for section in &sections {
+        if section.kind == SectionKind::Footer {
+            let digest = hasher.finalize();
+            file.write_all(digest.as_bytes())?;
+            written = written
+                .checked_add(FOOTER_LEN as u64)
+                .ok_or(SnapshotIoError::Format {
+                    reason: "snapshot writer length overflowed",
+                })?;
+        } else {
+            write_hashed(&mut file, &mut hasher, &mut written, &section.bytes)?;
+        }
+    }
+    file.flush()?;
+    if written != file_len {
+        return Err(SnapshotIoError::Format {
+            reason: "snapshot writer length mismatch",
+        });
+    }
+    Ok(())
+}
+
+fn snapshot_sections_with_footer(
+    writer: SnapshotSectionWriter,
+) -> Result<Vec<SectionPayload>, SnapshotIoError> {
     let mut sections = writer.into_sorted_sections();
     sections.push(SectionPayload {
         kind: SectionKind::Footer,
@@ -654,11 +966,16 @@ fn encode_file(
             reason: "snapshot writer did not produce all required sections",
         });
     }
+    Ok(sections)
+}
 
+fn section_directory(
+    sections: &[SectionPayload],
+) -> Result<Vec<SectionDirectoryEntry>, SnapshotIoError> {
     let directory_len = checked_mul_usize(sections.len(), DIRECTORY_ENTRY_LEN)?;
     let mut next_offset = checked_add_usize(HEADER_LEN, directory_len)?;
     let mut directory = Vec::with_capacity(sections.len());
-    for section in &sections {
+    for section in sections {
         let len = section.bytes.len();
         directory.push(SectionDirectoryEntry {
             kind: section.kind,
@@ -668,8 +985,57 @@ fn encode_file(
         });
         next_offset = checked_add_usize(next_offset, len)?;
     }
-    let file_len = checked_u64_from_usize(next_offset)?;
-    let mut bytes = Vec::with_capacity(next_offset);
+    Ok(directory)
+}
+
+fn directory_file_len(directory: &[SectionDirectoryEntry]) -> Result<u64, SnapshotIoError> {
+    let last = directory.last().ok_or(SnapshotIoError::Format {
+        reason: "snapshot directory is empty",
+    })?;
+    last.offset
+        .checked_add(last.len)
+        .ok_or(SnapshotIoError::Format {
+            reason: "snapshot writer length overflowed",
+        })
+}
+
+fn write_hashed(
+    file: &mut BufWriter<File>,
+    hasher: &mut blake3::Hasher,
+    written: &mut u64,
+    bytes: &[u8],
+) -> Result<(), SnapshotIoError> {
+    file.write_all(bytes)?;
+    hasher.update(bytes);
+    *written = written
+        .checked_add(checked_u64_from_usize(bytes.len())?)
+        .ok_or(SnapshotIoError::Format {
+            reason: "snapshot writer length overflowed",
+        })?;
+    Ok(())
+}
+
+fn snapshot_tmp_path(path: &Path, revision: Revision) -> PathBuf {
+    let mut file_name = path
+        .file_name()
+        .map_or_else(|| OsString::from("snapshot"), OsString::from);
+    file_name.push(format!(".{}.{}.tmp", std::process::id(), revision.get()));
+    path.with_file_name(file_name)
+}
+
+fn encode_file(
+    snapshot: &crate::revision::PublishedSnapshot,
+    writer: SnapshotSectionWriter,
+    index_profile: IndexProfile,
+) -> Result<Vec<u8>, SnapshotIoError> {
+    let relationship_count =
+        checked_u32_from_u64(writer.row_count(SectionKind::RelationshipRows)?)?;
+    let symbol_count = checked_u32_from_u64(writer.row_count(SectionKind::SymbolTable)?)?;
+    let sections = snapshot_sections_with_footer(writer)?;
+    let directory = section_directory(&sections)?;
+    let file_len = directory_file_len(&directory)?;
+    let file_len_usize = checked_usize_from_u64(file_len)?;
+    let mut bytes = Vec::with_capacity(file_len_usize);
     write_header(
         &mut bytes,
         snapshot.schema_hash(),
@@ -677,6 +1043,7 @@ fn encode_file(
         symbol_count,
         snapshot.revision(),
         file_len,
+        index_profile,
     );
     for entry in &directory {
         write_directory_entry(&mut bytes, entry);
@@ -684,7 +1051,7 @@ fn encode_file(
     for section in &sections {
         bytes.extend_from_slice(&section.bytes);
     }
-    if bytes.len() != next_offset {
+    if bytes.len() != file_len_usize {
         return Err(SnapshotIoError::Format {
             reason: "snapshot writer length mismatch",
         });
@@ -716,10 +1083,11 @@ fn write_header(
     symbol_count: u32,
     revision: Revision,
     file_len: u64,
+    index_profile: IndexProfile,
 ) {
     target.extend_from_slice(&MAGIC);
     target.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-    target.extend_from_slice(&0_u16.to_le_bytes());
+    target.extend_from_slice(&index_profile.flag_bits().to_le_bytes());
     target.extend_from_slice(&HEADER_LEN_U32.to_le_bytes());
     target.extend_from_slice(&REQUIRED_SECTION_COUNT_U32.to_le_bytes());
     target.extend_from_slice(&file_len.to_le_bytes());
@@ -753,12 +1121,7 @@ fn parse_header(bytes: &[u8]) -> Result<SnapshotHeader, SnapshotIoError> {
             reason: "snapshot format version is unsupported",
         });
     }
-    let flags = cursor.read_u16()?;
-    if flags != 0 {
-        return Err(SnapshotIoError::Format {
-            reason: "snapshot flags are unsupported",
-        });
-    }
+    let index_profile = IndexProfile::from_flag_bits(cursor.read_u16()?)?;
     let header_len = cursor.read_u32()?;
     if header_len != HEADER_LEN_U32 {
         return Err(SnapshotIoError::Format {
@@ -793,6 +1156,7 @@ fn parse_header(bytes: &[u8]) -> Result<SnapshotHeader, SnapshotIoError> {
         relationship_count,
         symbol_count,
         created_revision: revision,
+        index_profile,
     })
 }
 
@@ -807,9 +1171,7 @@ fn parse_section_count(bytes: &[u8]) -> Result<usize, SnapshotIoError> {
     checked_usize_from_u32(u32::from_le_bytes(array))
 }
 
-fn validate_required_sections(
-    sections: &HashMap<SectionKind, SnapshotSection<'_>>,
-) -> Result<(), SnapshotIoError> {
+fn validate_required_sections(sections: &SnapshotSections<'_>) -> Result<(), SnapshotIoError> {
     for kind in [
         SectionKind::Schema,
         SectionKind::SymbolBytes,
@@ -823,7 +1185,12 @@ fn validate_required_sections(
         SectionKind::SymbolLookup,
         SectionKind::Footer,
     ] {
-        if !sections.contains_key(&kind) {
+        if sections
+            .get(section_slot(kind))
+            .copied()
+            .flatten()
+            .is_none()
+        {
             return Err(SnapshotIoError::Format {
                 reason: "missing required snapshot section",
             });
@@ -852,12 +1219,13 @@ fn validate_non_overlapping_sections(
 
 fn validate_footer(
     bytes: &[u8],
-    sections: &HashMap<SectionKind, SnapshotSection<'_>>,
+    sections: &SnapshotSections<'_>,
     integrity: SnapshotIntegrityMode,
 ) -> Result<(), SnapshotIoError> {
     let footer = sections
-        .get(&SectionKind::Footer)
+        .get(section_slot(SectionKind::Footer))
         .copied()
+        .flatten()
         .ok_or(SnapshotIoError::Format {
             reason: "missing footer section",
         })?;

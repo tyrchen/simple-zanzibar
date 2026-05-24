@@ -187,6 +187,10 @@ The order is correct because:
 - compact snapshot serialization is valuable only after the in-memory compact representation is stable and memory evidence identifies cold load as the next bottleneck
 - trusted fast-load is valuable only after the fully validating snapshot format exists and profiling identifies repeated semantic validation as the dominant cost
 - structural optimization is valuable only after the complete public API and concurrent runtime exist, because otherwise benchmarks would optimize a provisional surface
+- snapshot file-size optimization is valuable only after section-size evidence separates index bytes
+  from row/symbol bytes
+- read-performance refinement is valuable only after write amplification is removed, because
+  otherwise mixed-read results conflate reader work with writer clone cost
 
 ## 12a. Phase 9 - Trusted Fast Snapshot Load
 
@@ -286,7 +290,58 @@ Exit criteria:
   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo audit`, and
   `cargo deny check` pass.
 
-## 15. Cross-References
+## 15. Phase 13 - Snapshot File Size Optimization
+
+Closes M12.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 13.1 | Keep `snapshot_section_size` benchmark and record baseline section/index group bytes. | [22](./22-snapshot-file-size-optimization-design.md), [71](./71-performance-budgets-design.md) | 0.5 day |
+| 13.2 | Add v3 posting overflow delta-varint encoding with corrupt-varint and monotonicity tests. | [22](./22-snapshot-file-size-optimization-design.md), [17](./17-compact-snapshot-format-design.md), [70](./70-security-design.md) | 3 days |
+| 13.3 | Add singleton/multi-posting split for groups where section-size evidence justifies it. | [22](./22-snapshot-file-size-optimization-design.md), [16](./16-compact-relationship-store-design.md) | 3 days |
+| 13.4 | Add group-specific key width/prefix encoding without changing profile support semantics. | [22](./22-snapshot-file-size-optimization-design.md), [17](./17-compact-snapshot-format-design.md) | 3 days |
+| 13.5 | Evaluate row and symbol width encoding after index compression; land only if section-size and load benchmarks justify it. | [22](./22-snapshot-file-size-optimization-design.md), [71](./71-performance-budgets-design.md) | 2 days |
+| 13.6 | Run snapshot load, trusted load, section-size, zstd size, RSS, and full correctness gates. | [22](./22-snapshot-file-size-optimization-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+
+Exit criteria:
+
+- M12 roadmap criteria pass.
+- v3 reader rejects malformed encodings with typed errors and no panics.
+- `Full`, `CheckOnly`, and `CheckAndObjectAudit` keep their documented operation support.
+- `make bench-snapshot-section-size` evidence is recorded in [71](./71-performance-budgets-design.md).
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`,
+  `cargo +nightly fmt --check`, strict clippy including boundary lints,
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo audit`, and
+  `cargo deny check` pass.
+
+## 16. Phase 14 - Read Performance Refinement
+
+Closes M13.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 14.1 | Capture profiles/counters for inherited check, mixed read, delta segment scans, and tombstone checks. | [23](./23-read-performance-optimization-design.md), [71](./71-performance-budgets-design.md) | 1 day |
+| 14.2 | Compile relation ids into schema expression nodes and remove recursive public relation materialization. | [14](./14-evaluation-engine-design.md), [23](./23-read-performance-optimization-design.md) | 3 days |
+| 14.3 | Add segment-native lookup plans for checkpoint plus bounded deltas. | [16](./16-compact-relationship-store-design.md), [20](./20-concurrent-engine-runtime-design.md), [23](./23-read-performance-optimization-design.md) | 3 days |
+| 14.4 | Add generation-counter reusable evaluation contexts for lookup verification loops. | [14](./14-evaluation-engine-design.md), [23](./23-read-performance-optimization-design.md) | 2 days |
+| 14.5 | Add exact-proof shortcuts one expression family at a time with adversarial correctness tests. | [14](./14-evaluation-engine-design.md), [23](./23-read-performance-optimization-design.md), [72](./72-testing-verification-plan.md) | 2 days |
+| 14.6 | Run realworld, perf-optimization, snapshot-profile, and full correctness gates. | [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+
+Exit criteria:
+
+- M13 roadmap criteria pass.
+- Read behavior remains equivalent for check, expand, lookup, permission enumeration, exact tokens,
+  and unsupported index profiles.
+- `realworld_authorization/1m_rules/mixed_read_workload` upper estimate is <= 55 us or the target is
+  recalibrated with profile evidence.
+- `perf_optimization/check_prepared_1m`, streaming lookup, and read-heavy write benchmarks regress
+  by no more than the gates in [23](./23-read-performance-optimization-design.md).
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`,
+  `cargo +nightly fmt --check`, strict clippy including boundary lints,
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo audit`, and
+  `cargo deny check` pass.
+
+## 17. Cross-References
 
 - Stakeholder roadmap: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md)
 - Key decisions: [99-key-decisions.md](./99-key-decisions.md)
@@ -296,3 +351,5 @@ Exit criteria:
 - Public API completeness: [19-public-api-completeness-design.md](./19-public-api-completeness-design.md)
 - Concurrent engine runtime: [20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md)
 - Performance optimization design: [21-performance-optimization-design.md](./21-performance-optimization-design.md)
+- Snapshot file-size optimization design: [22-snapshot-file-size-optimization-design.md](./22-snapshot-file-size-optimization-design.md)
+- Read performance optimization design: [23-read-performance-optimization-design.md](./23-read-performance-optimization-design.md)

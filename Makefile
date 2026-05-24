@@ -40,6 +40,15 @@ bench-concurrent-runtime:
 bench-realworld:
 	@cargo bench --bench realworld_authorization -- --sample-size 10
 
+bench-perf-optimization:
+	@cargo bench --features bench-internals --bench perf_optimization -- --sample-size 10
+
+bench-snapshot-section-size:
+	@cargo bench --bench snapshot_section_size -- --sample-size 10
+
+perf-impact-chart:
+	@uv run --script tools/render_perf_impact_chart.py
+
 bench-snapshot-memory:
 	@cargo bench --bench snapshot --no-run
 	@target_dir=$${CARGO_TARGET_DIR:-$$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')}; \
@@ -57,7 +66,7 @@ bench-snapshot-memory:
 	done; \
 	rm -f "$$snapshot_file"
 
-bench-all: bench-baseline bench-org bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld
+bench-all: bench-baseline bench-org bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-snapshot-section-size
 
 fmt:
 	@cargo +nightly fmt
@@ -81,4 +90,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-snapshot-memory bench-all fmt fmt-check clippy lint release update-submodule
+.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-snapshot-section-size perf-impact-chart bench-snapshot-memory bench-all fmt fmt-check clippy lint release update-submodule

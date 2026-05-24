@@ -689,6 +689,7 @@ fn snapshot_load_options(
         validation,
         integrity: SnapshotIntegrityMode::Checksum,
         max_file_bytes: non_zero_u64(16 * 1024 * 1024),
+        required_index_profile: simple_zanzibar::IndexProfile::Full,
     }
 }
 
@@ -699,6 +700,7 @@ fn snapshot_external_load_options(validation: SnapshotValidationMode) -> Snapsho
         validation,
         integrity: SnapshotIntegrityMode::External,
         max_file_bytes: non_zero_u64(16 * 1024 * 1024),
+        required_index_profile: simple_zanzibar::IndexProfile::Full,
     }
 }
 

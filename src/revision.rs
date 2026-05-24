@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::{
     model::NamespaceConfig,
-    relationship::IndexedRelationshipStore,
+    relationship::RelationshipStoreView,
     schema::{
         AllowedSubjectTypes, CompiledSchema, NamespaceDefinition, RelationDefinition,
         UsersetExpression,
@@ -337,7 +337,7 @@ pub struct PublishedSnapshot {
     schema_hash: SchemaHash,
     configs: Arc<HashMap<String, NamespaceConfig>>,
     schema: Arc<CompiledSchema>,
-    relationships: Arc<IndexedRelationshipStore>,
+    relationships: Arc<RelationshipStoreView>,
 }
 
 impl PublishedSnapshot {
@@ -348,7 +348,7 @@ impl PublishedSnapshot {
         schema_hash: SchemaHash,
         configs: Arc<HashMap<String, NamespaceConfig>>,
         schema: Arc<CompiledSchema>,
-        relationships: Arc<IndexedRelationshipStore>,
+        relationships: Arc<RelationshipStoreView>,
     ) -> Self {
         Self {
             revision,
@@ -383,9 +383,9 @@ impl PublishedSnapshot {
         &self.schema
     }
 
-    /// Returns the indexed relationships.
+    /// Returns the published relationship store view.
     #[must_use]
-    pub fn relationships(&self) -> &IndexedRelationshipStore {
+    pub fn relationships(&self) -> &RelationshipStoreView {
         &self.relationships
     }
 }
