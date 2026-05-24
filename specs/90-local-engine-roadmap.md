@@ -239,6 +239,7 @@ Specs touched: [14](./14-evaluation-engine-design.md),
 [16](./16-compact-relationship-store-design.md),
 [20](./20-concurrent-engine-runtime-design.md),
 [23](./23-read-performance-optimization-design.md),
+[24](./24-zstd-aware-snapshot-load-design.md),
 [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
 
 Exit criteria:
@@ -248,6 +249,7 @@ Exit criteria:
 - segment-native lookup plans keep reads efficient after delta writes
 - reusable evaluation contexts reduce allocation in lookup verification loops
 - exact-proof shortcuts are covered by deny, intersection, fanout, depth, and cycle tests
+- zstd-aware snapshot layout improves compressed artifacts without regressing raw artifact size
 - `realworld_authorization/1m_rules/mixed_read_workload` upper estimate <= 55 us
 - inherited-check and lookup benchmarks regress by no more than the gates in
   [23](./23-read-performance-optimization-design.md)

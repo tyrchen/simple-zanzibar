@@ -33,6 +33,19 @@ The section-size spike also clarifies what not to expect: `CheckOnly` removes un
 indexes, but it retains the exact resource index used by `check`, so file-size wins are orthogonal
 to evaluator hot-path latency.
 
+M14 first-pass update on 2026-05-24: the low-risk recursion-state change from
+[24](./24-zstd-aware-snapshot-load-design.md) replaced active-recursion `HashSet`s with bounded
+stacks. This is a subset of the reusable-context design below, not the full schema ID IR. It moved
+the mixed-read workload under budget and improved guardrails:
+
+| Benchmark | Phase 13 | First pass | Status |
+| --- | ---: | ---: | --- |
+| `realworld_authorization/1m_rules/mixed_read_workload` | `[57.221 us, 57.733 us, 58.164 us]` | `[52.474 us, 52.895 us, 53.489 us]` | passes <= 55 us |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | `[14.793 us, 14.966 us, 15.110 us]` | `[14.473 us, 14.655 us, 14.833 us]` | improved; still above 13.5 us stretch |
+| `perf_optimization/check_prepared_1m` | `[5.8971 us, 5.9513 us, 6.0009 us]` | `[5.2677 us, 5.3115 us, 5.3424 us]` | improved |
+| `perf_optimization/lookup_resources_streaming_1m` | `[3.0446 ms, 3.1188 ms, 3.1883 ms]` | `[2.6849 ms, 2.7143 ms, 2.7544 ms]` | improved |
+| `perf_optimization/lookup_subjects_streaming_1m` | `[6.2956 us, 6.3200 us, 6.3451 us]` | `[5.4088 us, 5.4472 us, 5.4722 us]` | improved |
+
 ## 3. Goals
 
 | # | Goal | Measure |

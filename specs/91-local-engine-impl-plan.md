@@ -320,6 +320,7 @@ Closes M13.
 
 | # | Task | Spec | Effort |
 | --- | --- | --- | --- |
+| 14.0 | Run zstd-aware layout and load/read hot-path experiments; land only measured improvements. | [24](./24-zstd-aware-snapshot-load-design.md), [71](./71-performance-budgets-design.md) | 1 day |
 | 14.1 | Capture profiles/counters for inherited check, mixed read, delta segment scans, and tombstone checks. | [23](./23-read-performance-optimization-design.md), [71](./71-performance-budgets-design.md) | 1 day |
 | 14.2 | Compile relation ids into schema expression nodes and remove recursive public relation materialization. | [14](./14-evaluation-engine-design.md), [23](./23-read-performance-optimization-design.md) | 3 days |
 | 14.3 | Add segment-native lookup plans for checkpoint plus bounded deltas. | [16](./16-compact-relationship-store-design.md), [20](./20-concurrent-engine-runtime-design.md), [23](./23-read-performance-optimization-design.md) | 3 days |
@@ -332,6 +333,8 @@ Exit criteria:
 - M13 roadmap criteria pass.
 - Read behavior remains equivalent for check, expand, lookup, permission enumeration, exact tokens,
   and unsupported index profiles.
+- Zstd-aware inner layout improves compressed artifacts without increasing raw `.szsnap` size or
+  changing public snapshot APIs.
 - `realworld_authorization/1m_rules/mixed_read_workload` upper estimate is <= 55 us or the target is
   recalibrated with profile evidence.
 - `perf_optimization/check_prepared_1m`, streaming lookup, and read-heavy write benchmarks regress

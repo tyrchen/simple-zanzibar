@@ -27,7 +27,10 @@ const INDEX_DIRECTORY_ENTRY_LEN: usize = 20;
 const INDEX_KEY_LEN: u64 = 12;
 const POSTING_RANGE_LEN: u64 = 12;
 const POSTING_RANGE_LEN_USIZE: usize = 12;
-const ROW_ID_LEN: u64 = 4;
+const ROW_ID_LEN_USIZE: usize = 4;
+const INDEX_DIRECTORY_FLAG_V3_COMPACT: u16 = 1;
+const INDEX_DIRECTORY_KEY_WIDTH_SHIFT: u16 = 1;
+const INDEX_DIRECTORY_KEY_WIDTH_MASK: u16 = 0b110;
 
 fn main() {
     if cfg!(debug_assertions) {
@@ -64,10 +67,13 @@ struct SnapshotSizeReport {
     profile: IndexProfile,
     raw_bytes: u64,
     zstd_bytes: u64,
+    zstd_inner_raw_bytes: u64,
     relationship_count: u32,
     symbol_count: u32,
     sections: Vec<SectionReport>,
+    zstd_inner_sections: Vec<SectionReport>,
     index_groups: Vec<IndexGroupReport>,
+    zstd_inner_index_groups: Vec<IndexGroupReport>,
 }
 
 impl SnapshotSizeReport {
@@ -84,12 +90,38 @@ impl SnapshotSizeReport {
             .saturating_sub(self.index_payload_bytes())
     }
 
-    fn section_len(&self, kind: SectionKind) -> u64 {
-        self.sections
-            .iter()
-            .find(|section| section.kind == kind)
-            .map_or(0, |section| section.len)
+    fn zstd_inner_index_payload_bytes(&self) -> u64 {
+        section_len(&self.zstd_inner_sections, SectionKind::IndexDirectory)
+            .saturating_add(section_len(
+                &self.zstd_inner_sections,
+                SectionKind::IndexKeys,
+            ))
+            .saturating_add(section_len(
+                &self.zstd_inner_sections,
+                SectionKind::PostingRanges,
+            ))
+            .saturating_add(section_len(
+                &self.zstd_inner_sections,
+                SectionKind::PostingRowIds,
+            ))
     }
+
+    fn zstd_inner_non_index_payload_bytes(&self) -> u64 {
+        self.zstd_inner_raw_bytes
+            .saturating_sub(snapshot_envelope_bytes())
+            .saturating_sub(self.zstd_inner_index_payload_bytes())
+    }
+
+    fn section_len(&self, kind: SectionKind) -> u64 {
+        section_len(&self.sections, kind)
+    }
+}
+
+fn section_len(sections: &[SectionReport], kind: SectionKind) -> u64 {
+    sections
+        .iter()
+        .find(|section| section.kind == kind)
+        .map_or(0, |section| section.len)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,19 +137,22 @@ struct IndexGroupReport {
     key_count: u64,
     range_count: u64,
     overflow_row_id_count: u64,
+    key_bytes: u64,
+    range_bytes: u64,
+    overflow_bytes: u64,
 }
 
 impl IndexGroupReport {
     fn key_bytes(self) -> u64 {
-        self.key_count.saturating_mul(INDEX_KEY_LEN)
+        self.key_bytes
     }
 
     fn range_bytes(self) -> u64 {
-        self.range_count.saturating_mul(POSTING_RANGE_LEN)
+        self.range_bytes
     }
 
     fn overflow_bytes(self) -> u64 {
-        self.overflow_row_id_count.saturating_mul(ROW_ID_LEN)
+        self.overflow_bytes
     }
 
     fn payload_bytes(self) -> u64 {
@@ -127,7 +162,7 @@ impl IndexGroupReport {
     }
 
     fn total_postings(self) -> u64 {
-        self.range_count.saturating_add(self.overflow_row_id_count)
+        self.key_count.saturating_add(self.overflow_row_id_count)
     }
 }
 
@@ -217,6 +252,14 @@ impl SnapshotIndexKind {
             Self::SubjectType => "subject_type",
         }
     }
+
+    const fn key_field_count(self) -> usize {
+        match self {
+            Self::Resource | Self::Subject => 3,
+            Self::ResourceObject | Self::ResourceTypeRelation | Self::SubjectTypeRelation => 2,
+            Self::ResourceType | Self::SubjectType => 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -230,6 +273,8 @@ struct SectionEntry {
 #[derive(Debug, Clone, Copy)]
 struct IndexDirectoryEntry {
     kind: SnapshotIndexKind,
+    flags: u16,
+    key_start: u32,
     key_count: u32,
     posting_range_start: u32,
     posting_range_count: u32,
@@ -280,9 +325,17 @@ fn snapshot_size_report(
     );
 
     let raw_bytes = must(fs::read(&raw_path), "failed to read raw snapshot");
-    let zstd_len = must(fs::metadata(&zstd_path), "failed to stat zstd snapshot").len();
+    let zstd_bytes = must(fs::read(&zstd_path), "failed to read zstd snapshot");
+    let zstd_len = must(
+        u64::try_from(zstd_bytes.len()).map_err(|_| "zstd length overflowed"),
+        "failed to measure zstd snapshot",
+    );
+    let zstd_inner_bytes = must(
+        zstd::stream::decode_all(zstd_bytes.as_slice()),
+        "failed to decode zstd snapshot",
+    );
     let report = must(
-        parse_snapshot_report(label, profile, &raw_bytes, zstd_len),
+        parse_snapshot_report(label, profile, &raw_bytes, zstd_len, &zstd_inner_bytes),
         "failed to parse raw snapshot",
     );
     remove_file(&raw_path);
@@ -295,17 +348,22 @@ fn parse_snapshot_report(
     profile: IndexProfile,
     bytes: &[u8],
     zstd_bytes: u64,
+    zstd_inner_bytes: &[u8],
 ) -> Result<SnapshotSizeReport, String> {
     let relationship_count = read_u32(bytes, 60)?;
     let symbol_count = read_u32(bytes, 64)?;
     let sections = parse_sections(bytes)?;
     let index_groups = parse_index_groups(bytes, &sections)?;
+    let zstd_inner_sections = parse_sections(zstd_inner_bytes)?;
+    let zstd_inner_index_groups = parse_index_groups(zstd_inner_bytes, &zstd_inner_sections)?;
     Ok(SnapshotSizeReport {
         label,
         profile,
         raw_bytes: u64::try_from(bytes.len())
             .map_err(|_| "snapshot length does not fit u64".to_string())?,
         zstd_bytes,
+        zstd_inner_raw_bytes: u64::try_from(zstd_inner_bytes.len())
+            .map_err(|_| "zstd inner snapshot length does not fit u64".to_string())?,
         relationship_count,
         symbol_count,
         sections: sections
@@ -316,7 +374,16 @@ fn parse_snapshot_report(
                 row_count: entry.row_count,
             })
             .collect(),
+        zstd_inner_sections: zstd_inner_sections
+            .iter()
+            .map(|entry| SectionReport {
+                kind: entry.kind,
+                len: entry.len,
+                row_count: entry.row_count,
+            })
+            .collect(),
         index_groups,
+        zstd_inner_index_groups,
     })
 }
 
@@ -358,35 +425,48 @@ fn parse_index_groups(
     sections: &[SectionEntry],
 ) -> Result<Vec<IndexGroupReport>, String> {
     let index_directory = section_slice(bytes, sections, SectionKind::IndexDirectory)?;
+    let index_keys = section_slice(bytes, sections, SectionKind::IndexKeys)?;
     let posting_ranges = section_slice(bytes, sections, SectionKind::PostingRanges)?;
+    let posting_row_ids = section_slice(bytes, sections, SectionKind::PostingRowIds)?;
     let mut groups = Vec::new();
     for entry in index_directory.chunks_exact(INDEX_DIRECTORY_ENTRY_LEN) {
         let directory = parse_index_directory_entry(entry)?;
-        let overflow_row_id_count = overflow_row_ids_for_group(posting_ranges, directory)?;
+        let group = index_group_report(index_keys, posting_ranges, posting_row_ids, directory)?;
         groups.push(IndexGroupReport {
             kind: directory.kind,
-            key_count: u64::from(directory.key_count),
-            range_count: u64::from(directory.posting_range_count),
-            overflow_row_id_count,
+            ..group
         });
     }
     Ok(groups)
 }
 
 fn parse_index_directory_entry(bytes: &[u8]) -> Result<IndexDirectoryEntry, String> {
-    let _key_start = read_u32(bytes, 4)?;
     Ok(IndexDirectoryEntry {
         kind: SnapshotIndexKind::from_raw(read_u16(bytes, 0)?)?,
+        flags: read_u16(bytes, 2)?,
+        key_start: read_u32(bytes, 4)?,
         key_count: read_u32(bytes, 8)?,
         posting_range_start: read_u32(bytes, 12)?,
         posting_range_count: read_u32(bytes, 16)?,
     })
 }
 
-fn overflow_row_ids_for_group(
+fn index_group_report(
+    index_keys: &[u8],
+    posting_ranges: &[u8],
+    posting_row_ids: &[u8],
+    directory: IndexDirectoryEntry,
+) -> Result<IndexGroupReport, String> {
+    if directory.flags & INDEX_DIRECTORY_FLAG_V3_COMPACT != 0 {
+        return v3_index_group_report(index_keys, posting_ranges, posting_row_ids, directory);
+    }
+    v2_index_group_report(posting_ranges, directory)
+}
+
+fn v2_index_group_report(
     posting_ranges: &[u8],
     directory: IndexDirectoryEntry,
-) -> Result<u64, String> {
+) -> Result<IndexGroupReport, String> {
     let range_start = usize::try_from(directory.posting_range_start)
         .map_err(|_| "range start does not fit usize".to_string())?;
     let range_count = usize::try_from(directory.posting_range_count)
@@ -408,6 +488,158 @@ fn overflow_row_ids_for_group(
                 .checked_add(u64::from(read_u32(range, 8)?))
                 .ok_or_else(|| "overflow row id count overflowed".to_string())
         })
+        .map(|overflow_row_id_count| IndexGroupReport {
+            kind: directory.kind,
+            key_count: u64::from(directory.key_count),
+            range_count: u64::from(directory.posting_range_count),
+            overflow_row_id_count,
+            key_bytes: u64::from(directory.key_count).saturating_mul(INDEX_KEY_LEN),
+            range_bytes: u64::from(directory.posting_range_count).saturating_mul(POSTING_RANGE_LEN),
+            overflow_bytes: overflow_row_id_count.saturating_mul(ROW_ID_LEN_USIZE as u64),
+        })
+}
+
+fn v3_index_group_report(
+    index_keys: &[u8],
+    posting_ranges: &[u8],
+    posting_row_ids: &[u8],
+    directory: IndexDirectoryEntry,
+) -> Result<IndexGroupReport, String> {
+    let key_width = v3_key_width(directory.flags)?;
+    let field_count = directory.kind.key_field_count();
+    let key_len = key_width
+        .checked_mul(field_count)
+        .ok_or("key length overflowed")?;
+    let key_count = usize::try_from(directory.key_count)
+        .map_err(|_| "key count does not fit usize".to_string())?;
+    let multi_count = usize::try_from(directory.posting_range_count)
+        .map_err(|_| "multi count does not fit usize".to_string())?;
+    let singleton_count = key_count
+        .checked_sub(multi_count)
+        .ok_or("singleton count underflowed")?;
+    let singleton_bytes = singleton_count
+        .checked_mul(
+            key_len
+                .checked_add(ROW_ID_LEN_USIZE)
+                .ok_or("singleton entry length overflowed")?,
+        )
+        .ok_or("singleton bytes overflowed")?;
+    let multi_key_bytes = multi_count
+        .checked_mul(key_len)
+        .ok_or("multi key bytes overflowed")?;
+    let key_bytes = singleton_bytes
+        .checked_add(multi_key_bytes)
+        .ok_or("key bytes overflowed")?;
+    let key_start = usize::try_from(directory.key_start)
+        .map_err(|_| "key start does not fit usize".to_string())?;
+    let key_end = key_start
+        .checked_add(key_bytes)
+        .ok_or("key range overflowed")?;
+    index_keys
+        .get(key_start..key_end)
+        .ok_or("compact key range out of bounds")?;
+    let range_start = usize::try_from(directory.posting_range_start)
+        .map_err(|_| "range start does not fit usize".to_string())?;
+    let range_start_bytes = range_start
+        .checked_mul(POSTING_RANGE_LEN_USIZE)
+        .ok_or("range byte start overflowed")?;
+    let range_bytes = multi_count
+        .checked_mul(POSTING_RANGE_LEN_USIZE)
+        .ok_or("range bytes overflowed")?;
+    let range_end = range_start_bytes
+        .checked_add(range_bytes)
+        .ok_or("range byte end overflowed")?;
+    let ranges = posting_ranges
+        .get(range_start_bytes..range_end)
+        .ok_or("posting range span is out of bounds")?;
+    let mut overflow_row_id_count = 0_u64;
+    let mut overflow_bytes = 0_u64;
+    for range in ranges.chunks_exact(POSTING_RANGE_LEN_USIZE) {
+        let overflow_start = usize::try_from(read_u32(range, 4)?)
+            .map_err(|_| "overflow start does not fit usize".to_string())?;
+        let overflow_len = usize::try_from(read_u32(range, 8)?)
+            .map_err(|_| "overflow length does not fit usize".to_string())?;
+        let overflow_end = overflow_start
+            .checked_add(overflow_len)
+            .ok_or("overflow byte range overflowed")?;
+        let overflow = posting_row_ids
+            .get(overflow_start..overflow_end)
+            .ok_or("overflow byte range out of bounds")?;
+        overflow_bytes = overflow_bytes
+            .checked_add(
+                u64::try_from(overflow_len)
+                    .map_err(|_| "overflow length does not fit u64".to_string())?,
+            )
+            .ok_or("overflow bytes overflowed")?;
+        overflow_row_id_count = overflow_row_id_count
+            .checked_add(count_v3_delta_varints(overflow)?)
+            .ok_or("overflow row id count overflowed")?;
+    }
+    Ok(IndexGroupReport {
+        kind: directory.kind,
+        key_count: u64::from(directory.key_count),
+        range_count: u64::from(directory.posting_range_count),
+        overflow_row_id_count,
+        key_bytes: u64::try_from(key_bytes).map_err(|_| "key bytes do not fit u64".to_string())?,
+        range_bytes: u64::try_from(range_bytes)
+            .map_err(|_| "range bytes do not fit u64".to_string())?,
+        overflow_bytes,
+    })
+}
+
+fn v3_key_width(flags: u16) -> Result<usize, String> {
+    match (flags & INDEX_DIRECTORY_KEY_WIDTH_MASK) >> INDEX_DIRECTORY_KEY_WIDTH_SHIFT {
+        0 => Ok(1),
+        1 => Ok(2),
+        2 => Ok(3),
+        3 => Ok(4),
+        _ => Err("unsupported key width".to_string()),
+    }
+}
+
+fn count_v3_delta_varints(bytes: &[u8]) -> Result<u64, String> {
+    let mut count = 0_u64;
+    let mut offset = 0_usize;
+    while offset < bytes.len() {
+        decode_v3_delta_varint(bytes, &mut offset)?;
+        count = count
+            .checked_add(1)
+            .ok_or("delta varint count overflowed")?;
+    }
+    Ok(count)
+}
+
+fn decode_v3_delta_varint(bytes: &[u8], offset: &mut usize) -> Result<u32, String> {
+    let mut value = 0_u32;
+    let mut shift = 0_u32;
+    loop {
+        let byte = bytes
+            .get(*offset)
+            .copied()
+            .ok_or_else(|| "delta varint is truncated".to_string())?;
+        *offset = (*offset)
+            .checked_add(1)
+            .ok_or_else(|| "delta varint offset overflowed".to_string())?;
+        let low_bits = u32::from(byte & 0x7F);
+        if shift == 28 && low_bits > 0x0F {
+            return Err("delta varint overflows u32".to_string());
+        }
+        value |= low_bits
+            .checked_shl(shift)
+            .ok_or_else(|| "delta varint shift overflowed".to_string())?;
+        if byte & 0x80 == 0 {
+            if value == 0 {
+                return Err("delta varint must be non-zero".to_string());
+            }
+            return Ok(value);
+        }
+        shift = shift
+            .checked_add(7)
+            .ok_or_else(|| "delta varint shift overflowed".to_string())?;
+        if shift > 28 {
+            return Err("delta varint is too long".to_string());
+        }
+    }
 }
 
 fn section_slice<'a>(
@@ -469,9 +701,25 @@ fn print_reports(reports: &[SnapshotSizeReport]) {
             report.index_payload_bytes(),
             report.non_index_payload_bytes(),
         );
+        eprintln!(
+            "snapshot_section_size/{}/zstd_inner: raw={} index_payload={} non_index_payload={}",
+            report.label,
+            report.zstd_inner_raw_bytes,
+            report.zstd_inner_index_payload_bytes(),
+            report.zstd_inner_non_index_payload_bytes(),
+        );
         for section in &report.sections {
             eprintln!(
                 "snapshot_section_size/{}/section/{}: bytes={} rows={}",
+                report.label,
+                section.kind.name(),
+                section.len,
+                section.row_count,
+            );
+        }
+        for section in &report.zstd_inner_sections {
+            eprintln!(
+                "snapshot_section_size/{}/zstd_inner_section/{}: bytes={} rows={}",
                 report.label,
                 section.kind.name(),
                 section.len,
@@ -482,6 +730,23 @@ fn print_reports(reports: &[SnapshotSizeReport]) {
             eprintln!(
                 "snapshot_section_size/{}/index_group/{}: keys={} ranges={} overflow_row_ids={} \
                  total_postings={} payload_bytes={} key_bytes={} range_bytes={} overflow_bytes={}",
+                report.label,
+                group.kind.name(),
+                group.key_count,
+                group.range_count,
+                group.overflow_row_id_count,
+                group.total_postings(),
+                group.payload_bytes(),
+                group.key_bytes(),
+                group.range_bytes(),
+                group.overflow_bytes(),
+            );
+        }
+        for group in &report.zstd_inner_index_groups {
+            eprintln!(
+                "snapshot_section_size/{}/zstd_inner_index_group/{}: keys={} ranges={} \
+                 overflow_row_ids={} total_postings={} payload_bytes={} key_bytes={} \
+                 range_bytes={} overflow_bytes={}",
                 report.label,
                 group.kind.name(),
                 group.key_count,

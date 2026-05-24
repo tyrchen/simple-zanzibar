@@ -204,8 +204,8 @@ pub struct EvaluationContext<'a> {
     snapshot: &'a PublishedSnapshot,
     limits: EvaluationLimits,
     remaining_depth: u32,
-    visited: HashSet<CheckKey>,
-    expanded: HashSet<ExpandKey>,
+    check_stack: Vec<CheckKey>,
+    expand_stack: Vec<ExpandKey>,
 }
 
 impl<'a> EvaluationContext<'a> {
@@ -216,8 +216,8 @@ impl<'a> EvaluationContext<'a> {
             snapshot,
             limits,
             remaining_depth: limits.max_depth.get(),
-            visited: HashSet::new(),
-            expanded: HashSet::new(),
+            check_stack: Vec::new(),
+            expand_stack: Vec::new(),
         }
     }
 
@@ -233,16 +233,14 @@ impl<'a> EvaluationContext<'a> {
         user: &User,
     ) -> Result<Membership, ZanzibarError> {
         let key = CheckKey::new(self.snapshot, object, relation, user);
-        if !self.visited.insert(key.clone()) {
+        if self.check_stack.contains(&key) {
             return Ok(Membership::Denied);
         }
-        if let Err(error) = self.enter(EvaluationKey::Check(key.clone())) {
-            self.visited.remove(&key);
-            return Err(error);
-        }
+        self.enter(EvaluationKey::Check(key.clone()))?;
+        self.check_stack.push(key);
 
         let result = self.check_entered(object, relation, user);
-        self.visited.remove(&key);
+        let _ = self.check_stack.pop();
         self.leave();
         result
     }
@@ -255,19 +253,17 @@ impl<'a> EvaluationContext<'a> {
         relation_definition: &SchemaRelationDefinition,
     ) -> Result<Membership, ZanzibarError> {
         let key = CheckKey::new(self.snapshot, object, relation, user);
-        if !self.visited.insert(key.clone()) {
+        if self.check_stack.contains(&key) {
             return Ok(Membership::Denied);
         }
-        if let Err(error) = self.enter(EvaluationKey::Check(key.clone())) {
-            self.visited.remove(&key);
-            return Err(error);
-        }
+        self.enter(EvaluationKey::Check(key.clone()))?;
+        self.check_stack.push(key);
 
         let result = match relation_definition.userset_rewrite() {
             Some(expression) => self.eval_schema_expression(object, relation, user, expression),
             None => self.eval_this(object, &RelationName::try_from(relation)?, user),
         };
-        self.visited.remove(&key);
+        let _ = self.check_stack.pop();
         self.leave();
         result
     }
@@ -279,16 +275,14 @@ impl<'a> EvaluationContext<'a> {
         user: &User,
     ) -> Result<Membership, ZanzibarError> {
         let key = CheckKey::from_relation_name(self.snapshot, object, relation_name, user);
-        if !self.visited.insert(key.clone()) {
+        if self.check_stack.contains(&key) {
             return Ok(Membership::Denied);
         }
-        if let Err(error) = self.enter(EvaluationKey::Check(key.clone())) {
-            self.visited.remove(&key);
-            return Err(error);
-        }
+        self.enter(EvaluationKey::Check(key.clone()))?;
+        self.check_stack.push(key);
 
         let result = self.check_relation_name_entered(object, relation_name, user);
-        self.visited.remove(&key);
+        let _ = self.check_stack.pop();
         self.leave();
         result
     }
@@ -304,16 +298,14 @@ impl<'a> EvaluationContext<'a> {
         relation: &Relation,
     ) -> Result<ExpandedUserset, ZanzibarError> {
         let key = ExpandKey::new(object, relation);
-        if !self.expanded.insert(key.clone()) {
+        if self.expand_stack.contains(&key) {
             return Ok(ExpandedUserset::Union(Vec::new()));
         }
-        if let Err(error) = self.enter(EvaluationKey::Expand(key.clone())) {
-            self.expanded.remove(&key);
-            return Err(error);
-        }
+        self.enter(EvaluationKey::Expand(key.clone()))?;
+        self.expand_stack.push(key);
 
         let result = self.expand_entered(object, relation);
-        self.expanded.remove(&key);
+        let _ = self.expand_stack.pop();
         self.leave();
         result
     }

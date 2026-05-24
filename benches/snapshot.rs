@@ -28,6 +28,9 @@ const OWNER_USER_ID: &str = "owner_user";
 const PREPARE_PATH_ENV: &str = "SZS_SNAPSHOT_PREPARE_PATH";
 const LOAD_PATH_ENV: &str = "SZS_SNAPSHOT_LOAD_PATH";
 const RSS_ONCE_ENV: &str = "SZS_SNAPSHOT_RSS_ONCE";
+const PREPARE_COMPRESSION_ENV: &str = "SZS_SNAPSHOT_PREPARE_COMPRESSION";
+const LOAD_COMPRESSION_ENV: &str = "SZS_SNAPSHOT_LOAD_COMPRESSION";
+const ZSTD_COMPRESSION_ENV_VALUE: &str = "zstd";
 
 fn main() {
     if cfg!(debug_assertions) {
@@ -37,7 +40,10 @@ fn main() {
     if let Ok(path) = env::var(PREPARE_PATH_ENV) {
         let service = build_service_with_relationships(1_000_000);
         must(
-            service.save_snapshot(Path::new(&path), SnapshotSaveOptions::default()),
+            service.save_snapshot(
+                Path::new(&path),
+                save_options_from_env(PREPARE_COMPRESSION_ENV),
+            ),
             "failed to prepare snapshot benchmark file",
         );
         return;
@@ -47,7 +53,7 @@ fn main() {
         && let Ok(path) = env::var(LOAD_PATH_ENV)
     {
         let service = must(
-            ZanzibarEngine::load_snapshot(path, SnapshotLoadOptions::default()),
+            ZanzibarEngine::load_snapshot(path, load_options_from_env(LOAD_COMPRESSION_ENV)),
             "failed to load snapshot once for RSS measurement",
         );
         black_box(service);
@@ -400,6 +406,20 @@ fn zstd_load_options() -> SnapshotLoadOptions {
         compression: SnapshotCompression::Zstd,
         ..SnapshotLoadOptions::default()
     }
+}
+
+fn save_options_from_env(env_name: &str) -> SnapshotSaveOptions {
+    if env::var(env_name).ok().as_deref() == Some(ZSTD_COMPRESSION_ENV_VALUE) {
+        return zstd_save_options();
+    }
+    SnapshotSaveOptions::default()
+}
+
+fn load_options_from_env(env_name: &str) -> SnapshotLoadOptions {
+    if env::var(env_name).ok().as_deref() == Some(ZSTD_COMPRESSION_ENV_VALUE) {
+        return zstd_load_options();
+    }
+    SnapshotLoadOptions::default()
 }
 
 fn build_service_with_relationships(rules: usize) -> ZanzibarEngine {

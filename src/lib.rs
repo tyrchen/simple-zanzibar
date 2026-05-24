@@ -356,7 +356,7 @@ impl WriterState {
     /// # Errors
     ///
     /// Returns [`SnapshotIoError`] when no schema snapshot is loaded, the selected options are not
-    /// supported by format version 1, or the file cannot be written.
+    /// supported by the current snapshot format, or the file cannot be written.
     pub fn save_snapshot(
         &self,
         path: impl AsRef<Path>,

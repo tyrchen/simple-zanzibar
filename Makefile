@@ -51,7 +51,8 @@ perf-impact-chart:
 
 bench-snapshot-memory:
 	@cargo bench --bench snapshot --no-run
-	@target_dir=$${CARGO_TARGET_DIR:-$$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')}; \
+	@set -e; \
+	target_dir=$${CARGO_TARGET_DIR:-$$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')}; \
 	bin=$$(find "$$target_dir/release/deps" -maxdepth 1 -type f -name 'snapshot-*' | while IFS= read -r candidate; do \
 		if [ -x "$$candidate" ]; then printf '%s\n' "$$candidate"; fi; \
 	done | sort | tail -1); \
@@ -63,6 +64,24 @@ bench-snapshot-memory:
 		snapshot_load_peak_rss/1m; do \
 		echo "== $$filter =="; \
 		SZS_SNAPSHOT_LOAD_PATH="$$snapshot_file" SZS_SNAPSHOT_RSS_ONCE=1 /usr/bin/time -l "$$bin" "$$filter" --bench --sample-size 10; \
+	done; \
+	rm -f "$$snapshot_file"
+
+bench-snapshot-zstd-memory:
+	@cargo bench --bench snapshot --no-run
+	@set -e; \
+	target_dir=$${CARGO_TARGET_DIR:-$$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')}; \
+	bin=$$(find "$$target_dir/release/deps" -maxdepth 1 -type f -name 'snapshot-*' | while IFS= read -r candidate; do \
+		if [ -x "$$candidate" ]; then printf '%s\n' "$$candidate"; fi; \
+	done | sort | tail -1); \
+	if [ -z "$$bin" ]; then echo "snapshot benchmark binary not found"; exit 1; fi; \
+	snapshot_file=$$(mktemp "$${TMPDIR:-/tmp}/simple-zanzibar-1m.XXXXXX.szsnap.zst"); \
+	echo "== prepare zstd snapshot_load_peak_rss/1m fixture =="; \
+	SZS_SNAPSHOT_PREPARE_PATH="$$snapshot_file" SZS_SNAPSHOT_PREPARE_COMPRESSION=zstd "$$bin" --bench; \
+	for filter in \
+		snapshot_load_peak_rss/1m; do \
+		echo "== $$filter =="; \
+		SZS_SNAPSHOT_LOAD_PATH="$$snapshot_file" SZS_SNAPSHOT_LOAD_COMPRESSION=zstd SZS_SNAPSHOT_RSS_ONCE=1 /usr/bin/time -l "$$bin" "$$filter" --bench --sample-size 10; \
 	done; \
 	rm -f "$$snapshot_file"
 
@@ -90,4 +109,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-snapshot-section-size perf-impact-chart bench-snapshot-memory bench-all fmt fmt-check clippy lint release update-submodule
+.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-snapshot-section-size perf-impact-chart bench-snapshot-memory bench-snapshot-zstd-memory bench-all fmt fmt-check clippy lint release update-submodule

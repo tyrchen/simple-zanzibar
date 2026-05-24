@@ -7,6 +7,7 @@ use std::{
     },
     hash::{Hash, Hasher},
     num::{NonZeroU32, NonZeroUsize},
+    ops::Range,
     str,
     sync::Arc,
     time::Instant,
@@ -22,10 +23,10 @@ use crate::{
     error::ZanzibarError,
     model::{Object, Relation, User},
     snapshot::{
-        BinaryCursor, IndexProfile, SectionKind, SnapshotIoError, SnapshotLoadPhaseTimings,
-        SnapshotLoadProfile, SnapshotReader, SnapshotSectionWriter, SnapshotValidationMode,
-        checked_add_usize, checked_mul_usize, checked_u32_from_usize, checked_usize_from_u32,
-        checked_usize_from_u64, insert_unique,
+        BinaryCursor, IndexProfile, SectionKind, SnapshotEncodingLayout, SnapshotFormatVersion,
+        SnapshotIoError, SnapshotLoadPhaseTimings, SnapshotLoadProfile, SnapshotReader,
+        SnapshotSectionWriter, SnapshotValidationMode, checked_add_usize, checked_mul_usize,
+        checked_u32_from_usize, checked_usize_from_u32, checked_usize_from_u64, insert_unique,
     },
 };
 
@@ -35,14 +36,17 @@ const MAX_PRECONDITIONS_PER_BATCH: usize = 100;
 const COMPACT_DEAD_ROWS: usize = 100_000;
 const STORE_VIEW_MAX_DELTA_MUTATIONS: usize = 100_000;
 const STORE_VIEW_MAX_DELTA_TOMBSTONES: usize = 100_000;
-const DISK_SYMBOL_LEN: usize = 8;
 const DISK_SYMBOL_HASH_LEN: usize = 8;
-const DISK_SYMBOL_LOOKUP_LEN: usize = 4;
-const DISK_RELATIONSHIP_ROW_LEN: usize = 24;
 const DISK_INDEX_DIRECTORY_LEN: usize = 20;
 const DISK_INDEX_KEY_LEN: usize = 12;
 const DISK_POSTING_RANGE_LEN: usize = 12;
 const DISK_ROW_ID_LEN: usize = 4;
+const SECTION_WIDTH_MASK: u16 = 0b11;
+const SYMBOL_TABLE_LEN_WIDTH_SHIFT: u16 = 2;
+const SYMBOL_TABLE_LEN_WIDTH_MASK: u16 = 0b1100;
+const INDEX_DIRECTORY_FLAG_V3_COMPACT: u16 = 1;
+const INDEX_DIRECTORY_KEY_WIDTH_SHIFT: u16 = 1;
+const INDEX_DIRECTORY_KEY_WIDTH_MASK: u16 = 0b110;
 const SNAPSHOT_INDEX_KIND_COUNT: usize = 7;
 const SNAPSHOT_INDEX_KIND_COUNT_U64: u64 = SNAPSHOT_INDEX_KIND_COUNT as u64;
 
@@ -612,9 +616,10 @@ impl RelationshipStoreView {
         &self,
         writer: &mut SnapshotSectionWriter,
         index_profile: IndexProfile,
+        layout: SnapshotEncodingLayout,
     ) -> Result<(), SnapshotIoError> {
         self.canonical_store()?
-            .encode_snapshot_sections(writer, index_profile)
+            .encode_snapshot_sections(writer, index_profile, layout)
     }
 
     pub(crate) fn query_compact_relationships(
@@ -1070,20 +1075,13 @@ impl IndexedRelationshipStore {
         &self,
         writer: &mut SnapshotSectionWriter,
         index_profile: IndexProfile,
+        layout: SnapshotEncodingLayout,
     ) -> Result<(), SnapshotIoError> {
-        let mut symbol_table = Vec::with_capacity(
-            self.interner
-                .entries
-                .len()
-                .checked_mul(DISK_SYMBOL_LEN)
-                .ok_or(SnapshotIoError::Format {
-                    reason: "symbol table length overflowed",
-                })?,
-        );
-        for entry in &self.interner.entries {
-            symbol_table.extend_from_slice(&entry.start.to_le_bytes());
-            symbol_table.extend_from_slice(&entry.len.to_le_bytes());
-        }
+        let (symbol_table, symbol_table_flags) = encode_v3_symbol_table(
+            &self.interner.entries,
+            checked_u32_from_usize(self.interner.bytes.len())?,
+            layout,
+        )?;
         writer.add_section(
             SectionKind::SymbolBytes,
             self.interner.bytes.clone(),
@@ -1093,8 +1091,9 @@ impl IndexedRelationshipStore {
                 }
             })?,
         )?;
-        writer.add_section(
+        writer.add_section_with_flags(
             SectionKind::SymbolTable,
+            symbol_table_flags,
             symbol_table,
             u64::try_from(self.interner.entries.len()).map_err(|_| {
                 SnapshotIoError::LimitExceeded {
@@ -1102,29 +1101,38 @@ impl IndexedRelationshipStore {
                 }
             })?,
         )?;
-        let (symbol_hashes, symbol_lookup) = self.interner.encode_symbol_acceleration()?;
+        let (symbol_hashes, symbol_lookup, symbol_lookup_flags) =
+            self.interner.encode_symbol_acceleration(layout)?;
         let symbol_count = u64::try_from(self.interner.entries.len()).map_err(|_| {
             SnapshotIoError::LimitExceeded {
                 component: "symbol lookup",
             }
         })?;
         writer.add_section(SectionKind::SymbolHashes, symbol_hashes, symbol_count)?;
-        writer.add_section(SectionKind::SymbolLookup, symbol_lookup, symbol_count)?;
+        writer.add_section_with_flags(
+            SectionKind::SymbolLookup,
+            symbol_lookup_flags,
+            symbol_lookup,
+            symbol_count,
+        )?;
 
         let disk_rows = self.live_disk_rows();
+        let row_symbol_width =
+            snapshot_symbol_width(checked_u32_from_usize(self.interner.entries.len())?, layout);
         let mut rows = Vec::with_capacity(
             disk_rows
                 .len()
-                .checked_mul(DISK_RELATIONSHIP_ROW_LEN)
+                .checked_mul(checked_mul_usize(row_symbol_width.byte_len(), 6)?)
                 .ok_or(SnapshotIoError::Format {
                     reason: "relationship rows length overflowed",
                 })?,
         );
         for row in &disk_rows {
-            row.encode(&mut rows);
+            row.encode_width(row_symbol_width, &mut rows);
         }
-        writer.add_section(
+        writer.add_section_with_flags(
             SectionKind::RelationshipRows,
+            row_symbol_width.flag_bits(),
             rows,
             u64::try_from(disk_rows.len()).map_err(|_| SnapshotIoError::LimitExceeded {
                 component: "relationship rows",
@@ -2100,6 +2108,10 @@ impl RowId {
         Ok(Self(value))
     }
 
+    const fn raw(self) -> u32 {
+        self.0.get()
+    }
+
     fn index(self) -> usize {
         usize::try_from(self.0.get().saturating_sub(1)).unwrap_or(usize::MAX)
     }
@@ -2116,7 +2128,10 @@ struct IdentifierInterner {
 }
 
 impl IdentifierInterner {
-    fn encode_symbol_acceleration(&self) -> Result<(Vec<u8>, Vec<u8>), SnapshotIoError> {
+    fn encode_symbol_acceleration(
+        &self,
+        layout: SnapshotEncodingLayout,
+    ) -> Result<(Vec<u8>, Vec<u8>, u16), SnapshotIoError> {
         let mut hashes_by_id = Vec::with_capacity(self.entries.len());
         for index in 0..self.entries.len() {
             let id = SymbolId::from_index(index)?;
@@ -2132,12 +2147,14 @@ impl IdentifierInterner {
             .map(SymbolId::from_index)
             .collect::<Result<Vec<_>, _>>()?;
         lookup.sort_by_key(|id| (hashes_by_id.get(id.index()).copied(), *id));
+        let lookup_width =
+            snapshot_symbol_width(checked_u32_from_usize(self.entries.len())?, layout);
         let mut lookup_bytes =
-            Vec::with_capacity(checked_mul_usize(lookup.len(), DISK_SYMBOL_LOOKUP_LEN)?);
+            Vec::with_capacity(checked_mul_usize(lookup.len(), lookup_width.byte_len())?);
         for id in lookup {
-            lookup_bytes.extend_from_slice(&id.get().to_le_bytes());
+            lookup_width.encode_value(id.get(), &mut lookup_bytes);
         }
-        Ok((hashes, lookup_bytes))
+        Ok((hashes, lookup_bytes, lookup_width.flag_bits()))
     }
 
     fn decode_snapshot_sections(
@@ -2153,7 +2170,20 @@ impl IdentifierInterner {
                 reason: "symbol table row count does not match header",
             });
         }
-        let expected_len = checked_mul_usize(symbol_count, DISK_SYMBOL_LEN)?;
+        let (start_width, len_width) = if header.format_version == SnapshotFormatVersion::V3 {
+            symbol_table_widths(table.flags())?
+        } else {
+            if table.flags() != 0 {
+                return Err(SnapshotIoError::Format {
+                    reason: "symbol table flags are unsupported",
+                });
+            }
+            (SnapshotKeyWidth::U32, SnapshotKeyWidth::U32)
+        };
+        let expected_len = checked_mul_usize(
+            symbol_count,
+            checked_add_usize(start_width.byte_len(), len_width.byte_len())?,
+        )?;
         if table.bytes().len() != expected_len {
             return Err(SnapshotIoError::Format {
                 reason: "symbol table length does not match symbol count",
@@ -2163,8 +2193,8 @@ impl IdentifierInterner {
         let mut cursor = BinaryCursor::new(table.bytes());
         let mut entries = Vec::with_capacity(symbol_count);
         for _ in 0..symbol_count {
-            let start = cursor.read_u32()?;
-            let len = cursor.read_u32()?;
+            let start = start_width.read_value(&mut cursor)?;
+            let len = len_width.read_value(&mut cursor)?;
             let start_usize = checked_usize_from_u32(start)?;
             let len_usize = checked_usize_from_u32(len)?;
             let end = checked_add_usize(start_usize, len_usize)?;
@@ -2352,6 +2382,30 @@ struct InternedString {
     len: u32,
 }
 
+fn encode_v3_symbol_table(
+    entries: &[InternedString],
+    symbol_bytes_len: u32,
+    layout: SnapshotEncodingLayout,
+) -> Result<(Vec<u8>, u16), SnapshotIoError> {
+    let start_width = snapshot_symbol_width(symbol_bytes_len, layout);
+    let max_len = entries.iter().map(|entry| entry.len).max().unwrap_or(0);
+    let len_width = snapshot_symbol_width(max_len, layout);
+    let entry_width = checked_add_usize(start_width.byte_len(), len_width.byte_len())?;
+    let mut table = Vec::with_capacity(checked_mul_usize(entries.len(), entry_width)?);
+    for entry in entries {
+        start_width.encode_value(entry.start, &mut table);
+        len_width.encode_value(entry.len, &mut table);
+    }
+    Ok((table, symbol_table_flags(start_width, len_width)))
+}
+
+const fn snapshot_symbol_width(max_value: u32, layout: SnapshotEncodingLayout) -> SnapshotKeyWidth {
+    match layout {
+        SnapshotEncodingLayout::Compact => SnapshotKeyWidth::for_max(max_value),
+        SnapshotEncodingLayout::CompressionFriendly => SnapshotKeyWidth::U32,
+    }
+}
+
 fn decode_symbol_hashes(
     reader: &SnapshotReader<'_>,
     symbol_count: u32,
@@ -2390,7 +2444,17 @@ fn decode_symbol_lookup(
         });
     }
     let count = checked_usize_from_u32(symbol_count)?;
-    let expected_len = checked_mul_usize(count, DISK_SYMBOL_LOOKUP_LEN)?;
+    let symbol_width = if reader.header().format_version == SnapshotFormatVersion::V3 {
+        section_width_from_flags(section.flags())?
+    } else {
+        if section.flags() != 0 {
+            return Err(SnapshotIoError::Format {
+                reason: "symbol lookup flags are unsupported",
+            });
+        }
+        SnapshotKeyWidth::U32
+    };
+    let expected_len = checked_mul_usize(count, symbol_width.byte_len())?;
     if section.bytes().len() != expected_len {
         return Err(SnapshotIoError::Format {
             reason: "symbol lookup length does not match symbol count",
@@ -2401,7 +2465,7 @@ fn decode_symbol_lookup(
     let mut lookup = Vec::with_capacity(count);
     let mut previous = None;
     for _ in 0..count {
-        let id = SymbolId::from_snapshot_raw(cursor.read_u32()?, symbol_count)?;
+        let id = SymbolId::from_snapshot_raw(symbol_width.read_value(&mut cursor)?, symbol_count)?;
         let key = symbol_lookup_key(id, hashes_by_id)?;
         if previous.is_some_and(|candidate| candidate >= key) {
             return Err(SnapshotIoError::Format {
@@ -2833,13 +2897,13 @@ struct DiskRelationshipRow {
 }
 
 impl DiskRelationshipRow {
-    fn encode(&self, target: &mut Vec<u8>) {
-        target.extend_from_slice(&self.resource_type.to_le_bytes());
-        target.extend_from_slice(&self.resource_id.to_le_bytes());
-        target.extend_from_slice(&self.relation.to_le_bytes());
-        target.extend_from_slice(&self.subject_type.to_le_bytes());
-        target.extend_from_slice(&self.subject_id.to_le_bytes());
-        target.extend_from_slice(&self.subject_relation.to_le_bytes());
+    fn encode_width(&self, width: SnapshotKeyWidth, target: &mut Vec<u8>) {
+        width.encode_value(self.resource_type, target);
+        width.encode_value(self.resource_id, target);
+        width.encode_value(self.relation, target);
+        width.encode_value(self.subject_type, target);
+        width.encode_value(self.subject_id, target);
+        width.encode_value(self.subject_relation, target);
     }
 }
 
@@ -2866,10 +2930,159 @@ struct DiskIndexKey {
 }
 
 impl DiskIndexKey {
-    fn encode(&self, target: &mut Vec<u8>) {
-        target.extend_from_slice(&self.first.to_le_bytes());
-        target.extend_from_slice(&self.second.to_le_bytes());
-        target.extend_from_slice(&self.third.to_le_bytes());
+    fn max_field(self, field_count: usize) -> Result<u32, SnapshotIoError> {
+        match field_count {
+            1 => Ok(self.first),
+            2 => Ok(self.first.max(self.second)),
+            3 => Ok(self.first.max(self.second).max(self.third)),
+            _ => Err(SnapshotIoError::Format {
+                reason: "index key field count is unsupported",
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotKeyWidth {
+    U8,
+    U16,
+    U24,
+    U32,
+}
+
+impl SnapshotKeyWidth {
+    const fn byte_len(self) -> usize {
+        match self {
+            Self::U8 => 1,
+            Self::U16 => 2,
+            Self::U24 => 3,
+            Self::U32 => 4,
+        }
+    }
+
+    const fn flag_bits(self) -> u16 {
+        match self {
+            Self::U8 => 0,
+            Self::U16 => 1,
+            Self::U24 => 2,
+            Self::U32 => 3,
+        }
+    }
+
+    fn from_flag_bits(value: u16) -> Result<Self, SnapshotIoError> {
+        match value {
+            0 => Ok(Self::U8),
+            1 => Ok(Self::U16),
+            2 => Ok(Self::U24),
+            3 => Ok(Self::U32),
+            _ => Err(SnapshotIoError::Format {
+                reason: "snapshot index key width is unsupported",
+            }),
+        }
+    }
+
+    const fn for_max(value: u32) -> Self {
+        if value <= u8::MAX as u32 {
+            Self::U8
+        } else if value <= u16::MAX as u32 {
+            Self::U16
+        } else if value <= 0x00FF_FFFF {
+            Self::U24
+        } else {
+            Self::U32
+        }
+    }
+
+    fn encode_value(self, value: u32, target: &mut Vec<u8>) {
+        match self {
+            Self::U8 => target.extend(value.to_le_bytes().into_iter().take(1)),
+            Self::U16 => target.extend(value.to_le_bytes().into_iter().take(2)),
+            Self::U24 => target.extend(value.to_le_bytes().into_iter().take(3)),
+            Self::U32 => target.extend_from_slice(&value.to_le_bytes()),
+        }
+    }
+
+    fn read_value(self, cursor: &mut BinaryCursor<'_>) -> Result<u32, SnapshotIoError> {
+        match self {
+            Self::U8 => {
+                let [value] = cursor.read_array::<1>()?;
+                Ok(u32::from(value))
+            }
+            Self::U16 => Ok(u32::from(u16::from_le_bytes(cursor.read_array::<2>()?))),
+            Self::U24 => {
+                let [first, second, third] = cursor.read_array::<3>()?;
+                Ok(u32::from_le_bytes([first, second, third, 0]))
+            }
+            Self::U32 => Ok(u32::from_le_bytes(cursor.read_array::<4>()?)),
+        }
+    }
+}
+
+fn section_width_from_flags(flags: u16) -> Result<SnapshotKeyWidth, SnapshotIoError> {
+    if flags & !SECTION_WIDTH_MASK != 0 {
+        return Err(SnapshotIoError::Format {
+            reason: "section width flags are unsupported",
+        });
+    }
+    SnapshotKeyWidth::from_flag_bits(flags & SECTION_WIDTH_MASK)
+}
+
+fn symbol_table_flags(start_width: SnapshotKeyWidth, len_width: SnapshotKeyWidth) -> u16 {
+    start_width.flag_bits() | (len_width.flag_bits() << SYMBOL_TABLE_LEN_WIDTH_SHIFT)
+}
+
+fn symbol_table_widths(
+    flags: u16,
+) -> Result<(SnapshotKeyWidth, SnapshotKeyWidth), SnapshotIoError> {
+    if flags & !(SECTION_WIDTH_MASK | SYMBOL_TABLE_LEN_WIDTH_MASK) != 0 {
+        return Err(SnapshotIoError::Format {
+            reason: "symbol table flags are unsupported",
+        });
+    }
+    let start_width = SnapshotKeyWidth::from_flag_bits(flags & SECTION_WIDTH_MASK)?;
+    let len_width = SnapshotKeyWidth::from_flag_bits(
+        (flags & SYMBOL_TABLE_LEN_WIDTH_MASK) >> SYMBOL_TABLE_LEN_WIDTH_SHIFT,
+    )?;
+    Ok((start_width, len_width))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotIndexEncoding {
+    FixedV2,
+    CompactV3 { key_width: SnapshotKeyWidth },
+}
+
+impl SnapshotIndexEncoding {
+    const fn flags(self) -> u16 {
+        match self {
+            Self::FixedV2 => 0,
+            Self::CompactV3 { key_width } => {
+                INDEX_DIRECTORY_FLAG_V3_COMPACT
+                    | (key_width.flag_bits() << INDEX_DIRECTORY_KEY_WIDTH_SHIFT)
+            }
+        }
+    }
+
+    fn from_flags(flags: u16) -> Result<Self, SnapshotIoError> {
+        if flags == 0 {
+            return Ok(Self::FixedV2);
+        }
+        if flags & INDEX_DIRECTORY_FLAG_V3_COMPACT == 0 {
+            return Err(SnapshotIoError::Format {
+                reason: "index directory flags are unsupported",
+            });
+        }
+        let known = INDEX_DIRECTORY_FLAG_V3_COMPACT | INDEX_DIRECTORY_KEY_WIDTH_MASK;
+        if flags & !known != 0 {
+            return Err(SnapshotIoError::Format {
+                reason: "index directory flags are unsupported",
+            });
+        }
+        let width_bits =
+            (flags & INDEX_DIRECTORY_KEY_WIDTH_MASK) >> INDEX_DIRECTORY_KEY_WIDTH_SHIFT;
+        Ok(Self::CompactV3 {
+            key_width: SnapshotKeyWidth::from_flag_bits(width_bits)?,
+        })
     }
 }
 
@@ -2928,6 +3141,14 @@ impl SnapshotIndexKind {
     const fn raw(self) -> u16 {
         self as u16
     }
+
+    const fn key_field_count(self) -> usize {
+        match self {
+            Self::Resource | Self::Subject => 3,
+            Self::ResourceObject | Self::ResourceTypeRelation | Self::SubjectTypeRelation => 2,
+            Self::ResourceType | Self::SubjectType => 1,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -2971,35 +3192,32 @@ impl EncodedSnapshotIndexes {
 
         for kind in SnapshotIndexKind::ALL {
             let group = groups.group(kind);
-            let key_start = key_count;
+            let key_start = checked_u32_from_usize(keys.len())?;
             let range_start = range_count;
-            for (key, row_ids) in group {
-                key.encode(&mut keys);
-                let range = encode_posting_range(row_ids, &mut posting_row_ids)?;
-                range.encode(&mut ranges);
-                key_count = key_count.checked_add(1).ok_or(SnapshotIoError::Format {
-                    reason: "index key count overflowed",
-                })?;
-                range_count = range_count.checked_add(1).ok_or(SnapshotIoError::Format {
-                    reason: "posting range count overflowed",
-                })?;
-                posting_row_id_count =
-                    u32::try_from(posting_row_ids.len().checked_div(DISK_ROW_ID_LEN).ok_or(
-                        SnapshotIoError::Format {
-                            reason: "posting row id length overflowed",
-                        },
-                    )?)
-                    .map_err(|_| SnapshotIoError::LimitExceeded {
-                        component: "posting row ids",
+            let encoded_group =
+                encode_v3_index_group(kind, group, &mut keys, &mut ranges, &mut posting_row_ids)?;
+            key_count =
+                key_count
+                    .checked_add(encoded_group.key_count)
+                    .ok_or(SnapshotIoError::Format {
+                        reason: "index key count overflowed",
                     })?;
-            }
-            let group_len = checked_u32_from_usize(group.len())?;
+            range_count = range_count.checked_add(encoded_group.multi_count).ok_or(
+                SnapshotIoError::Format {
+                    reason: "posting range count overflowed",
+                },
+            )?;
+            posting_row_id_count = posting_row_id_count
+                .checked_add(encoded_group.overflow_row_id_count)
+                .ok_or(SnapshotIoError::Format {
+                    reason: "posting row id count overflowed",
+                })?;
             directory.extend_from_slice(&kind.raw().to_le_bytes());
-            directory.extend_from_slice(&0_u16.to_le_bytes());
+            directory.extend_from_slice(&encoded_group.encoding.flags().to_le_bytes());
             directory.extend_from_slice(&key_start.to_le_bytes());
-            directory.extend_from_slice(&group_len.to_le_bytes());
+            directory.extend_from_slice(&encoded_group.key_count.to_le_bytes());
             directory.extend_from_slice(&range_start.to_le_bytes());
-            directory.extend_from_slice(&group_len.to_le_bytes());
+            directory.extend_from_slice(&encoded_group.multi_count.to_le_bytes());
         }
 
         Ok(Self {
@@ -3114,28 +3332,149 @@ impl SnapshotIndexGroups {
     }
 }
 
-fn encode_posting_range(
+#[derive(Debug, Clone, Copy)]
+struct EncodedIndexGroup {
+    encoding: SnapshotIndexEncoding,
+    key_count: u32,
+    multi_count: u32,
+    overflow_row_id_count: u32,
+}
+
+fn encode_v3_index_group(
+    kind: SnapshotIndexKind,
+    group: &BTreeMap<DiskIndexKey, Vec<u32>>,
+    keys: &mut Vec<u8>,
+    ranges: &mut Vec<u8>,
+    posting_row_ids: &mut Vec<u8>,
+) -> Result<EncodedIndexGroup, SnapshotIoError> {
+    let key_count = checked_u32_from_usize(group.len())?;
+    let multi_count =
+        checked_u32_from_usize(group.values().filter(|row_ids| row_ids.len() > 1).count())?;
+    let key_width = snapshot_key_width(kind, group)?;
+    let encoding = SnapshotIndexEncoding::CompactV3 { key_width };
+    let mut overflow_row_id_count = 0_u32;
+
+    for (key, row_ids) in group.iter().filter(|(_, row_ids)| row_ids.len() == 1) {
+        encode_v3_key(kind, *key, key_width, keys);
+        let row_id = *row_ids.first().ok_or(SnapshotIoError::Format {
+            reason: "empty posting list",
+        })?;
+        keys.extend_from_slice(&row_id.to_le_bytes());
+    }
+
+    for (key, row_ids) in group.iter().filter(|(_, row_ids)| row_ids.len() > 1) {
+        encode_v3_key(kind, *key, key_width, keys);
+        let range = encode_v3_posting_range(row_ids, posting_row_ids)?;
+        overflow_row_id_count = overflow_row_id_count
+            .checked_add(range.overflow_row_id_count)
+            .ok_or(SnapshotIoError::Format {
+                reason: "posting row id count overflowed",
+            })?;
+        range.range.encode(ranges);
+    }
+
+    Ok(EncodedIndexGroup {
+        encoding,
+        key_count,
+        multi_count,
+        overflow_row_id_count,
+    })
+}
+
+fn snapshot_key_width(
+    kind: SnapshotIndexKind,
+    group: &BTreeMap<DiskIndexKey, Vec<u32>>,
+) -> Result<SnapshotKeyWidth, SnapshotIoError> {
+    let field_count = kind.key_field_count();
+    let mut max_field = 0_u32;
+    for key in group.keys().copied() {
+        max_field = max_field.max(key.max_field(field_count)?);
+    }
+    Ok(SnapshotKeyWidth::for_max(max_field))
+}
+
+fn encode_v3_key(
+    kind: SnapshotIndexKind,
+    key: DiskIndexKey,
+    width: SnapshotKeyWidth,
+    target: &mut Vec<u8>,
+) {
+    width.encode_value(key.first, target);
+    if kind.key_field_count() >= 2 {
+        width.encode_value(key.second, target);
+    }
+    if kind.key_field_count() >= 3 {
+        width.encode_value(key.third, target);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EncodedPostingRange {
+    range: DiskPostingRange,
+    overflow_row_id_count: u32,
+}
+
+fn encode_v3_posting_range(
     row_ids: &[u32],
     posting_row_ids: &mut Vec<u8>,
-) -> Result<DiskPostingRange, SnapshotIoError> {
+) -> Result<EncodedPostingRange, SnapshotIoError> {
     let (first, rest) = row_ids.split_first().ok_or(SnapshotIoError::Format {
         reason: "empty posting list",
     })?;
-    let overflow_start =
-        checked_u32_from_usize(posting_row_ids.len().checked_div(DISK_ROW_ID_LEN).ok_or(
-            SnapshotIoError::Format {
-                reason: "posting row id length overflowed",
-            },
-        )?)?;
-    let overflow_len = checked_u32_from_usize(rest.len())?;
+    let overflow_start = checked_u32_from_usize(posting_row_ids.len())?;
+    let overflow_row_id_count = checked_u32_from_usize(rest.len())?;
+    let mut previous = *first;
     for row_id in rest {
-        posting_row_ids.extend_from_slice(&row_id.to_le_bytes());
+        if *row_id <= previous {
+            return Err(SnapshotIoError::Format {
+                reason: "posting row ids are not strictly increasing",
+            });
+        }
+        let delta = row_id
+            .checked_sub(previous)
+            .ok_or(SnapshotIoError::Format {
+                reason: "posting row id delta underflowed",
+            })?;
+        encode_posting_delta_varint(delta, posting_row_ids)?;
+        previous = *row_id;
     }
-    Ok(DiskPostingRange {
-        first_row_id: *first,
-        overflow_start,
-        overflow_len,
+    let overflow_len = checked_u32_from_usize(
+        posting_row_ids
+            .len()
+            .checked_sub(checked_usize_from_u32(overflow_start)?)
+            .ok_or(SnapshotIoError::Format {
+                reason: "posting row id length underflowed",
+            })?,
+    )?;
+    Ok(EncodedPostingRange {
+        range: DiskPostingRange {
+            first_row_id: *first,
+            overflow_start,
+            overflow_len,
+        },
+        overflow_row_id_count,
     })
+}
+
+fn encode_posting_delta_varint(value: u32, target: &mut Vec<u8>) -> Result<(), SnapshotIoError> {
+    if value == 0 {
+        return Err(SnapshotIoError::Format {
+            reason: "posting row id delta must be non-zero",
+        });
+    }
+    let mut remaining = value;
+    while remaining >= 0x80 {
+        let low_bits = u8::try_from(remaining & 0x7F).map_err(|_| SnapshotIoError::Format {
+            reason: "posting row id delta overflowed",
+        })?;
+        target.push(low_bits | 0x80);
+        remaining >>= 7;
+    }
+    let final_byte = u8::try_from(remaining).map_err(|_| SnapshotIoError::Format {
+        reason: "posting row id delta overflowed",
+    })?;
+    target.push(final_byte);
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -3162,6 +3501,7 @@ impl DecodedSnapshotIndexes {
         let posting_row_ids = decode_posting_row_ids(reader)?;
         let row_count = reader.header().relationship_count;
         let symbol_count = reader.header().symbol_count;
+        validate_index_section_layout(&directory, &keys, &ranges, &posting_row_ids, row_count)?;
         let input = SnapshotIndexDecodeInput {
             directory: &directory,
             keys: &keys,
@@ -3175,91 +3515,161 @@ impl DecodedSnapshotIndexes {
             validation,
         };
 
+        let mut decoded_posting_row_id_count = 0_u64;
+        let resource = decode_resource_index(&input, &mut decoded_posting_row_id_count)?;
+        let resource_object =
+            decode_resource_object_index(&input, &mut decoded_posting_row_id_count)?;
+        let resource_type_relation =
+            decode_resource_type_relation_index(&input, &mut decoded_posting_row_id_count)?;
+        let resource_type = decode_resource_type_index(&input, &mut decoded_posting_row_id_count)?;
+        let subject = decode_subject_index(&input, &mut decoded_posting_row_id_count)?;
+        let subject_type_relation =
+            decode_subject_type_relation_index(&input, &mut decoded_posting_row_id_count)?;
+        let subject_type = decode_subject_type_index(&input, &mut decoded_posting_row_id_count)?;
+        validate_decoded_posting_row_id_count(&posting_row_ids, decoded_posting_row_id_count)?;
+
         Ok(Self {
-            resource: decode_index(
-                &input,
-                &SnapshotIndexDecoder {
-                    kind: SnapshotIndexKind::Resource,
-                    key_from_disk: resource_key_from_disk,
-                    row_matches_key: row_matches_resource_key,
-                    coverage_bit: simple_index_coverage_bit,
-                    expected_mask: |_| 1,
-                    required_by_profile: |_| true,
-                },
-            )?,
-            resource_object: decode_index(
-                &input,
-                &SnapshotIndexDecoder {
-                    kind: SnapshotIndexKind::ResourceObject,
-                    key_from_disk: resource_object_key_from_disk,
-                    row_matches_key: row_matches_resource_object_key,
-                    coverage_bit: simple_index_coverage_bit,
-                    expected_mask: |_| 1,
-                    required_by_profile: IndexProfile::supports_broad_resource_indexes,
-                },
-            )?,
-            resource_type_relation: decode_index(
-                &input,
-                &SnapshotIndexDecoder {
-                    kind: SnapshotIndexKind::ResourceTypeRelation,
-                    key_from_disk: resource_type_relation_key_from_disk,
-                    row_matches_key: row_matches_resource_type_relation_key,
-                    coverage_bit: simple_index_coverage_bit,
-                    expected_mask: |_| 1,
-                    required_by_profile: IndexProfile::supports_broad_resource_indexes,
-                },
-            )?,
-            resource_type: decode_index(
-                &input,
-                &SnapshotIndexDecoder {
-                    kind: SnapshotIndexKind::ResourceType,
-                    key_from_disk: resource_type_key_from_disk,
-                    row_matches_key: row_matches_resource_type_key,
-                    coverage_bit: simple_index_coverage_bit,
-                    expected_mask: |_| 1,
-                    required_by_profile: IndexProfile::supports_broad_resource_indexes,
-                },
-            )?,
-            subject: decode_index(
-                &input,
-                &SnapshotIndexDecoder {
-                    kind: SnapshotIndexKind::Subject,
-                    key_from_disk: subject_key_from_disk,
-                    row_matches_key: row_matches_subject_key,
-                    coverage_bit: subject_index_coverage_bit,
-                    expected_mask: |row| if row.subject_relation.is_some() { 3 } else { 1 },
-                    required_by_profile: IndexProfile::supports_subject_reverse_lookup,
-                },
-            )?,
-            subject_type_relation: decode_index(
-                &input,
-                &SnapshotIndexDecoder {
-                    kind: SnapshotIndexKind::SubjectTypeRelation,
-                    key_from_disk: subject_type_relation_key_from_disk,
-                    row_matches_key: row_matches_subject_type_relation_key,
-                    coverage_bit: simple_index_coverage_bit,
-                    expected_mask: |row| u8::from(row.subject_relation.is_some()),
-                    required_by_profile: IndexProfile::supports_subject_reverse_lookup,
-                },
-            )?,
-            subject_type: decode_index(
-                &input,
-                &SnapshotIndexDecoder {
-                    kind: SnapshotIndexKind::SubjectType,
-                    key_from_disk: subject_type_key_from_disk,
-                    row_matches_key: row_matches_subject_type_key,
-                    coverage_bit: simple_index_coverage_bit,
-                    expected_mask: |_| 1,
-                    required_by_profile: IndexProfile::supports_subject_reverse_lookup,
-                },
-            )?,
+            resource,
+            resource_object,
+            resource_type_relation,
+            resource_type,
+            subject,
+            subject_type_relation,
+            subject_type,
         })
     }
+}
+
+fn decode_resource_index(
+    input: &SnapshotIndexDecodeInput<'_>,
+    decoded_posting_row_id_count: &mut u64,
+) -> Result<PostingIndex<ResourceIndexKey>, SnapshotIoError> {
+    decode_index(
+        input,
+        &SnapshotIndexDecoder {
+            kind: SnapshotIndexKind::Resource,
+            key_from_disk: resource_key_from_disk,
+            row_matches_key: row_matches_resource_key,
+            coverage_bit: simple_index_coverage_bit,
+            expected_mask: |_| 1,
+            required_by_profile: |_| true,
+        },
+        decoded_posting_row_id_count,
+    )
+}
+
+fn decode_resource_object_index(
+    input: &SnapshotIndexDecodeInput<'_>,
+    decoded_posting_row_id_count: &mut u64,
+) -> Result<PostingIndex<ResourceObjectIndexKey>, SnapshotIoError> {
+    decode_index(
+        input,
+        &SnapshotIndexDecoder {
+            kind: SnapshotIndexKind::ResourceObject,
+            key_from_disk: resource_object_key_from_disk,
+            row_matches_key: row_matches_resource_object_key,
+            coverage_bit: simple_index_coverage_bit,
+            expected_mask: |_| 1,
+            required_by_profile: IndexProfile::supports_broad_resource_indexes,
+        },
+        decoded_posting_row_id_count,
+    )
+}
+
+fn decode_resource_type_relation_index(
+    input: &SnapshotIndexDecodeInput<'_>,
+    decoded_posting_row_id_count: &mut u64,
+) -> Result<PostingIndex<ResourceTypeRelationIndexKey>, SnapshotIoError> {
+    decode_index(
+        input,
+        &SnapshotIndexDecoder {
+            kind: SnapshotIndexKind::ResourceTypeRelation,
+            key_from_disk: resource_type_relation_key_from_disk,
+            row_matches_key: row_matches_resource_type_relation_key,
+            coverage_bit: simple_index_coverage_bit,
+            expected_mask: |_| 1,
+            required_by_profile: IndexProfile::supports_broad_resource_indexes,
+        },
+        decoded_posting_row_id_count,
+    )
+}
+
+fn decode_resource_type_index(
+    input: &SnapshotIndexDecodeInput<'_>,
+    decoded_posting_row_id_count: &mut u64,
+) -> Result<PostingIndex<ObjectTypeId>, SnapshotIoError> {
+    decode_index(
+        input,
+        &SnapshotIndexDecoder {
+            kind: SnapshotIndexKind::ResourceType,
+            key_from_disk: resource_type_key_from_disk,
+            row_matches_key: row_matches_resource_type_key,
+            coverage_bit: simple_index_coverage_bit,
+            expected_mask: |_| 1,
+            required_by_profile: IndexProfile::supports_broad_resource_indexes,
+        },
+        decoded_posting_row_id_count,
+    )
+}
+
+fn decode_subject_index(
+    input: &SnapshotIndexDecodeInput<'_>,
+    decoded_posting_row_id_count: &mut u64,
+) -> Result<PostingIndex<SubjectIndexKey>, SnapshotIoError> {
+    decode_index(
+        input,
+        &SnapshotIndexDecoder {
+            kind: SnapshotIndexKind::Subject,
+            key_from_disk: subject_key_from_disk,
+            row_matches_key: row_matches_subject_key,
+            coverage_bit: subject_index_coverage_bit,
+            expected_mask: |row| if row.subject_relation.is_some() { 3 } else { 1 },
+            required_by_profile: IndexProfile::supports_subject_reverse_lookup,
+        },
+        decoded_posting_row_id_count,
+    )
+}
+
+fn decode_subject_type_relation_index(
+    input: &SnapshotIndexDecodeInput<'_>,
+    decoded_posting_row_id_count: &mut u64,
+) -> Result<PostingIndex<SubjectTypeRelationIndexKey>, SnapshotIoError> {
+    decode_index(
+        input,
+        &SnapshotIndexDecoder {
+            kind: SnapshotIndexKind::SubjectTypeRelation,
+            key_from_disk: subject_type_relation_key_from_disk,
+            row_matches_key: row_matches_subject_type_relation_key,
+            coverage_bit: simple_index_coverage_bit,
+            expected_mask: |row| u8::from(row.subject_relation.is_some()),
+            required_by_profile: IndexProfile::supports_subject_reverse_lookup,
+        },
+        decoded_posting_row_id_count,
+    )
+}
+
+fn decode_subject_type_index(
+    input: &SnapshotIndexDecodeInput<'_>,
+    decoded_posting_row_id_count: &mut u64,
+) -> Result<PostingIndex<SubjectTypeId>, SnapshotIoError> {
+    decode_index(
+        input,
+        &SnapshotIndexDecoder {
+            kind: SnapshotIndexKind::SubjectType,
+            key_from_disk: subject_type_key_from_disk,
+            row_matches_key: row_matches_subject_type_key,
+            coverage_bit: simple_index_coverage_bit,
+            expected_mask: |_| 1,
+            required_by_profile: IndexProfile::supports_subject_reverse_lookup,
+        },
+        decoded_posting_row_id_count,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
 struct DiskIndexDirectoryEntry {
     kind: SnapshotIndexKind,
+    encoding: SnapshotIndexEncoding,
     key_start: u32,
     key_count: u32,
     posting_range_start: u32,
@@ -3269,9 +3679,9 @@ struct DiskIndexDirectoryEntry {
 #[derive(Debug, Clone, Copy)]
 struct SnapshotIndexDecodeInput<'a> {
     directory: &'a [DiskIndexDirectoryEntry],
-    keys: &'a [DiskIndexKey],
+    keys: &'a DecodedIndexKeys,
     ranges: &'a [DiskPostingRange],
-    posting_row_ids: &'a [RowId],
+    posting_row_ids: &'a DecodedPostingRowIds,
     rows: &'a [RelationshipRow],
     row_count: u32,
     symbol_count: u32,
@@ -3280,10 +3690,40 @@ struct SnapshotIndexDecodeInput<'a> {
     validation: SnapshotValidationMode,
 }
 
+#[derive(Debug)]
+enum SnapshotIndexEntries<'a> {
+    Borrowed {
+        keys: &'a [DiskIndexKey],
+        ranges: &'a [DiskPostingRange],
+    },
+    Owned(Vec<SnapshotIndexEntry>),
+}
+
+impl SnapshotIndexEntries<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Borrowed { keys, .. } => keys.len(),
+            Self::Owned(entries) => entries.len(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
-struct SnapshotIndexSlices<'a> {
-    keys: &'a [DiskIndexKey],
-    ranges: &'a [DiskPostingRange],
+struct SnapshotIndexEntry {
+    key: DiskIndexKey,
+    range: DiskPostingRange,
+}
+
+#[derive(Debug)]
+enum DecodedIndexKeys {
+    Fixed(Vec<DiskIndexKey>),
+    Compact { bytes: Vec<u8>, row_count: u64 },
+}
+
+#[derive(Debug)]
+enum DecodedPostingRowIds {
+    Fixed(Vec<RowId>),
+    DeltaVarint { bytes: Vec<u8>, row_count: u64 },
 }
 
 struct SnapshotIndexDecoder<K> {
@@ -3316,14 +3756,11 @@ fn decode_index_directory(
     for _ in 0..SNAPSHOT_INDEX_KIND_COUNT {
         let kind = SnapshotIndexKind::from_raw(cursor.read_u16()?)?;
         let flags = cursor.read_u16()?;
-        if flags != 0 {
-            return Err(SnapshotIoError::Format {
-                reason: "index directory flags are unsupported",
-            });
-        }
+        let encoding = SnapshotIndexEncoding::from_flags(flags)?;
         insert_unique(&mut seen, kind, "duplicate snapshot index kind")?;
         entries.push(DiskIndexDirectoryEntry {
             kind,
+            encoding,
             key_start: cursor.read_u32()?,
             key_count: cursor.read_u32()?,
             posting_range_start: cursor.read_u32()?,
@@ -3333,8 +3770,19 @@ fn decode_index_directory(
     Ok(entries)
 }
 
-fn decode_index_keys(reader: &SnapshotReader<'_>) -> Result<Vec<DiskIndexKey>, SnapshotIoError> {
+fn decode_index_keys(reader: &SnapshotReader<'_>) -> Result<DecodedIndexKeys, SnapshotIoError> {
     let section = reader.section(SectionKind::IndexKeys)?;
+    if reader.header().format_version == SnapshotFormatVersion::V3 {
+        if section.bytes().is_empty() && section.row_count() != 0 {
+            return Err(SnapshotIoError::Format {
+                reason: "index key length does not match row count",
+            });
+        }
+        return Ok(DecodedIndexKeys::Compact {
+            bytes: section.bytes().to_vec(),
+            row_count: section.row_count(),
+        });
+    }
     let row_count = checked_usize_from_u64(section.row_count())?;
     let expected_len = checked_mul_usize(row_count, DISK_INDEX_KEY_LEN)?;
     if section.bytes().len() != expected_len {
@@ -3351,7 +3799,7 @@ fn decode_index_keys(reader: &SnapshotReader<'_>) -> Result<Vec<DiskIndexKey>, S
             third: cursor.read_u32()?,
         });
     }
-    Ok(keys)
+    Ok(DecodedIndexKeys::Fixed(keys))
 }
 
 fn decode_posting_ranges(
@@ -3377,8 +3825,16 @@ fn decode_posting_ranges(
     Ok(ranges)
 }
 
-fn decode_posting_row_ids(reader: &SnapshotReader<'_>) -> Result<Vec<RowId>, SnapshotIoError> {
+fn decode_posting_row_ids(
+    reader: &SnapshotReader<'_>,
+) -> Result<DecodedPostingRowIds, SnapshotIoError> {
     let section = reader.section(SectionKind::PostingRowIds)?;
+    if reader.header().format_version == SnapshotFormatVersion::V3 {
+        return Ok(DecodedPostingRowIds::DeltaVarint {
+            bytes: section.bytes().to_vec(),
+            row_count: section.row_count(),
+        });
+    }
     let row_count = checked_usize_from_u64(section.row_count())?;
     let expected_len = checked_mul_usize(row_count, DISK_ROW_ID_LEN)?;
     if section.bytes().len() != expected_len {
@@ -3392,41 +3848,255 @@ fn decode_posting_row_ids(reader: &SnapshotReader<'_>) -> Result<Vec<RowId>, Sna
     for _ in 0..row_count {
         row_ids.push(RowId::from_snapshot_raw(cursor.read_u32()?, total_rows)?);
     }
-    Ok(row_ids)
+    Ok(DecodedPostingRowIds::Fixed(row_ids))
+}
+
+fn validate_index_section_layout(
+    directory: &[DiskIndexDirectoryEntry],
+    keys: &DecodedIndexKeys,
+    ranges: &[DiskPostingRange],
+    posting_row_ids: &DecodedPostingRowIds,
+    row_count: u32,
+) -> Result<(), SnapshotIoError> {
+    match (keys, posting_row_ids) {
+        (DecodedIndexKeys::Fixed(_), DecodedPostingRowIds::Fixed(_)) => Ok(()),
+        (
+            DecodedIndexKeys::Compact {
+                bytes: key_bytes,
+                row_count: key_row_count,
+            },
+            DecodedPostingRowIds::DeltaVarint {
+                bytes: posting_bytes,
+                row_count: _,
+            },
+        ) => validate_v3_compact_index_sections(
+            directory,
+            key_bytes,
+            *key_row_count,
+            ranges,
+            posting_bytes,
+            row_count,
+        ),
+        _ => Err(SnapshotIoError::Format {
+            reason: "index section encodings do not match snapshot format",
+        }),
+    }
+}
+
+fn validate_v3_compact_index_sections(
+    directory: &[DiskIndexDirectoryEntry],
+    key_bytes: &[u8],
+    key_row_count: u64,
+    ranges: &[DiskPostingRange],
+    posting_bytes: &[u8],
+    row_count: u32,
+) -> Result<(), SnapshotIoError> {
+    let mut total_keys = 0_u64;
+    let mut total_ranges = 0_u64;
+    let mut key_spans = Vec::with_capacity(directory.len());
+    let mut range_spans = Vec::with_capacity(directory.len());
+
+    for entry in directory {
+        let SnapshotIndexEncoding::CompactV3 { key_width } = entry.encoding else {
+            return Err(SnapshotIoError::Format {
+                reason: "v3 index directory contains non-compact encoding",
+            });
+        };
+        total_keys =
+            total_keys
+                .checked_add(u64::from(entry.key_count))
+                .ok_or(SnapshotIoError::Format {
+                    reason: "index key count overflowed",
+                })?;
+        total_ranges = total_ranges
+            .checked_add(u64::from(entry.posting_range_count))
+            .ok_or(SnapshotIoError::Format {
+                reason: "posting range count overflowed",
+            })?;
+
+        let key_span = compact_index_key_span(*entry, key_width)?;
+        if key_span.end > key_bytes.len() {
+            return Err(SnapshotIoError::Format {
+                reason: "compact index key range is out of bounds",
+            });
+        }
+        key_spans.push(key_span);
+
+        let range_span = index_range_span(*entry)?;
+        if range_span.end > ranges.len() {
+            return Err(SnapshotIoError::Format {
+                reason: "posting range span is out of bounds",
+            });
+        }
+        range_spans.push(range_span);
+    }
+
+    if total_keys != key_row_count {
+        return Err(SnapshotIoError::Format {
+            reason: "index key row count does not match directory",
+        });
+    }
+    if total_ranges
+        != u64::try_from(ranges.len()).map_err(|_| SnapshotIoError::LimitExceeded {
+            component: "posting ranges",
+        })?
+    {
+        return Err(SnapshotIoError::Format {
+            reason: "posting range row count does not match directory",
+        });
+    }
+
+    validate_spans_cover(
+        key_spans,
+        key_bytes.len(),
+        "compact index key spans do not cover section",
+    )?;
+    validate_spans_cover(
+        range_spans,
+        ranges.len(),
+        "posting range spans do not cover section",
+    )?;
+
+    validate_v3_posting_row_id_spans(ranges, posting_bytes, row_count)
+}
+
+fn compact_index_key_span(
+    entry: DiskIndexDirectoryEntry,
+    key_width: SnapshotKeyWidth,
+) -> Result<Range<usize>, SnapshotIoError> {
+    if entry.posting_range_count > entry.key_count {
+        return Err(SnapshotIoError::Format {
+            reason: "posting range count exceeds compact key count",
+        });
+    }
+    let key_start = checked_usize_from_u32(entry.key_start)?;
+    let key_count = checked_usize_from_u32(entry.key_count)?;
+    let multi_count = checked_usize_from_u32(entry.posting_range_count)?;
+    let singleton_count = key_count
+        .checked_sub(multi_count)
+        .ok_or(SnapshotIoError::Format {
+            reason: "compact singleton count underflowed",
+        })?;
+    let key_len = checked_mul_usize(entry.kind.key_field_count(), key_width.byte_len())?;
+    let singleton_entry_len = checked_add_usize(key_len, DISK_ROW_ID_LEN)?;
+    let singleton_bytes_len = checked_mul_usize(singleton_count, singleton_entry_len)?;
+    let multi_bytes_len = checked_mul_usize(multi_count, key_len)?;
+    let group_bytes_len = checked_add_usize(singleton_bytes_len, multi_bytes_len)?;
+    let key_end = checked_add_usize(key_start, group_bytes_len)?;
+    Ok(key_start..key_end)
+}
+
+fn index_range_span(entry: DiskIndexDirectoryEntry) -> Result<Range<usize>, SnapshotIoError> {
+    let range_start = checked_usize_from_u32(entry.posting_range_start)?;
+    let range_count = checked_usize_from_u32(entry.posting_range_count)?;
+    let range_end = checked_add_usize(range_start, range_count)?;
+    Ok(range_start..range_end)
+}
+
+fn validate_spans_cover(
+    mut spans: Vec<Range<usize>>,
+    total_len: usize,
+    reason: &'static str,
+) -> Result<(), SnapshotIoError> {
+    spans.sort_by(|left, right| left.start.cmp(&right.start).then(left.end.cmp(&right.end)));
+    let mut cursor = 0_usize;
+    for span in spans {
+        if span.start > span.end || span.start != cursor {
+            return Err(SnapshotIoError::Format { reason });
+        }
+        cursor = span.end;
+    }
+    if cursor != total_len {
+        return Err(SnapshotIoError::Format { reason });
+    }
+    Ok(())
+}
+
+fn validate_v3_posting_row_id_spans(
+    ranges: &[DiskPostingRange],
+    bytes: &[u8],
+    row_count: u32,
+) -> Result<(), SnapshotIoError> {
+    let mut spans = Vec::new();
+    for range in ranges {
+        RowId::from_snapshot_raw(range.first_row_id, row_count)?;
+        let start = checked_usize_from_u32(range.overflow_start)?;
+        let len = checked_usize_from_u32(range.overflow_len)?;
+        let end = checked_add_usize(start, len)?;
+        if end > bytes.len() {
+            return Err(SnapshotIoError::Format {
+                reason: "posting range points outside posting row ids",
+            });
+        }
+        if len == 0 {
+            continue;
+        }
+        spans.push(start..end);
+    }
+    validate_spans_cover(
+        spans,
+        bytes.len(),
+        "posting row id spans do not cover section",
+    )?;
+    Ok(())
+}
+
+fn validate_decoded_posting_row_id_count(
+    posting_row_ids: &DecodedPostingRowIds,
+    decoded_count: u64,
+) -> Result<(), SnapshotIoError> {
+    let expected = match posting_row_ids {
+        DecodedPostingRowIds::Fixed(row_ids) => {
+            u64::try_from(row_ids.len()).map_err(|_| SnapshotIoError::LimitExceeded {
+                component: "posting row ids",
+            })?
+        }
+        DecodedPostingRowIds::DeltaVarint { row_count, .. } => *row_count,
+    };
+    if decoded_count != expected {
+        return Err(SnapshotIoError::Format {
+            reason: "posting row id row count does not match decoded varints",
+        });
+    }
+    Ok(())
+}
+
+fn increment_decoded_posting_row_id_count(counter: &mut u64) -> Result<(), SnapshotIoError> {
+    *counter = counter.checked_add(1).ok_or(SnapshotIoError::Format {
+        reason: "posting row id count overflowed",
+    })?;
+    Ok(())
 }
 
 fn decode_index<K>(
     input: &SnapshotIndexDecodeInput<'_>,
     decoder: &SnapshotIndexDecoder<K>,
+    decoded_posting_row_id_count: &mut u64,
 ) -> Result<PostingIndex<K>, SnapshotIoError>
 where
     K: Copy + Eq + Hash + Ord,
 {
-    let slices = snapshot_index_slices(input, decoder.kind)?;
+    let entries = snapshot_index_entries(input, decoder.kind)?;
     if input.validation == SnapshotValidationMode::TrustedFastLoad
         && input.profile == SnapshotLoadProfile::FastLoad
     {
-        return decode_trusted_fast_index(input, decoder, slices);
+        return decode_trusted_fast_index(input, decoder, &entries, decoded_posting_row_id_count);
     }
 
     let mut coverage = vec![0_u8; input.rows.len()];
-    let mut sorted_keys = Vec::with_capacity(slices.keys.len());
-    let mut sorted_ranges = Vec::with_capacity(slices.ranges.len());
+    let mut sorted_keys = Vec::with_capacity(entries.len());
+    let mut sorted_ranges = Vec::with_capacity(entries.len());
     let mut sorted_overflow = Vec::new();
     let mut latency_index = PostingIndex::default();
 
-    for (disk_key, range) in slices
-        .keys
-        .iter()
-        .copied()
-        .zip(slices.ranges.iter().copied())
-    {
+    for (disk_key, range) in snapshot_index_entries_iter(&entries) {
         let typed_key = (decoder.key_from_disk)(disk_key, input.symbol_count)?;
         let row_ids = posting_row_id_iter(range, input.posting_row_ids, input.row_count)?;
         let overflow_start = checked_u32_from_usize(sorted_overflow.len())?;
         let mut overflow_len = 0_u32;
         let mut first = None;
         for row_id in row_ids {
+            let row_id = row_id?;
             let row = input
                 .rows
                 .get(row_id.index())
@@ -3462,6 +4132,7 @@ where
                 overflow_len = overflow_len.checked_add(1).ok_or(SnapshotIoError::Format {
                     reason: "posting overflow length overflowed",
                 })?;
+                increment_decoded_posting_row_id_count(decoded_posting_row_id_count)?;
             }
             if matches!(input.profile, SnapshotLoadProfile::Latency) {
                 latency_index.insert(typed_key, row_id);
@@ -3505,36 +4176,35 @@ where
 fn decode_trusted_fast_index<K>(
     input: &SnapshotIndexDecodeInput<'_>,
     decoder: &SnapshotIndexDecoder<K>,
-    slices: SnapshotIndexSlices<'_>,
+    entries: &SnapshotIndexEntries<'_>,
+    decoded_posting_row_id_count: &mut u64,
 ) -> Result<PostingIndex<K>, SnapshotIoError>
 where
     K: Copy + Eq + Hash + Ord,
 {
-    let mut sorted_keys = Vec::with_capacity(slices.keys.len());
-    let mut sorted_ranges = Vec::with_capacity(slices.ranges.len());
+    let mut sorted_keys = Vec::with_capacity(entries.len());
+    let mut sorted_ranges = Vec::with_capacity(entries.len());
     let mut sorted_overflow = Vec::new();
-    for (disk_key, range) in slices
-        .keys
-        .iter()
-        .copied()
-        .zip(slices.ranges.iter().copied())
-    {
+    for (disk_key, range) in snapshot_index_entries_iter(entries) {
         let typed_key = (decoder.key_from_disk)(disk_key, input.symbol_count)?;
         let first_row_id = RowId::from_snapshot_raw(range.first_row_id, input.row_count)?;
         let overflow_start = checked_u32_from_usize(sorted_overflow.len())?;
-        let overflow_len = range.overflow_len;
-        if overflow_len != 0 {
-            let start = checked_usize_from_u32(range.overflow_start)?;
-            let len = checked_usize_from_u32(overflow_len)?;
-            let end = checked_add_usize(start, len)?;
-            let overflow =
-                input
-                    .posting_row_ids
-                    .get(start..end)
-                    .ok_or(SnapshotIoError::Format {
-                        reason: "posting range points outside posting row ids",
-                    })?;
-            sorted_overflow.extend_from_slice(overflow);
+        let mut overflow_len = 0_u32;
+        let mut row_ids = posting_row_id_iter(range, input.posting_row_ids, input.row_count)?;
+        let first = row_ids.next().ok_or(SnapshotIoError::Format {
+            reason: "empty posting range",
+        })??;
+        if first != first_row_id {
+            return Err(SnapshotIoError::Format {
+                reason: "posting range first row id mismatch",
+            });
+        }
+        for row_id in row_ids {
+            sorted_overflow.push(row_id?);
+            overflow_len = overflow_len.checked_add(1).ok_or(SnapshotIoError::Format {
+                reason: "posting overflow length overflowed",
+            })?;
+            increment_decoded_posting_row_id_count(decoded_posting_row_id_count)?;
         }
         sorted_keys.push(typed_key);
         sorted_ranges.push(RuntimePostingRange {
@@ -3550,10 +4220,10 @@ where
     ))
 }
 
-fn snapshot_index_slices<'a>(
+fn snapshot_index_entries<'a>(
     input: &'a SnapshotIndexDecodeInput<'_>,
     kind: SnapshotIndexKind,
-) -> Result<SnapshotIndexSlices<'a>, SnapshotIoError> {
+) -> Result<SnapshotIndexEntries<'a>, SnapshotIoError> {
     let entry = input
         .directory
         .iter()
@@ -3562,6 +4232,25 @@ fn snapshot_index_slices<'a>(
         .ok_or(SnapshotIoError::Format {
             reason: "missing snapshot index kind",
         })?;
+    match (input.keys, entry.encoding) {
+        (DecodedIndexKeys::Fixed(keys), SnapshotIndexEncoding::FixedV2) => {
+            fixed_snapshot_index_entries(keys, input.ranges, entry)
+        }
+        (
+            DecodedIndexKeys::Compact { bytes: keys, .. },
+            SnapshotIndexEncoding::CompactV3 { key_width },
+        ) => compact_snapshot_index_entries(keys, input.ranges, entry, key_width),
+        _ => Err(SnapshotIoError::Format {
+            reason: "index encoding does not match snapshot format",
+        }),
+    }
+}
+
+fn fixed_snapshot_index_entries<'a>(
+    keys: &'a [DiskIndexKey],
+    ranges: &'a [DiskPostingRange],
+    entry: DiskIndexDirectoryEntry,
+) -> Result<SnapshotIndexEntries<'a>, SnapshotIoError> {
     if entry.key_count != entry.posting_range_count {
         return Err(SnapshotIoError::Format {
             reason: "index key count does not match posting range count",
@@ -3573,20 +4262,213 @@ fn snapshot_index_slices<'a>(
     let range_start = checked_usize_from_u32(entry.posting_range_start)?;
     let range_count = checked_usize_from_u32(entry.posting_range_count)?;
     let range_end = checked_add_usize(range_start, range_count)?;
-    let keys = input
-        .keys
+    let keys = keys
         .get(key_start..key_end)
         .ok_or(SnapshotIoError::Format {
             reason: "index key range is out of bounds",
         })?;
-    let ranges = input
-        .ranges
+    let ranges = ranges
         .get(range_start..range_end)
         .ok_or(SnapshotIoError::Format {
             reason: "posting range span is out of bounds",
         })?;
     validate_sorted_keys(keys)?;
-    Ok(SnapshotIndexSlices { keys, ranges })
+    Ok(SnapshotIndexEntries::Borrowed { keys, ranges })
+}
+
+fn compact_snapshot_index_entries<'a>(
+    keys: &'a [u8],
+    ranges: &'a [DiskPostingRange],
+    entry: DiskIndexDirectoryEntry,
+    key_width: SnapshotKeyWidth,
+) -> Result<SnapshotIndexEntries<'a>, SnapshotIoError> {
+    if entry.posting_range_count > entry.key_count {
+        return Err(SnapshotIoError::Format {
+            reason: "posting range count exceeds compact key count",
+        });
+    }
+    let key_start = checked_usize_from_u32(entry.key_start)?;
+    let key_count = checked_usize_from_u32(entry.key_count)?;
+    let multi_count = checked_usize_from_u32(entry.posting_range_count)?;
+    let singleton_count = key_count
+        .checked_sub(multi_count)
+        .ok_or(SnapshotIoError::Format {
+            reason: "compact singleton count underflowed",
+        })?;
+    let key_len = checked_mul_usize(entry.kind.key_field_count(), key_width.byte_len())?;
+    let singleton_entry_len = checked_add_usize(key_len, DISK_ROW_ID_LEN)?;
+    let singleton_bytes_len = checked_mul_usize(singleton_count, singleton_entry_len)?;
+    let multi_bytes_len = checked_mul_usize(multi_count, key_len)?;
+    let group_bytes_len = checked_add_usize(singleton_bytes_len, multi_bytes_len)?;
+    let key_end = checked_add_usize(key_start, group_bytes_len)?;
+    let group_bytes = keys
+        .get(key_start..key_end)
+        .ok_or(SnapshotIoError::Format {
+            reason: "compact index key range is out of bounds",
+        })?;
+    let range_start = checked_usize_from_u32(entry.posting_range_start)?;
+    let range_end = checked_add_usize(range_start, multi_count)?;
+    let multi_ranges = ranges
+        .get(range_start..range_end)
+        .ok_or(SnapshotIoError::Format {
+            reason: "posting range span is out of bounds",
+        })?;
+    let singleton_bytes =
+        group_bytes
+            .get(..singleton_bytes_len)
+            .ok_or(SnapshotIoError::Format {
+                reason: "compact singleton keys are out of bounds",
+            })?;
+    let multi_key_bytes =
+        group_bytes
+            .get(singleton_bytes_len..)
+            .ok_or(SnapshotIoError::Format {
+                reason: "compact multi keys are out of bounds",
+            })?;
+    let singletons =
+        decode_compact_singletons(entry.kind, key_width, singleton_bytes, singleton_count)?;
+    let multis =
+        decode_compact_multi_entries(entry.kind, key_width, multi_key_bytes, multi_ranges)?;
+    Ok(SnapshotIndexEntries::Owned(merge_compact_entries(
+        singletons, multis,
+    )?))
+}
+
+fn snapshot_index_entries_iter<'a>(
+    entries: &'a SnapshotIndexEntries<'a>,
+) -> Box<dyn Iterator<Item = (DiskIndexKey, DiskPostingRange)> + 'a> {
+    match entries {
+        SnapshotIndexEntries::Borrowed { keys, ranges } => {
+            Box::new(keys.iter().copied().zip(ranges.iter().copied()))
+        }
+        SnapshotIndexEntries::Owned(entries) => {
+            Box::new(entries.iter().map(|entry| (entry.key, entry.range)))
+        }
+    }
+}
+
+fn decode_compact_singletons(
+    kind: SnapshotIndexKind,
+    key_width: SnapshotKeyWidth,
+    bytes: &[u8],
+    count: usize,
+) -> Result<Vec<SnapshotIndexEntry>, SnapshotIoError> {
+    let mut cursor = BinaryCursor::new(bytes);
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let key = decode_compact_key(kind, key_width, &mut cursor)?;
+        let row_id = cursor.read_u32()?;
+        entries.push(SnapshotIndexEntry {
+            key,
+            range: DiskPostingRange {
+                first_row_id: row_id,
+                overflow_start: 0,
+                overflow_len: 0,
+            },
+        });
+    }
+    validate_sorted_entries(&entries)?;
+    Ok(entries)
+}
+
+fn decode_compact_multi_entries(
+    kind: SnapshotIndexKind,
+    key_width: SnapshotKeyWidth,
+    bytes: &[u8],
+    ranges: &[DiskPostingRange],
+) -> Result<Vec<SnapshotIndexEntry>, SnapshotIoError> {
+    let mut cursor = BinaryCursor::new(bytes);
+    let mut entries = Vec::with_capacity(ranges.len());
+    for range in ranges.iter().copied() {
+        entries.push(SnapshotIndexEntry {
+            key: decode_compact_key(kind, key_width, &mut cursor)?,
+            range,
+        });
+    }
+    validate_sorted_entries(&entries)?;
+    Ok(entries)
+}
+
+fn decode_compact_key(
+    kind: SnapshotIndexKind,
+    key_width: SnapshotKeyWidth,
+    cursor: &mut BinaryCursor<'_>,
+) -> Result<DiskIndexKey, SnapshotIoError> {
+    let first = key_width.read_value(cursor)?;
+    let second = if kind.key_field_count() >= 2 {
+        key_width.read_value(cursor)?
+    } else {
+        0
+    };
+    let third = if kind.key_field_count() >= 3 {
+        key_width.read_value(cursor)?
+    } else {
+        0
+    };
+    Ok(DiskIndexKey {
+        first,
+        second,
+        third,
+    })
+}
+
+fn merge_compact_entries(
+    singletons: Vec<SnapshotIndexEntry>,
+    multis: Vec<SnapshotIndexEntry>,
+) -> Result<Vec<SnapshotIndexEntry>, SnapshotIoError> {
+    let mut merged = Vec::with_capacity(singletons.len().checked_add(multis.len()).ok_or(
+        SnapshotIoError::Format {
+            reason: "compact index entry count overflowed",
+        },
+    )?);
+    let mut singleton_iter = singletons.into_iter().peekable();
+    let mut multi_iter = multis.into_iter().peekable();
+    while singleton_iter.peek().is_some() || multi_iter.peek().is_some() {
+        match (singleton_iter.peek().copied(), multi_iter.peek().copied()) {
+            (Some(singleton), Some(multi)) if singleton.key < multi.key => {
+                merged.push(singleton_iter.next().ok_or(SnapshotIoError::Format {
+                    reason: "compact singleton iterator ended unexpectedly",
+                })?);
+            }
+            (Some(singleton), Some(multi)) if singleton.key > multi.key => {
+                merged.push(multi_iter.next().ok_or(SnapshotIoError::Format {
+                    reason: "compact multi iterator ended unexpectedly",
+                })?);
+            }
+            (Some(_), Some(_)) => {
+                return Err(SnapshotIoError::Format {
+                    reason: "duplicate compact index key",
+                });
+            }
+            (Some(_), None) => {
+                merged.push(singleton_iter.next().ok_or(SnapshotIoError::Format {
+                    reason: "compact singleton iterator ended unexpectedly",
+                })?);
+            }
+            (None, Some(_)) => {
+                merged.push(multi_iter.next().ok_or(SnapshotIoError::Format {
+                    reason: "compact multi iterator ended unexpectedly",
+                })?);
+            }
+            (None, None) => {}
+        }
+    }
+    validate_sorted_entries(&merged)?;
+    Ok(merged)
+}
+
+fn validate_sorted_entries(entries: &[SnapshotIndexEntry]) -> Result<(), SnapshotIoError> {
+    if entries.windows(2).any(|window| {
+        window
+            .first()
+            .zip(window.get(1))
+            .is_some_and(|(left, right)| left.key >= right.key)
+    }) {
+        return Err(SnapshotIoError::Format {
+            reason: "index keys are not strictly sorted",
+        });
+    }
+    Ok(())
 }
 
 fn validate_sorted_keys(keys: &[DiskIndexKey]) -> Result<(), SnapshotIoError> {
@@ -3608,44 +4490,169 @@ enum SnapshotPostingRowIds<'a> {
     One {
         first: Option<RowId>,
     },
-    Many {
+    FixedMany {
         first: Option<RowId>,
         rest: std::slice::Iter<'a, RowId>,
+        previous: RowId,
+    },
+    DeltaVarintMany {
+        first: Option<RowId>,
+        rest: DeltaVarintPostingIter<'a>,
     },
 }
 
 impl Iterator for SnapshotPostingRowIds<'_> {
-    type Item = RowId;
+    type Item = Result<RowId, SnapshotIoError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::One { first } => first.take(),
-            Self::Many { first, rest } => first.take().or_else(|| rest.next().copied()),
+            Self::One { first } => first.take().map(Ok),
+            Self::FixedMany {
+                first,
+                rest,
+                previous,
+            } => {
+                if let Some(row_id) = first.take() {
+                    return Some(Ok(row_id));
+                }
+                rest.next().copied().map(|row_id| {
+                    if row_id <= *previous {
+                        return Err(SnapshotIoError::Format {
+                            reason: "posting row ids are not strictly increasing",
+                        });
+                    }
+                    *previous = row_id;
+                    Ok(row_id)
+                })
+            }
+            Self::DeltaVarintMany { first, rest } => first.take().map(Ok).or_else(|| rest.next()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DeltaVarintPostingIter<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+    previous: RowId,
+    row_count: u32,
+}
+
+impl Iterator for DeltaVarintPostingIter<'_> {
+    type Item = Result<RowId, SnapshotIoError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset == self.bytes.len() {
+            return None;
+        }
+        match decode_posting_delta_varint(self.bytes, &mut self.offset)
+            .and_then(|delta| next_delta_row_id(self.previous, delta, self.row_count))
+        {
+            Ok(row_id) => {
+                self.previous = row_id;
+                Some(Ok(row_id))
+            }
+            Err(error) => {
+                self.offset = self.bytes.len();
+                Some(Err(error))
+            }
         }
     }
 }
 
 fn posting_row_id_iter(
     range: DiskPostingRange,
-    posting_row_ids: &[RowId],
+    posting_row_ids: &DecodedPostingRowIds,
     row_count: u32,
 ) -> Result<SnapshotPostingRowIds<'_>, SnapshotIoError> {
     let first = RowId::from_snapshot_raw(range.first_row_id, row_count)?;
     if range.overflow_len == 0 {
         return Ok(SnapshotPostingRowIds::One { first: Some(first) });
     }
-    let start = checked_usize_from_u32(range.overflow_start)?;
-    let len = checked_usize_from_u32(range.overflow_len)?;
-    let end = checked_add_usize(start, len)?;
-    let overflow = posting_row_ids
-        .get(start..end)
-        .ok_or(SnapshotIoError::Format {
-            reason: "posting range points outside posting row ids",
+    match posting_row_ids {
+        DecodedPostingRowIds::Fixed(row_ids) => {
+            let start = checked_usize_from_u32(range.overflow_start)?;
+            let len = checked_usize_from_u32(range.overflow_len)?;
+            let end = checked_add_usize(start, len)?;
+            let overflow = row_ids.get(start..end).ok_or(SnapshotIoError::Format {
+                reason: "posting range points outside posting row ids",
+            })?;
+            Ok(SnapshotPostingRowIds::FixedMany {
+                first: Some(first),
+                rest: overflow.iter(),
+                previous: first,
+            })
+        }
+        DecodedPostingRowIds::DeltaVarint { bytes, .. } => {
+            let start = checked_usize_from_u32(range.overflow_start)?;
+            let len = checked_usize_from_u32(range.overflow_len)?;
+            let end = checked_add_usize(start, len)?;
+            let overflow = bytes.get(start..end).ok_or(SnapshotIoError::Format {
+                reason: "posting range points outside posting row ids",
+            })?;
+            Ok(SnapshotPostingRowIds::DeltaVarintMany {
+                first: Some(first),
+                rest: DeltaVarintPostingIter {
+                    bytes: overflow,
+                    offset: 0,
+                    previous: first,
+                    row_count,
+                },
+            })
+        }
+    }
+}
+
+fn decode_posting_delta_varint(bytes: &[u8], offset: &mut usize) -> Result<u32, SnapshotIoError> {
+    let mut value = 0_u32;
+    let mut shift = 0_u32;
+    loop {
+        let byte = bytes.get(*offset).copied().ok_or(SnapshotIoError::Format {
+            reason: "posting row id delta varint is truncated",
         })?;
-    Ok(SnapshotPostingRowIds::Many {
-        first: Some(first),
-        rest: overflow.iter(),
-    })
+        *offset = (*offset).checked_add(1).ok_or(SnapshotIoError::Format {
+            reason: "posting row id delta offset overflowed",
+        })?;
+        let low_bits = u32::from(byte & 0x7F);
+        if shift == 28 && low_bits > 0x0F {
+            return Err(SnapshotIoError::Format {
+                reason: "posting row id delta varint overflows u32",
+            });
+        }
+        value |= low_bits.checked_shl(shift).ok_or(SnapshotIoError::Format {
+            reason: "posting row id delta varint overflows u32",
+        })?;
+        if byte & 0x80 == 0 {
+            if value == 0 {
+                return Err(SnapshotIoError::Format {
+                    reason: "posting row id delta must be non-zero",
+                });
+            }
+            return Ok(value);
+        }
+        shift = shift.checked_add(7).ok_or(SnapshotIoError::Format {
+            reason: "posting row id delta varint overflows u32",
+        })?;
+        if shift > 28 {
+            return Err(SnapshotIoError::Format {
+                reason: "posting row id delta varint is too long",
+            });
+        }
+    }
+}
+
+fn next_delta_row_id(
+    previous: RowId,
+    delta: u32,
+    row_count: u32,
+) -> Result<RowId, SnapshotIoError> {
+    let row_id = previous
+        .raw()
+        .checked_add(delta)
+        .ok_or(SnapshotIoError::Format {
+            reason: "posting row id delta overflowed",
+        })?;
+    RowId::from_snapshot_raw(row_id, row_count)
 }
 
 fn resource_key_from_disk(
@@ -3843,41 +4850,58 @@ fn decode_snapshot_rows(
             reason: "relationship row count does not match header",
         });
     }
-    let expected_len = checked_mul_usize(row_count, DISK_RELATIONSHIP_ROW_LEN)?;
+    let symbol_width = if header.format_version == SnapshotFormatVersion::V3 {
+        section_width_from_flags(section.flags())?
+    } else {
+        if section.flags() != 0 {
+            return Err(SnapshotIoError::Format {
+                reason: "relationship row flags are unsupported",
+            });
+        }
+        SnapshotKeyWidth::U32
+    };
+    let expected_len =
+        checked_mul_usize(row_count, checked_mul_usize(symbol_width.byte_len(), 6)?)?;
     if section.bytes().len() != expected_len {
         return Err(SnapshotIoError::Format {
             reason: "relationship row length does not match row count",
         });
     }
-    let mut cursor = BinaryCursor::new(section.bytes());
+    let row_byte_len = checked_mul_usize(symbol_width.byte_len(), 6)?;
     let mut rows = Vec::with_capacity(row_count);
     let mut duplicate_detector = RelationshipIdentityIndex::default();
     let validate_semantics = validation == SnapshotValidationMode::Full;
-    for index in 0..row_count {
+    for (index, row_bytes) in section.bytes().chunks_exact(row_byte_len).enumerate() {
         let row_id = RowId::from_len(index)?;
+        let fields = decode_snapshot_row_fields(row_bytes, symbol_width)?;
+        let [
+            resource_type,
+            resource_id,
+            relation,
+            subject_type,
+            subject_id,
+            subject_relation,
+        ] = fields;
         let row = RelationshipRow {
             row_id,
             resource_type: ObjectTypeId(SymbolId::from_snapshot_raw(
-                cursor.read_u32()?,
+                resource_type,
                 header.symbol_count,
             )?),
             resource_id: ObjectIdId(SymbolId::from_snapshot_raw(
-                cursor.read_u32()?,
+                resource_id,
                 header.symbol_count,
             )?),
-            relation: RelationId(SymbolId::from_snapshot_raw(
-                cursor.read_u32()?,
-                header.symbol_count,
-            )?),
+            relation: RelationId(SymbolId::from_snapshot_raw(relation, header.symbol_count)?),
             subject_type: SubjectTypeId(SymbolId::from_snapshot_raw(
-                cursor.read_u32()?,
+                subject_type,
                 header.symbol_count,
             )?),
             subject_id: SubjectIdId(SymbolId::from_snapshot_raw(
-                cursor.read_u32()?,
+                subject_id,
                 header.symbol_count,
             )?),
-            subject_relation: match cursor.read_u32()? {
+            subject_relation: match subject_relation {
                 0 => None,
                 value => Some(RelationId(SymbolId::from_snapshot_raw(
                     value,
@@ -3905,6 +4929,129 @@ fn decode_snapshot_rows(
         rows,
         live_rows: LiveRows::full(row_count),
         uniqueness,
+    })
+}
+
+fn decode_snapshot_row_fields(
+    row_bytes: &[u8],
+    symbol_width: SnapshotKeyWidth,
+) -> Result<[u32; 6], SnapshotIoError> {
+    match symbol_width {
+        SnapshotKeyWidth::U8 => decode_snapshot_row_fields_u8(row_bytes),
+        SnapshotKeyWidth::U16 => decode_snapshot_row_fields_u16(row_bytes),
+        SnapshotKeyWidth::U24 => decode_snapshot_row_fields_u24(row_bytes),
+        SnapshotKeyWidth::U32 => decode_snapshot_row_fields_u32(row_bytes),
+    }
+}
+
+fn decode_snapshot_row_fields_u8(row_bytes: &[u8]) -> Result<[u32; 6], SnapshotIoError> {
+    let [first, second, third, fourth, fifth, sixth] = row_bytes_to_array(row_bytes)?;
+    Ok([
+        u32::from(first),
+        u32::from(second),
+        u32::from(third),
+        u32::from(fourth),
+        u32::from(fifth),
+        u32::from(sixth),
+    ])
+}
+
+fn decode_snapshot_row_fields_u16(row_bytes: &[u8]) -> Result<[u32; 6], SnapshotIoError> {
+    let [
+        first_a,
+        first_b,
+        second_a,
+        second_b,
+        third_a,
+        third_b,
+        fourth_a,
+        fourth_b,
+        fifth_a,
+        fifth_b,
+        sixth_a,
+        sixth_b,
+    ] = row_bytes_to_array(row_bytes)?;
+    Ok([
+        u32::from(u16::from_le_bytes([first_a, first_b])),
+        u32::from(u16::from_le_bytes([second_a, second_b])),
+        u32::from(u16::from_le_bytes([third_a, third_b])),
+        u32::from(u16::from_le_bytes([fourth_a, fourth_b])),
+        u32::from(u16::from_le_bytes([fifth_a, fifth_b])),
+        u32::from(u16::from_le_bytes([sixth_a, sixth_b])),
+    ])
+}
+
+fn decode_snapshot_row_fields_u24(row_bytes: &[u8]) -> Result<[u32; 6], SnapshotIoError> {
+    let [
+        first_a,
+        first_b,
+        first_c,
+        second_a,
+        second_b,
+        second_c,
+        third_a,
+        third_b,
+        third_c,
+        fourth_a,
+        fourth_b,
+        fourth_c,
+        fifth_a,
+        fifth_b,
+        fifth_c,
+        sixth_a,
+        sixth_b,
+        sixth_c,
+    ] = row_bytes_to_array(row_bytes)?;
+    Ok([
+        u32::from_le_bytes([first_a, first_b, first_c, 0]),
+        u32::from_le_bytes([second_a, second_b, second_c, 0]),
+        u32::from_le_bytes([third_a, third_b, third_c, 0]),
+        u32::from_le_bytes([fourth_a, fourth_b, fourth_c, 0]),
+        u32::from_le_bytes([fifth_a, fifth_b, fifth_c, 0]),
+        u32::from_le_bytes([sixth_a, sixth_b, sixth_c, 0]),
+    ])
+}
+
+fn decode_snapshot_row_fields_u32(row_bytes: &[u8]) -> Result<[u32; 6], SnapshotIoError> {
+    let [
+        first_a,
+        first_b,
+        first_c,
+        first_d,
+        second_a,
+        second_b,
+        second_c,
+        second_d,
+        third_a,
+        third_b,
+        third_c,
+        third_d,
+        fourth_a,
+        fourth_b,
+        fourth_c,
+        fourth_d,
+        fifth_a,
+        fifth_b,
+        fifth_c,
+        fifth_d,
+        sixth_a,
+        sixth_b,
+        sixth_c,
+        sixth_d,
+    ] = row_bytes_to_array(row_bytes)?;
+    Ok([
+        u32::from_le_bytes([first_a, first_b, first_c, first_d]),
+        u32::from_le_bytes([second_a, second_b, second_c, second_d]),
+        u32::from_le_bytes([third_a, third_b, third_c, third_d]),
+        u32::from_le_bytes([fourth_a, fourth_b, fourth_c, fourth_d]),
+        u32::from_le_bytes([fifth_a, fifth_b, fifth_c, fifth_d]),
+        u32::from_le_bytes([sixth_a, sixth_b, sixth_c, sixth_d]),
+    ])
+}
+
+fn row_bytes_to_array<const LEN: usize>(row_bytes: &[u8]) -> Result<[u8; LEN], SnapshotIoError> {
+    row_bytes.try_into().map_err(|_| SnapshotIoError::Format {
+        reason: "relationship row width is invalid",
     })
 }
 

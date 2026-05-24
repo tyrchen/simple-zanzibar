@@ -64,11 +64,15 @@ pub struct SnapshotLoadOptions {
 
 Rules:
 
-- `SnapshotCompression::None` writes and reads the raw `.szsnap` v2 bytes.
+- `SnapshotCompression::None` writes and reads raw `.szsnap` bytes for the current snapshot format.
 - `SnapshotCompression::Zstd` writes and reads a single zstd frame whose decompressed payload is the
-  same raw `.szsnap` v2 bytes.
+  same versioned `.szsnap` format. Later format versions may choose compression-friendly section
+  widths for the inner payload, as specified by
+  [24-zstd-aware-snapshot-load-design.md](./24-zstd-aware-snapshot-load-design.md).
 - Save validates `zstd_level` against the zstd crate's accepted compression-level range.
-- Load applies `max_file_bytes` to both the compressed file size and decompressed output size.
+- Load applies `max_file_bytes` to both the compressed file size and decompressed output size. For
+  zstd snapshots the decompressed inner payload may be larger than an independently saved
+  uncompressed artifact when the writer uses compression-friendly section widths.
 - `SnapshotIntegrityMode::Checksum` verifies the inner `.szsnap` footer after decompression.
 - `SnapshotIntegrityMode::External` continues to mean the caller has already verified artifact byte
   identity. For compressed snapshots, the external proof is assumed to bind the compressed bytes.
