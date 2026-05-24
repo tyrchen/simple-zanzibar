@@ -1,7 +1,7 @@
 # Specs Index
 
 Status: draft v1
-Last updated: 2026-05-23
+Last updated: 2026-05-24
 
 This directory now has two generations of design material:
 
@@ -20,10 +20,13 @@ Read the v2 specs in numeric order. The order is also the implementation depende
 | [12-relationship-store-design.md](./12-relationship-store-design.md) | Design | Indexed in-memory relationship store, query filters, write mutations, preconditions. |
 | [13-revision-consistency-design.md](./13-revision-consistency-design.md) | Design | Local revision tokens, snapshot readers, schema hashes, copy-on-write publication. |
 | [14-evaluation-engine-design.md](./14-evaluation-engine-design.md) | Design | Check, expand, lookup, membership algebra, recursion policy, execution context. |
-| [15-public-api-design.md](./15-public-api-design.md) | Design | Crate-facing API, compatibility facade, error mapping, examples. |
+| [15-public-api-design.md](./15-public-api-design.md) | Design | Crate-facing API, error mapping, examples. |
 | [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md) | Design | Compact row storage, identifier interning, `Vec<RowId>` postings, snapshot ownership cleanup, memory targets. |
 | [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md) | Design | Versioned compact snapshot artifact for fast load, bounded load-time RSS, and practical disk size. |
 | [18-trusted-fast-snapshot-load-design.md](./18-trusted-fast-snapshot-load-design.md) | Design | Trusted `.szsnap` v2 load mode, serialized symbol hashes/lookups, and <= 200 ms 1M-rule cold-load path. |
+| [19-public-api-completeness-design.md](./19-public-api-completeness-design.md) | Design | Completed public API surface for zstd snapshots, policy text import/export, schema deletion, and permission enumeration. |
+| [20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md) | Design | Lock-free read runtime, single-writer actor, batch write path, and tenant sharding. |
+| [21-performance-optimization-design.md](./21-performance-optimization-design.md) | Design | Dependency-ordered performance optimization plan for write amplification, evaluator latency, lookup allocation, snapshot load/save, and index profiles. |
 | [60-crates-features-design.md](./60-crates-features-design.md) | Design | Crate layout, feature flags, dependency policy, current crate-version survey. |
 | [70-security-design.md](./70-security-design.md) | Design | Threat model, validation limits, panic policy, unsafe policy, logging/data exposure. |
 | [71-performance-budgets-design.md](./71-performance-budgets-design.md) | Design | Performance targets, benchmark matrix, profiling rules, CI gates. |
@@ -68,7 +71,7 @@ Read the v2 specs in numeric order. The order is also the implementation depende
                                                        v
                                             +----------------------+
                                             | 15 Public API        |
-                                            | facade/examples      |
+                                            | engine/examples      |
                                             +----------+-----------+
                                                        |
                                                        v
@@ -87,6 +90,24 @@ Read the v2 specs in numeric order. The order is also the implementation depende
                                             +----------------------+
                                             | 18 Trusted Fast Load |
                                             | <=200ms cold start   |
+                                            +----------+-----------+
+                                                       |
+                                                       v
+                                            +----------------------+
+                                            | 19 Public API        |
+                                            | Completeness         |
+                                            +----------+-----------+
+                                                       |
+                                                       v
+                                            +----------------------+
+                                            | 20 Concurrent        |
+                                            | Engine Runtime       |
+                                            +----------+-----------+
+                                                       |
+                                                       v
+                                            +----------------------+
+                                            | 21 Performance       |
+                                            | Optimization         |
                                             +----------+-----------+
                                                        |
                 +------------------------------+-------+------------------------------+

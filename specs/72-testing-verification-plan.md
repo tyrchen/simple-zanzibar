@@ -47,11 +47,14 @@ This plan defines how each phase proves correctness, safety, compatibility, and 
 | Revision consistency | latest read, exact read, expired token, wrong datastore ID, schema hash mismatch. |
 | Evaluation | every expression variant, cross-namespace usersets, recursion cycles, depth exceeded, fanout limit. |
 | Expand/lookup | shared evaluator semantics, duplicate suppression, result limits. |
-| Compatibility | existing tests pass through `ZanzibarService` facade. |
+| Public runtime | existing tests pass through `ZanzibarEngine`; no legacy mutable facade remains public. |
 | Security | no panics on malformed external input, no unchecked indexing in boundary modules. |
 | Performance | criterion benchmarks for budgets in [71](./71-performance-budgets-design.md). |
 | Memory | peak RSS checks for compact relationship store budgets in [16](./16-compact-relationship-store-design.md). |
 | Snapshot artifact | save/load equivalence, corrupt file rejection, file size, load time, and load-time RSS for [17](./17-compact-snapshot-format-design.md) and trusted fast-load coverage for [18](./18-trusted-fast-snapshot-load-design.md). |
+| Public API completeness | zstd snapshot round trips, policy text import/export, schema replacement/deletion, permission enumeration, and public API benchmarks for [19](./19-public-api-completeness-design.md). |
+| Concurrent runtime | lock-free read acquisition, writer actor lifecycle, failed-write atomicity, concurrent read/write behaviour, tenant isolation, and mixed workload benchmarks for [20](./20-concurrent-engine-runtime-design.md). |
+| Structural performance optimization | prepared-check equivalence, ID-native recursion, streaming lookup, segmented-store properties, index-profile support, snapshot phase timers, and 1M write/read benchmarks for [21](./21-performance-optimization-design.md). |
 
 ## 4. Command Gates
 
@@ -134,6 +137,40 @@ snapshot_trusted_loaded_check_inherited/1m
 snapshot_trusted_loaded_lookup_resources/1m
 snapshot_load_peak_rss/1m
 snapshot_file_size/1m
+snapshot_save_zstd/1m
+snapshot_load_zstd/1m
+snapshot_file_size_zstd/1m
+public_api/check/100k
+public_api/lookup_resources/100k
+public_api/lookup_subjects/100k
+public_api/lookup_permissions/100k
+public_api/lookup_object_permissions/100k
+public_api/export_policy_text/100k
+public_api/snapshot_save_zstd/100k
+public_api/snapshot_load_zstd/100k
+concurrent_runtime/read_heavy_light_write
+concurrent_runtime/read_heavy_medium_write_unbatched
+concurrent_runtime/read_heavy_medium_write_batched
+concurrent_runtime/read_heavy_heavy_write_unbatched
+concurrent_runtime/read_heavy_heavy_write_batched
+concurrent_runtime/tenant_sharded_heavy_write
+realworld_authorization/1m_rules/check_doc_inherited_workspace_member
+realworld_authorization/1m_rules/check_doc_denied_by_ban
+realworld_authorization/1m_rules/mixed_read_workload
+realworld_authorization/1m_rules/snapshot_load_compact
+realworld_authorization/1m_rules/snapshot_load_trusted_fast
+perf_optimization/writer_submit_queue_full
+perf_optimization/check_prepared_1m
+perf_optimization/lookup_subjects_streaming_1m
+perf_optimization/lookup_resources_streaming_1m
+perf_optimization/write_single_touch_1m
+perf_optimization/write_mixed_batch_1m
+perf_optimization/read_heavy_light_write_1m
+perf_optimization/read_heavy_medium_write_unbatched_1m
+perf_optimization/read_heavy_medium_write_batched_1m
+perf_optimization/read_heavy_heavy_write_unbatched_1m
+perf_optimization/read_heavy_heavy_write_batched_1m
+snapshot_file_size_check_only/1m
 ```
 
 Required corrupt-input tests:
@@ -154,9 +191,60 @@ snapshot built from the same relationship set. Trusted fast-load snapshots must 
 that subsequent create/touch/delete writes preserve relationship uniqueness semantics after the lazy
 uniqueness index is built.
 
-## 9. Cross-References
+## 9. Public API Completeness Verification
+
+Required tests for [19](./19-public-api-completeness-design.md):
+
+- raw and zstd snapshot artifacts round trip through `ZanzibarEngine`;
+- zstd load rejects decompressed payloads beyond `SnapshotLoadOptions::max_file_bytes`;
+- `PolicyText` import/export preserves check, expand, lookup, and permission enumeration behavior;
+- exported policy files are deterministic, sorted, and grouped by resource namespace;
+- schema replacement, namespace deletion, and relation deletion publish revisions on success and
+  leave the prior state observable after failed deletion;
+- `lookup_permissions` and `lookup_object_permissions` cover direct, computed userset,
+  tuple-to-userset, and exclusion behavior.
+
+## 10. Concurrent Runtime Verification
+
+Required tests for [20](./20-concurrent-engine-runtime-design.md):
+
+- public API no longer exports the legacy mutable service facade;
+- latest read APIs work while a writer actor is processing write traffic;
+- failed relationship, schema, and policy writes publish no state;
+- exact consistency tokens remain valid for retained snapshots and reject foreign tenant tokens;
+- actor shutdown/drop does not leak writer threads in tests;
+- `ZanzibarTenantShards` returns the same engine for the same tenant, different engines for
+  different tenants, and isolates schema/relationship state by tenant.
+
+## 11. Structural Performance Optimization Verification
+
+Required tests for [21](./21-performance-optimization-design.md):
+
+- writer submit queue-full behavior does not hold a sender mutex while blocked;
+- full-load lazy uniqueness supports subsequent create/touch/delete and publishes no state on lazy
+  uniqueness failure;
+- prepared-check and ID-native evaluator paths are equivalent to current public `check`, including
+  computed userset, tuple-to-userset, intersection, exclusion, cycles, and depth/fanout errors;
+- lookup internals stream bounded candidates, reuse evaluation context state, and preserve result
+  ordering/limits;
+- segmented store random mutation sequences match a reference `HashSet<Relationship>`;
+- checkpoint boundaries preserve exact-revision tokens and query equivalence;
+- index profiles load/save round trip and return typed unsupported-operation errors for unsupported
+  APIs instead of scanning.
+
+Required benchmark target:
+
+```text
+make bench-perf-optimization
+```
+
+The target must be added when the `perf_optimization` benchmark binary lands.
+
+## 12. Cross-References
 
 - <- Depends on: [70-security-design.md](./70-security-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md)
 - -> Consumed by: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Memory layout: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
 - Snapshot artifact format: [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md)
+- Public API completeness: [19-public-api-completeness-design.md](./19-public-api-completeness-design.md)
+- Performance optimization design: [21-performance-optimization-design.md](./21-performance-optimization-design.md)

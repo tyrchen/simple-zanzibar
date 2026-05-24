@@ -5,7 +5,7 @@ use std::{
 };
 
 use simple_zanzibar::{
-    EngineError, ZanzibarEngine,
+    EngineError, TenantId, ZanzibarEngine, ZanzibarTenantShards,
     domain::Relationship,
     model::{
         CheckRequest, ExpandRequest, ExpandedUserset, LookupResourcesRequest,
@@ -23,6 +23,58 @@ const DOC_SCHEMA: &str = r"
         relation viewer {}
     }
 ";
+
+#[test]
+fn test_should_make_engine_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<ZanzibarEngine>();
+}
+
+#[test]
+fn test_should_isolate_multiple_engine_instances() -> Result<(), Box<dyn std::error::Error>> {
+    let first = ZanzibarEngine::builder().build();
+    let second = ZanzibarEngine::builder().build();
+    first.apply_schema(SchemaSource {
+        name: Some("doc-schema"),
+        text: DOC_SCHEMA,
+    })?;
+    second.apply_schema(SchemaSource {
+        name: Some("doc-schema"),
+        text: DOC_SCHEMA,
+    })?;
+
+    first.touch_relationship("doc:readme#viewer@user:alice")?;
+
+    assert!(first.check_relation(&doc_object(), &viewer(), &User::user_id("alice"))?);
+    assert!(!second.check_relation(&doc_object(), &viewer(), &User::user_id("alice"))?);
+    Ok(())
+}
+
+#[test]
+fn test_should_shard_engines_by_tenant() -> Result<(), Box<dyn std::error::Error>> {
+    let shards = ZanzibarTenantShards::default();
+    let tenant_a = TenantId::new("tenant-a")?;
+    let tenant_b = TenantId::new("tenant-b")?;
+
+    let first_a = shards.get_or_create(tenant_a.clone());
+    let second_a = shards.get_or_create(tenant_a.clone());
+    let engine_b = shards.get_or_create(tenant_b.clone());
+    assert!(Arc::ptr_eq(&first_a, &second_a));
+
+    for engine in [&first_a, &engine_b] {
+        engine.apply_schema(SchemaSource {
+            name: Some("doc-schema"),
+            text: DOC_SCHEMA,
+        })?;
+    }
+    first_a.touch_relationship("doc:readme#viewer@user:alice")?;
+
+    assert!(first_a.check_relation(&doc_object(), &viewer(), &User::user_id("alice"))?);
+    assert!(!engine_b.check_relation(&doc_object(), &viewer(), &User::user_id("alice"))?);
+    assert_eq!(shards.tenants(), vec![tenant_a, tenant_b]);
+    Ok(())
+}
 
 #[test]
 fn test_should_use_public_engine_request_response_api() -> Result<(), Box<dyn std::error::Error>> {

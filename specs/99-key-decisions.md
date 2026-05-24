@@ -2,7 +2,7 @@
 
 Status: draft v1
 Owner: Simple Zanzibar
-Last updated: 2026-05-23
+Last updated: 2026-05-24
 
 Each decision is load-bearing. Supersede with a new decision entry rather than silently rewriting history.
 
@@ -157,3 +157,112 @@ Each decision is load-bearing. Supersede with a new decision entry rather than s
   the supply-chain tradeoff visible in code review.
 - Pinned by: [18-trusted-fast-snapshot-load-design.md](./18-trusted-fast-snapshot-load-design.md), [71-performance-budgets-design.md](./71-performance-budgets-design.md), [72-testing-verification-plan.md](./72-testing-verification-plan.md)
 - Date: 2026-05-23
+
+## D16 - Treat zstd as an outer snapshot transport wrapper
+
+- Context: The `.szsnap` v2 payload is already close to the in-memory compact representation and
+  meets the trusted 200 ms raw load target. zstd is valuable for distribution and disk footprint,
+  but decoding it during startup adds CPU and transient memory that should not redefine the raw
+  fast-load contract.
+- Alternatives considered: compress individual `.szsnap` sections; add a new compressed file
+  version; keep compression entirely outside the crate; wrap the raw `.szsnap` bytes in one zstd
+  frame.
+- Decision: add `SnapshotCompression::Zstd` as a public save/load option that compresses or
+  decompresses the entire raw `.szsnap` payload before the existing v2 parser runs.
+- Why: this preserves the stable binary format, keeps corrupt-file validation in one parser, and
+  lets deployments choose between direct compressed load and the faster content-addressed cache
+  pattern of decompress-once then raw trusted fast-load.
+- Pinned by: [19-public-api-completeness-design.md](./19-public-api-completeness-design.md),
+  [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md),
+  [18-trusted-fast-snapshot-load-design.md](./18-trusted-fast-snapshot-load-design.md)
+- Date: 2026-05-23
+
+## D17 - Add bounded audit helpers instead of an unbounded global permission matrix
+
+- Context: Users need "what permissions does this subject have on this object?" and "who has which
+  permissions on this object?" as public API calls. A full global matrix over every object, subject,
+  and relation would be expensive and easy to misuse in an embedded library.
+- Alternatives considered: require callers to enumerate schema relations manually; add a global
+  audit scan; add object/subject-bounded helpers that compose existing evaluators.
+- Decision: add `lookup_permissions` for one subject/object pair and `lookup_object_permissions`
+  for one object plus one subject type. Both enumerate only the target object's schema relations and
+  reuse the existing `check` / `lookup_subjects` semantics.
+- Why: the helpers cover common product questions while preserving Zanzibar's explicit subject-type
+  lookup boundary and existing evaluator limits.
+- Pinned by: [19-public-api-completeness-design.md](./19-public-api-completeness-design.md),
+  [14-evaluation-engine-design.md](./14-evaluation-engine-design.md),
+  [71-performance-budgets-design.md](./71-performance-budgets-design.md)
+- Date: 2026-05-23
+
+## D18 - Remove the legacy mutable service facade before API stabilization
+
+- Context: the legacy mutable facade kept early compatibility while the strict engine API matured, but the
+  crate API is not yet stable and the mutable facade now encourages service-level locking and
+  duplicate examples.
+- Alternatives considered: keep the legacy mutable facade indefinitely; hide it behind a `compat` feature;
+  remove it and make `ZanzibarEngine` the only public runtime.
+- Decision: remove the legacy mutable facade from the public API, examples, tests, and benchmarks.
+- Why: the runtime contract should be one coherent engine: lock-free snapshot reads, typed request
+  APIs, actor-backed writes, and policy/snapshot import/export on the same facade. Keeping a second
+  mutable public type would force future compatibility work around a shape we already know is not
+  the intended API.
+- Pinned by: [20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md),
+  [15-public-api-design.md](./15-public-api-design.md),
+  [72-testing-verification-plan.md](./72-testing-verification-plan.md)
+- Date: 2026-05-23
+
+## D19 - Scale writes by batching and tenant sharding before fine-grained locks
+
+- Context: Relationship writes, preconditions, schema replacement, consistency tokens, and snapshot
+  publication all require a single linearized write order inside one authorization state.
+- Alternatives considered: per-object locks; per-namespace locks; optimistic CAS publish retries;
+  a bounded single writer actor with caller batching; tenant-level sharding.
+- Decision: use a single writer actor per `ZanzibarEngine`, make batch writes the throughput path,
+  and add `ZanzibarTenantShards` for applications with independent tenant authorization states.
+- Why: fine-grained locks would still need a global publish point and would complicate precondition
+  correctness. Batching reduces per-write fixed cost, and tenant sharding moves true independence
+  into separate revision/token spaces instead of pretending one tenant's global revision can be
+  partitioned by object.
+- Pinned by: [20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md),
+  [13-revision-consistency-design.md](./13-revision-consistency-design.md),
+  [71-performance-budgets-design.md](./71-performance-budgets-design.md)
+- Date: 2026-05-23
+
+## D20 - Benchmark and optimize realistic deny-list checks
+
+- Context: the stable org benchmark covered direct checks, inherited usersets, lookup, and snapshot
+  load, but it did not exercise a realistic denied-user path where `can_view` subtracts a plain
+  `banned` relation from a deeper allow graph. The new real-world 1M benchmark measured that path at
+  roughly 607 us before optimization.
+- Alternatives considered: keep the benchmark synthetic; require schema authors to order rules
+  differently; always evaluate the exclude side before the base side; use a cheap-expression
+  heuristic.
+- Decision: add `realworld_authorization` benchmarks and evaluate the exclude side first only when
+  it is a cheap plain relation on the current object, such as a direct deny list.
+- Why: `A - B` is semantically denied when `B` is allowed, so a direct deny hit can skip an
+  expensive inherited allow graph. Limiting the reorder to cheap plain relations avoids regressing
+  cases where the base side is cheap and the exclude side is recursive or high-fanout.
+- Pinned by: [14-evaluation-engine-design.md](./14-evaluation-engine-design.md),
+  [71-performance-budgets-design.md](./71-performance-budgets-design.md),
+  [72-testing-verification-plan.md](./72-testing-verification-plan.md)
+- Date: 2026-05-23
+
+## D21 - Optimize by reusable proofs and deltas before unsafe or weaker defaults
+
+- Context: after M10, measured 1M performance is already good for trusted raw load and reads, but
+  full writes still clone too much state, some evaluator/lookup paths allocate legacy objects, and
+  the default full loader repeats semantic validation on every startup.
+- Alternatives considered: add mmap/unsafe zero-copy, weaken the default full loader, add
+  fine-grained relationship locks, keep clone-on-write and rely only on tenant sharding, or optimize
+  by reusing prior proof and publishing small immutable deltas.
+- Decision: keep safe full validation as the default, preserve the trusted fast-load boundary for
+  <= 200 ms cold starts, remove avoidable hot-path allocation, and replace full-store write cloning
+  with segmented immutable deltas plus checkpointing.
+- Why: this applies the rsync-like principle that unchanged data and already-proven facts should
+  not be recopied or revalidated. It improves write amplification, load time, and memory without
+  changing the security boundary or introducing unsafe code.
+- Pinned by: [21-performance-optimization-design.md](./21-performance-optimization-design.md),
+  [71-performance-budgets-design.md](./71-performance-budgets-design.md),
+  [72-testing-verification-plan.md](./72-testing-verification-plan.md),
+  [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
+- Date: 2026-05-24

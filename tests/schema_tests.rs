@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use simple_zanzibar::{
-    ZanzibarService,
+    EngineError, ZanzibarEngine,
     domain::ObjectType,
     error::ZanzibarError,
     schema::{
@@ -232,7 +232,7 @@ fn test_should_reject_tuple_to_userset_target_missing_on_explicit_allowed_subjec
 #[test]
 fn test_should_reject_relationship_with_unknown_userset_subject_relation()
 -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(VALID_SCHEMA)?;
 
     let tuple = simple_zanzibar::model::RelationTuple {
@@ -253,7 +253,7 @@ fn test_should_reject_relationship_with_unknown_userset_subject_relation()
     let error = service.write_tuple(tuple).err();
     assert!(matches!(
         error,
-        Some(ZanzibarError::Schema(SchemaError::RelationNotFound { relation, .. }))
+        Some(EngineError::Schema(SchemaError::RelationNotFound { relation, .. }))
             if relation == "missing"
     ));
 
@@ -283,7 +283,7 @@ fn test_should_reject_empty_union() {
 #[test]
 fn test_service_should_reject_invalid_schema_without_mutating_previous_schema()
 -> Result<(), ZanzibarError> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(VALID_SCHEMA)?;
 
     let invalid = r#"
@@ -303,7 +303,7 @@ fn test_service_should_reject_invalid_schema_without_mutating_previous_schema()
     let viewer = simple_zanzibar::model::Relation("viewer".to_string());
     let alice = simple_zanzibar::model::User::UserId("alice".to_string());
 
-    assert!(!service.check(&doc, &viewer, &alice)?);
+    assert!(!service.check_relation(&doc, &viewer, &alice)?);
 
     Ok(())
 }

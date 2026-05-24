@@ -282,7 +282,7 @@ pub enum SnapshotIntegrityMode {
     External,
 }
 
-impl ZanzibarService {
+impl ZanzibarEngine {
     pub fn save_snapshot(
         &self,
         path: impl AsRef<Path>,
@@ -308,7 +308,7 @@ impl IndexedRelationshipStore {
 }
 ```
 
-The public API returns a fully usable `ZanzibarService` with a current `PublishedSnapshot`. The loaded service uses the artifact revision and datastore id policy defined below.
+The public API returns a fully usable `ZanzibarEngine` with a current `PublishedSnapshot`. The loaded engine uses the artifact revision and datastore id policy defined below.
 
 ## 8. Revision and Consistency Semantics
 
@@ -372,7 +372,7 @@ load_snapshot(path)
   +-- copy symbol bytes, symbol table, and rows into store vectors
   +-- validate index key/range sections
   +-- build runtime sorted-array indexes
-  +-- publish one PublishedSnapshot into ZanzibarService
+  +-- publish one PublishedSnapshot into ZanzibarEngine state
 ```
 
 The first implementation may still copy the file sections into owned vectors. The important property is that it avoids per-relationship domain object allocation and avoids re-interning strings from text.
@@ -467,7 +467,7 @@ Required tests:
 - loaded snapshot check/expand/lookup equivalence against build-from-relationships snapshot
 - exact consistency behavior after loading and after a subsequent write
 - property test: random compact stores save/load to equivalent query results
-- compatibility test: loaded service public APIs match normal `ZanzibarService` APIs
+- compatibility test: loaded engine public APIs match normal `ZanzibarEngine` APIs
 
 Slow 1M load/save tests are benchmark/ignored tests, not regular unit tests.
 
@@ -509,7 +509,7 @@ loaded query budgets pass.
 
 ### M7.5 - Public API and Docs
 
-- Add `ZanzibarService::save_snapshot` and `ZanzibarService::load_snapshot`.
+- Add `ZanzibarEngine::save_snapshot` and `ZanzibarEngine::load_snapshot`.
 - Document token/datastore semantics.
 - Add examples and update verification docs.
 

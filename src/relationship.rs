@@ -324,6 +324,36 @@ pub enum RelationshipMutation {
 }
 
 impl RelationshipMutation {
+    /// Creates an insert-if-absent mutation from relationship text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when `relationship` is not a valid `object#relation@subject`
+    /// relationship.
+    pub fn create(relationship: impl AsRef<str>) -> Result<Self, DomainError> {
+        Ok(Self::Create(relationship.as_ref().parse()?))
+    }
+
+    /// Creates an idempotent insert mutation from relationship text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when `relationship` is not a valid `object#relation@subject`
+    /// relationship.
+    pub fn touch(relationship: impl AsRef<str>) -> Result<Self, DomainError> {
+        Ok(Self::Touch(relationship.as_ref().parse()?))
+    }
+
+    /// Creates a remove-only-if-present mutation from relationship text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when `relationship` is not a valid `object#relation@subject`
+    /// relationship.
+    pub fn delete(relationship: impl AsRef<str>) -> Result<Self, DomainError> {
+        Ok(Self::Delete(relationship.as_ref().parse()?))
+    }
+
     /// Returns the relationship targeted by this mutation.
     #[must_use]
     pub fn relationship(&self) -> &Relationship {

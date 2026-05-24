@@ -11,8 +11,8 @@ use std::{
 
 use criterion::{BatchSize, Criterion};
 use simple_zanzibar::{
-    SnapshotIntegrityMode, SnapshotLoadOptions, SnapshotLoadProfile, SnapshotSaveOptions,
-    SnapshotValidationMode, ZanzibarService,
+    SnapshotCompression, SnapshotIntegrityMode, SnapshotLoadOptions, SnapshotLoadProfile,
+    SnapshotSaveOptions, SnapshotValidationMode, ZanzibarEngine,
     domain::Relationship,
     eval::EvaluationLimits,
     model::{LookupResourcesRequest, Object, Relation, User},
@@ -47,7 +47,7 @@ fn main() {
         && let Ok(path) = env::var(LOAD_PATH_ENV)
     {
         let service = must(
-            ZanzibarService::load_snapshot(path, SnapshotLoadOptions::default()),
+            ZanzibarEngine::load_snapshot(path, SnapshotLoadOptions::default()),
             "failed to load snapshot once for RSS measurement",
         );
         black_box(service);
@@ -80,8 +80,8 @@ fn bench_snapshot_build(criterion: &mut Criterion, filters: &[String]) {
         criterion.bench_function(&name, |bencher| {
             bencher.iter_batched(
                 configured_service,
-                |mut service| {
-                    apply_relationships(&mut service, &relationships);
+                |service| {
+                    apply_relationships(&service, &relationships);
                     black_box(service)
                 },
                 BatchSize::LargeInput,
@@ -92,25 +92,44 @@ fn bench_snapshot_build(criterion: &mut Criterion, filters: &[String]) {
 
 fn bench_snapshot_save(criterion: &mut Criterion, filters: &[String]) {
     let name = "snapshot_save_uncompressed/1m";
-    if !should_benchmark(name, filters) {
-        return;
+    if should_benchmark(name, filters) {
+        let service = build_service_with_relationships(1_000_000);
+        criterion.bench_function(name, |bencher| {
+            bencher.iter_batched(
+                || unique_snapshot_path("save_1m"),
+                |path| {
+                    must(
+                        service.save_snapshot(&path, SnapshotSaveOptions::default()),
+                        "failed to save snapshot",
+                    );
+                    let metadata = must(fs::metadata(&path), "failed to stat saved snapshot");
+                    remove_file(&path);
+                    black_box(metadata.len())
+                },
+                BatchSize::LargeInput,
+            );
+        });
     }
-    let service = build_service_with_relationships(1_000_000);
-    criterion.bench_function(name, |bencher| {
-        bencher.iter_batched(
-            || unique_snapshot_path("save_1m"),
-            |path| {
-                must(
-                    service.save_snapshot(&path, SnapshotSaveOptions::default()),
-                    "failed to save snapshot",
-                );
-                let metadata = must(fs::metadata(&path), "failed to stat saved snapshot");
-                remove_file(&path);
-                black_box(metadata.len())
-            },
-            BatchSize::LargeInput,
-        );
-    });
+
+    let zstd_name = "snapshot_save_zstd/1m";
+    if should_benchmark(zstd_name, filters) {
+        let service = build_service_with_relationships(1_000_000);
+        criterion.bench_function(zstd_name, |bencher| {
+            bencher.iter_batched(
+                || unique_snapshot_path("save_zstd_1m"),
+                |path| {
+                    must(
+                        service.save_snapshot(&path, zstd_save_options()),
+                        "failed to save zstd snapshot",
+                    );
+                    let metadata = must(fs::metadata(&path), "failed to stat zstd snapshot");
+                    remove_file(&path);
+                    black_box(metadata.len())
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
 }
 
 fn bench_snapshot_load(criterion: &mut Criterion, filters: &[String]) {
@@ -121,7 +140,7 @@ fn bench_snapshot_load(criterion: &mut Criterion, filters: &[String]) {
             criterion.bench_function(&name, |bencher| {
                 bencher.iter(|| {
                     black_box(must(
-                        ZanzibarService::load_snapshot(&path, SnapshotLoadOptions::default()),
+                        ZanzibarEngine::load_snapshot(&path, SnapshotLoadOptions::default()),
                         "failed to load compact snapshot",
                     ))
                 });
@@ -136,7 +155,7 @@ fn bench_snapshot_load(criterion: &mut Criterion, filters: &[String]) {
         criterion.bench_function(trusted_name, |bencher| {
             bencher.iter(|| {
                 black_box(must(
-                    ZanzibarService::load_snapshot(&path, trusted_fast_load_options()),
+                    ZanzibarEngine::load_snapshot(&path, trusted_fast_load_options()),
                     "failed to trusted-load compact snapshot",
                 ))
             });
@@ -150,7 +169,7 @@ fn bench_snapshot_load(criterion: &mut Criterion, filters: &[String]) {
         criterion.bench_function(reindex_name, |bencher| {
             bencher.iter(|| {
                 black_box(must(
-                    ZanzibarService::load_snapshot(
+                    ZanzibarEngine::load_snapshot(
                         &path,
                         SnapshotLoadOptions {
                             profile: SnapshotLoadProfile::Latency,
@@ -164,13 +183,27 @@ fn bench_snapshot_load(criterion: &mut Criterion, filters: &[String]) {
         remove_file_if_owned(&path);
     }
 
+    let zstd_name = "snapshot_load_zstd/1m";
+    if should_benchmark(zstd_name, filters) {
+        let path = prepared_snapshot_file_with_options(1_000_000, zstd_name, zstd_save_options());
+        criterion.bench_function(zstd_name, |bencher| {
+            bencher.iter(|| {
+                black_box(must(
+                    ZanzibarEngine::load_snapshot(&path, zstd_load_options()),
+                    "failed to load zstd compact snapshot",
+                ))
+            });
+        });
+        remove_file_if_owned(&path);
+    }
+
     let rss_name = "snapshot_load_peak_rss/1m";
     if should_benchmark(rss_name, filters) {
         let path = prepared_snapshot_file(1_000_000, rss_name);
         criterion.bench_function(rss_name, |bencher| {
             bencher.iter(|| {
                 black_box(must(
-                    ZanzibarService::load_snapshot(&path, SnapshotLoadOptions::default()),
+                    ZanzibarEngine::load_snapshot(&path, SnapshotLoadOptions::default()),
                     "failed to load compact snapshot for RSS",
                 ))
             });
@@ -199,14 +232,14 @@ fn bench_snapshot_loaded_queries(criterion: &mut Criterion, filters: &[String]) 
     let path = prepared_snapshot_file(1_000_000, "snapshot_loaded_queries/1m");
     if full_requested {
         let service = must(
-            ZanzibarService::load_snapshot(&path, SnapshotLoadOptions::default()),
+            ZanzibarEngine::load_snapshot(&path, SnapshotLoadOptions::default()),
             "failed to load snapshot for loaded-query benchmarks",
         );
         bench_loaded_query_set(criterion, filters, &service, full);
     }
     if trusted_requested {
         let service = must(
-            ZanzibarService::load_snapshot(&path, trusted_fast_load_options()),
+            ZanzibarEngine::load_snapshot(&path, trusted_fast_load_options()),
             "failed to trusted-load snapshot for loaded-query benchmarks",
         );
         bench_loaded_query_set(criterion, filters, &service, trusted);
@@ -230,7 +263,7 @@ fn loaded_query_requested(names: LoadedQueryBenchNames, filters: &[String]) -> b
 fn bench_loaded_query_set(
     criterion: &mut Criterion,
     filters: &[String],
-    service: &ZanzibarService,
+    service: &ZanzibarEngine,
     names: LoadedQueryBenchNames,
 ) {
     if !loaded_query_requested(names, filters) {
@@ -251,7 +284,7 @@ fn bench_loaded_query_set(
         criterion.bench_function(names.direct, |bencher| {
             bencher.iter(|| {
                 black_box(must(
-                    service.check(
+                    service.check_relation(
                         black_box(&direct_doc),
                         black_box(&can_view),
                         black_box(&target_user),
@@ -266,7 +299,7 @@ fn bench_loaded_query_set(
         criterion.bench_function(names.inherited, |bencher| {
             bencher.iter(|| {
                 black_box(must(
-                    service.check(
+                    service.check_relation(
                         black_box(&inherited_doc),
                         black_box(&can_view),
                         black_box(&target_user),
@@ -291,19 +324,37 @@ fn bench_loaded_query_set(
 
 fn bench_snapshot_file_size(criterion: &mut Criterion, filters: &[String]) {
     let name = "snapshot_file_size/1m";
-    if !should_benchmark(name, filters) {
-        return;
+    if should_benchmark(name, filters) {
+        let path = prepared_snapshot_file(1_000_000, name);
+        let len = must(fs::metadata(&path), "failed to stat snapshot file").len();
+        eprintln!("{name}: {len} bytes");
+        criterion.bench_function(name, |bencher| {
+            bencher.iter(|| black_box(len));
+        });
+        remove_file_if_owned(&path);
     }
-    let path = prepared_snapshot_file(1_000_000, name);
-    let len = must(fs::metadata(&path), "failed to stat snapshot file").len();
-    eprintln!("{name}: {len} bytes");
-    criterion.bench_function(name, |bencher| {
-        bencher.iter(|| black_box(len));
-    });
-    remove_file_if_owned(&path);
+
+    let zstd_name = "snapshot_file_size_zstd/1m";
+    if should_benchmark(zstd_name, filters) {
+        let path = prepared_snapshot_file_with_options(1_000_000, zstd_name, zstd_save_options());
+        let len = must(fs::metadata(&path), "failed to stat zstd snapshot file").len();
+        eprintln!("{zstd_name}: {len} bytes");
+        criterion.bench_function(zstd_name, |bencher| {
+            bencher.iter(|| black_box(len));
+        });
+        remove_file_if_owned(&path);
+    }
 }
 
 fn prepared_snapshot_file(rules: usize, benchmark_name: &str) -> PathBuf {
+    prepared_snapshot_file_with_options(rules, benchmark_name, SnapshotSaveOptions::default())
+}
+
+fn prepared_snapshot_file_with_options(
+    rules: usize,
+    benchmark_name: &str,
+    options: SnapshotSaveOptions,
+) -> PathBuf {
     if benchmark_name == "snapshot_load_peak_rss/1m"
         && let Ok(path) = env::var(LOAD_PATH_ENV)
     {
@@ -313,7 +364,7 @@ fn prepared_snapshot_file(rules: usize, benchmark_name: &str) -> PathBuf {
     let path = unique_snapshot_path(rule_label(rules));
     let service = build_service_with_relationships(rules);
     must(
-        service.save_snapshot(&path, SnapshotSaveOptions::default()),
+        service.save_snapshot(&path, options),
         "failed to prepare snapshot file",
     );
     path
@@ -337,15 +388,31 @@ fn trusted_fast_load_options() -> SnapshotLoadOptions {
     }
 }
 
-fn build_service_with_relationships(rules: usize) -> ZanzibarService {
-    let mut service = configured_service();
+fn zstd_save_options() -> SnapshotSaveOptions {
+    SnapshotSaveOptions {
+        compression: SnapshotCompression::Zstd,
+        ..SnapshotSaveOptions::default()
+    }
+}
+
+fn zstd_load_options() -> SnapshotLoadOptions {
+    SnapshotLoadOptions {
+        compression: SnapshotCompression::Zstd,
+        ..SnapshotLoadOptions::default()
+    }
+}
+
+fn build_service_with_relationships(rules: usize) -> ZanzibarEngine {
+    let service = configured_service();
     let relationships = generated_relationships(rules);
-    apply_relationships(&mut service, &relationships);
+    apply_relationships(&service, &relationships);
     service
 }
 
-fn configured_service() -> ZanzibarService {
-    let mut service = ZanzibarService::new().with_evaluation_limits(evaluation_limits());
+fn configured_service() -> ZanzibarEngine {
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(evaluation_limits())
+        .build();
     must(service.add_dsl(org_schema()), "failed to apply org schema");
     service
 }
@@ -368,7 +435,7 @@ fn generated_relationships(rules: usize) -> Vec<Relationship> {
     relationships
 }
 
-fn apply_relationships(service: &mut ZanzibarService, relationships: &[Relationship]) {
+fn apply_relationships(service: &ZanzibarEngine, relationships: &[Relationship]) {
     let mut batch = Vec::with_capacity(MUTATION_BATCH_LIMIT);
     for relationship in relationships {
         batch.push(RelationshipMutation::Touch(relationship.clone()));
@@ -379,13 +446,13 @@ fn apply_relationships(service: &mut ZanzibarService, relationships: &[Relations
     flush_relationships(service, &mut batch);
 }
 
-fn flush_relationships(service: &mut ZanzibarService, batch: &mut Vec<RelationshipMutation>) {
+fn flush_relationships(service: &ZanzibarEngine, batch: &mut Vec<RelationshipMutation>) {
     if batch.is_empty() {
         return;
     }
     let mutations = std::mem::take(batch);
     must(
-        service.apply_relationship_mutations(mutations, []),
+        service.write_relationships_with_preconditions(mutations, []),
         "failed to apply relationship batch",
     );
 }

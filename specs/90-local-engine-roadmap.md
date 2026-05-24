@@ -2,7 +2,7 @@
 
 Status: draft v1
 Owner: Simple Zanzibar
-Last updated: 2026-05-23
+Last updated: 2026-05-24
 
 ## 1. Principles
 
@@ -138,6 +138,76 @@ Exit criteria:
 - `snapshot_load_trusted_fast/1m` Criterion upper estimate <= 200 ms with trusted fast-load and external integrity
 - trusted loaded direct, inherited, and lookup latency budgets in [71](./71-performance-budgets-design.md) pass
 
+### M9 - Complete Public API Surface
+
+User-visible outcome: applications can use Simple Zanzibar as a complete local policy package:
+load/save raw or zstd snapshots, import/export reviewable policy text, replace/delete schema
+policy, and answer permission-audit queries without hand-enumerating schema relations.
+
+Specs touched: [15](./15-public-api-design.md), [19](./19-public-api-completeness-design.md), [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- raw and zstd snapshot save/load APIs round trip equivalent services
+- `PolicyText` import/export round trips schema and relationships with deterministic sorted output
+- `export_policy_files` writes `schema.zed` and grouped relationship files suitable for review
+- schema replacement, namespace deletion, and relation deletion publish revisions only when existing relationships remain valid
+- `lookup_permissions` and `lookup_object_permissions` return stable sorted audit results
+- public API benchmarks record check, lookup, permission enumeration, policy export, and zstd snapshot costs
+- full build, test, fmt, clippy, audit, and deny gates pass
+
+### M10 - Concurrent Runtime and Tenant Shards
+
+User-visible outcome: applications use `ZanzibarEngine` as the only public runtime. Read APIs no
+longer take a service-level lock, writes flow through a single writer actor optimized for caller
+batches, and multi-tenant applications can shard state across independent tenant engines.
+
+Specs touched: [13](./13-revision-consistency-design.md), [15](./15-public-api-design.md),
+[20](./20-concurrent-engine-runtime-design.md), [71](./71-performance-budgets-design.md),
+[72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- the legacy mutable facade is removed from the public API, examples, tests, and benchmarks
+- latest check/expand/lookup/export/snapshot-save paths clone immutable `EngineState` through
+  `ArcSwapOption` and do not acquire a read lock
+- relationship, schema, and policy writes are serialized by a bounded single writer actor
+- failed writes publish no snapshot and preserve exact-token semantics
+- tenant shard manager routes existing tenant lookups without locking and isolates revisions/tokens
+  per tenant
+- concurrent runtime benchmarks cover read-heavy/light-write, read-heavy/medium-write
+  unbatched/batched, read-heavy/heavy-write unbatched/batched, and tenant-sharded write load
+- benchmark results are posted to the PR comment
+- full build, test, fmt, strict clippy, docs, audit, and deny gates pass
+
+### M11 - Structural Performance Optimization
+
+User-visible outcome: the engine keeps the current complete public API while lowering write
+amplification, reducing evaluator/lookup allocation, improving safe full snapshot load, preserving
+the trusted <= 200 ms path, and offering explicit lower-memory index profiles for check-heavy
+deployments.
+
+Specs touched: [14](./14-evaluation-engine-design.md), [16](./16-compact-relationship-store-design.md),
+[17](./17-compact-snapshot-format-design.md), [18](./18-trusted-fast-snapshot-load-design.md),
+[20](./20-concurrent-engine-runtime-design.md), [21](./21-performance-optimization-design.md),
+[71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- writer submit path no longer holds a mutex while blocked on a full queue
+- public read behavior remains equivalent while prepared checks and ID-native recursive evaluation
+  reduce hot-path allocation
+- lookup internals stream bounded candidates and reuse evaluation context state
+- full snapshot load phase timers are recorded and `snapshot_load_compact/1m` upper estimate is
+  <= 450 ms or recalibrated with profile evidence
+- `snapshot_load_trusted_fast/1m` remains <= 200 ms
+- segmented write-store publication avoids full-store clone per successful write and improves
+  1M-base write p95 by the gates in [21](./21-performance-optimization-design.md)
+- index profiles support `Full`, `CheckOnly`, and `CheckAndObjectAudit` with typed errors for
+  unsupported operations
+- performance results are posted to the PR comment
+- full build, test, fmt, strict clippy, docs, audit, and deny gates pass
+
 ## 3. Calendar Shape
 
 One experienced Rust developer:
@@ -151,6 +221,9 @@ One experienced Rust developer:
 - M6: 2 to 3 weeks
 - M7: 2 to 3 weeks
 - M8: 1 week
+- M9: 1 week
+- M10: 1.5 to 2 weeks
+- M11: 3 to 5 weeks
 
 Total through M5: 8.5 to 11 weeks, assuming no persistent backend and no caveats.
 
@@ -160,7 +233,14 @@ Total through M7: 12.5 to 17 weeks.
 
 Total through M8: 13.5 to 18 weeks.
 
+Total through M9: 14.5 to 19 weeks.
+
+Total through M10: 16 to 21 weeks.
+
+Total through M11: 19 to 26 weeks.
+
 ## 4. Cross-References
 
 - Paired engineer plan: [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Verification gates: [72-testing-verification-plan.md](./72-testing-verification-plan.md)
+- Performance optimization design: [21-performance-optimization-design.md](./21-performance-optimization-design.md)

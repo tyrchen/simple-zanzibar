@@ -6,7 +6,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fmt::{self, Write},
     fs::{self, File},
     io::{self, Read},
     num::{NonZeroU64, NonZeroUsize},
@@ -19,7 +18,8 @@ use thiserror::Error;
 use crate::{
     domain::DomainError,
     error::ZanzibarError,
-    model::{NamespaceConfig, RelationConfig, UsersetExpression},
+    model::NamespaceConfig,
+    policy,
     relationship::{IndexedRelationshipStore, StoreError},
     revision::{Revision, SchemaHash},
     schema::{self, CompiledSchema},
@@ -35,12 +35,15 @@ const REQUIRED_SECTION_COUNT: usize = 11;
 const REQUIRED_SECTION_COUNT_U32: u32 = 11;
 const MAX_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_ZSTD_LEVEL: i32 = 3;
 
 /// Options used when saving a compact snapshot artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotSaveOptions {
-    /// Snapshot compression mode. Version 2 supports only uncompressed snapshots.
+    /// Snapshot compression mode.
     pub compression: SnapshotCompression,
+    /// Zstd compression level used when `compression` is [`SnapshotCompression::Zstd`].
+    pub zstd_level: i32,
     /// Whether serialized lookup indexes are included.
     ///
     /// Version 2 requires indexes because fast loading depends on stable sorted index arrays.
@@ -51,8 +54,33 @@ impl Default for SnapshotSaveOptions {
     fn default() -> Self {
         Self {
             compression: SnapshotCompression::None,
+            zstd_level: DEFAULT_ZSTD_LEVEL,
             include_indexes: true,
         }
+    }
+}
+
+impl SnapshotSaveOptions {
+    /// Creates save options for an uncompressed `.szsnap` artifact.
+    #[must_use]
+    pub fn uncompressed() -> Self {
+        Self::default()
+    }
+
+    /// Creates save options for a zstd-wrapped `.szsnap.zst` artifact.
+    #[must_use]
+    pub fn zstd() -> Self {
+        Self {
+            compression: SnapshotCompression::Zstd,
+            ..Self::default()
+        }
+    }
+
+    /// Returns options with a specific zstd compression level.
+    #[must_use]
+    pub fn with_zstd_level(mut self, zstd_level: i32) -> Self {
+        self.zstd_level = zstd_level;
+        self
     }
 }
 
@@ -61,11 +89,15 @@ impl Default for SnapshotSaveOptions {
 pub enum SnapshotCompression {
     /// Store all sections uncompressed.
     None,
+    /// Wrap the raw `.szsnap` v2 payload in a single zstd frame.
+    Zstd,
 }
 
 /// Options used when loading a compact snapshot artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotLoadOptions {
+    /// Snapshot compression mode expected for the file.
+    pub compression: SnapshotCompression,
     /// Runtime index profile to construct from serialized sorted arrays.
     pub profile: SnapshotLoadProfile,
     /// Validation mode to apply while loading the artifact.
@@ -79,10 +111,28 @@ pub struct SnapshotLoadOptions {
 impl Default for SnapshotLoadOptions {
     fn default() -> Self {
         Self {
+            compression: SnapshotCompression::None,
             profile: SnapshotLoadProfile::FastLoad,
             validation: SnapshotValidationMode::Full,
             integrity: SnapshotIntegrityMode::Checksum,
             max_file_bytes: non_zero_u64(DEFAULT_MAX_FILE_BYTES),
+        }
+    }
+}
+
+impl SnapshotLoadOptions {
+    /// Creates load options for an uncompressed `.szsnap` artifact.
+    #[must_use]
+    pub fn uncompressed() -> Self {
+        Self::default()
+    }
+
+    /// Creates load options for a zstd-wrapped `.szsnap.zst` artifact.
+    #[must_use]
+    pub fn zstd() -> Self {
+        Self {
+            compression: SnapshotCompression::Zstd,
+            ..Self::default()
         }
     }
 }
@@ -429,9 +479,10 @@ pub(crate) fn save_snapshot_file(
             option: "include_indexes=false",
         });
     }
+    validate_compression_options(options)?;
 
     let mut writer = SnapshotSectionWriter::default();
-    let schema_source = canonical_schema_source(snapshot.configs())?;
+    let schema_source = policy::canonical_schema_source(snapshot.configs());
     if schema_source.len() > MAX_SCHEMA_BYTES {
         return Err(SnapshotIoError::LimitExceeded {
             component: "schema section",
@@ -442,7 +493,7 @@ pub(crate) fn save_snapshot_file(
         .relationships()
         .encode_snapshot_sections(&mut writer)?;
     let bytes = encode_file(snapshot, writer)?;
-    fs::write(path, bytes)?;
+    fs::write(path, encode_payload(bytes, options)?)?;
     Ok(())
 }
 
@@ -465,6 +516,7 @@ pub(crate) fn load_snapshot_file(
         });
     }
     let bytes = read_capped_file(path, options.max_file_bytes)?;
+    let bytes = decode_payload(bytes, options)?;
     let reader = SnapshotReader::parse(&bytes, options.integrity)?;
     let schema_section = reader.section(SectionKind::Schema)?;
     if schema_section.bytes().len() > MAX_SCHEMA_BYTES {
@@ -502,6 +554,61 @@ pub(crate) fn load_snapshot_file(
         revision: reader.header().created_revision,
         schema_hash,
     })
+}
+
+fn validate_compression_options(options: SnapshotSaveOptions) -> Result<(), SnapshotIoError> {
+    if options.compression == SnapshotCompression::Zstd
+        && !zstd::compression_level_range().contains(&options.zstd_level)
+    {
+        return Err(SnapshotIoError::UnsupportedOption {
+            option: "zstd_level",
+        });
+    }
+    Ok(())
+}
+
+fn encode_payload(
+    bytes: Vec<u8>,
+    options: SnapshotSaveOptions,
+) -> Result<Vec<u8>, SnapshotIoError> {
+    match options.compression {
+        SnapshotCompression::None => Ok(bytes),
+        SnapshotCompression::Zstd => {
+            zstd::stream::encode_all(bytes.as_slice(), options.zstd_level).map_err(Into::into)
+        }
+    }
+}
+
+fn decode_payload(
+    bytes: Vec<u8>,
+    options: SnapshotLoadOptions,
+) -> Result<Vec<u8>, SnapshotIoError> {
+    match options.compression {
+        SnapshotCompression::None => Ok(bytes),
+        SnapshotCompression::Zstd => decode_zstd_bounded(&bytes, options.max_file_bytes),
+    }
+}
+
+fn decode_zstd_bounded(
+    bytes: &[u8],
+    max_file_bytes: NonZeroU64,
+) -> Result<Vec<u8>, SnapshotIoError> {
+    let read_limit = max_file_bytes
+        .get()
+        .checked_add(1)
+        .ok_or(SnapshotIoError::LimitExceeded {
+            component: "decompressed snapshot file",
+        })?;
+    let decoder = zstd::stream::read::Decoder::new(bytes)?;
+    let mut limited_decoder = decoder.take(read_limit);
+    let mut output = Vec::new();
+    limited_decoder.read_to_end(&mut output)?;
+    if checked_u64_from_usize(output.len())? > max_file_bytes.get() {
+        return Err(SnapshotIoError::LimitExceeded {
+            component: "decompressed snapshot file",
+        });
+    }
+    Ok(output)
 }
 
 fn read_capped_file(path: &Path, max_file_bytes: NonZeroU64) -> Result<Vec<u8>, SnapshotIoError> {
@@ -785,95 +892,6 @@ fn validate_footer(
         });
     }
     Ok(())
-}
-
-fn canonical_schema_source(
-    configs: &HashMap<String, NamespaceConfig>,
-) -> Result<String, SnapshotIoError> {
-    let mut output = String::new();
-    let mut namespaces = configs.values().collect::<Vec<_>>();
-    namespaces.sort_by(|left, right| left.name.cmp(&right.name));
-    for namespace in namespaces {
-        writeln!(&mut output, "namespace {} {{", namespace.name).map_err(format_error)?;
-        let mut relations = namespace.relations.values().collect::<Vec<_>>();
-        relations.sort_by(|left, right| left.name.0.cmp(&right.name.0));
-        for relation in relations {
-            write_relation(&mut output, relation)?;
-        }
-        writeln!(&mut output, "}}\n").map_err(format_error)?;
-    }
-    Ok(output)
-}
-
-fn write_relation(output: &mut String, relation: &RelationConfig) -> Result<(), SnapshotIoError> {
-    match &relation.userset_rewrite {
-        Some(expression) => {
-            writeln!(output, "    relation {} {{", relation.name.0).map_err(format_error)?;
-            write!(output, "        rewrite ").map_err(format_error)?;
-            write_expression(output, expression)?;
-            writeln!(output).map_err(format_error)?;
-            writeln!(output, "    }}").map_err(format_error)?;
-        }
-        None => {
-            writeln!(output, "    relation {} {{}}", relation.name.0).map_err(format_error)?;
-        }
-    }
-    Ok(())
-}
-
-fn write_expression(
-    output: &mut String,
-    expression: &UsersetExpression,
-) -> Result<(), SnapshotIoError> {
-    match expression {
-        UsersetExpression::This => write!(output, "this").map_err(format_error),
-        UsersetExpression::ComputedUserset { relation } => {
-            write!(output, "computed_userset(relation: \"{}\")", relation.0).map_err(format_error)
-        }
-        UsersetExpression::TupleToUserset {
-            tupleset_relation,
-            computed_userset_relation,
-        } => write!(
-            output,
-            "tuple_to_userset(tupleset: \"{}\", computed_userset: \"{}\")",
-            tupleset_relation.0, computed_userset_relation.0,
-        )
-        .map_err(format_error),
-        UsersetExpression::Union(expressions) => {
-            write_expression_list(output, "union", expressions)
-        }
-        UsersetExpression::Intersection(expressions) => {
-            write_expression_list(output, "intersection", expressions)
-        }
-        UsersetExpression::Exclusion { base, exclude } => {
-            write!(output, "exclusion(").map_err(format_error)?;
-            write_expression(output, base)?;
-            write!(output, ", ").map_err(format_error)?;
-            write_expression(output, exclude)?;
-            write!(output, ")").map_err(format_error)
-        }
-    }
-}
-
-fn write_expression_list(
-    output: &mut String,
-    name: &str,
-    expressions: &[UsersetExpression],
-) -> Result<(), SnapshotIoError> {
-    write!(output, "{name}(").map_err(format_error)?;
-    let mut separator = "";
-    for expression in expressions {
-        write!(output, "{separator}").map_err(format_error)?;
-        write_expression(output, expression)?;
-        separator = ", ";
-    }
-    write!(output, ")").map_err(format_error)
-}
-
-fn format_error(_: fmt::Error) -> SnapshotIoError {
-    SnapshotIoError::Format {
-        reason: "schema serialization failed",
-    }
 }
 
 #[derive(Debug)]

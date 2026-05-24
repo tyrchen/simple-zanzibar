@@ -154,6 +154,148 @@ benchmarks must still satisfy the loaded-query budgets in § 3.2.
 | `snapshot_trusted_loaded_check_inherited/1m` | 1M org rules | `[7.2171 us, 7.2732 us, 7.3198 us]` | passes <= 25 us |
 | `snapshot_trusted_loaded_lookup_resources/1m` | 1M org rules | `[3.8150 ms, 3.9764 ms, 4.1401 ms]` | passes <= 10 ms |
 
+## 3.5 Public API Completeness Benchmarks
+
+[19-public-api-completeness-design.md](./19-public-api-completeness-design.md) adds a public API
+benchmark harness that measures the crate-facing surface, including zstd snapshot wrappers and
+policy text export.
+
+| Operation | Dataset | Target |
+| --- | --- | ---: |
+| `public_api/check/100k` | 100k org rules | Criterion upper estimate <= 10 us |
+| `public_api/expand/100k` | 100k org rules | recorded baseline |
+| `public_api/lookup_resources/100k` | 100k org rules | Criterion upper estimate <= 10 ms |
+| `public_api/lookup_subjects/100k` | 100k org rules | Criterion upper estimate <= 10 ms |
+| `public_api/lookup_permissions/100k` | 100k org rules | Criterion upper estimate <= 250 us |
+| `public_api/lookup_object_permissions/100k` | 100k org rules | Criterion upper estimate <= 25 ms |
+| `public_api/write_relationships/1k_batch` | 100k org rules base | recorded baseline |
+| `public_api/export_policy_text/100k` | 100k org rules | recorded baseline |
+| `public_api/snapshot_save_zstd/100k` | 100k org rules | recorded baseline |
+| `public_api/snapshot_load_zstd/100k` | 100k org rules | recorded baseline |
+
+The zstd numbers describe storage/distribution tradeoffs. They do not replace the trusted raw
+snapshot fast-load gate in § 3.4.
+
+2026-05-23 evidence:
+
+| Operation | Dataset | Measurement | Target status |
+| --- | --- | ---: | --- |
+| `public_api/apply_schema/small` | small schema | `[64.222 us, 65.553 us, 66.552 us]` | recorded actor-backed API baseline |
+| `public_api/replace_schema/small` | small schema | `[79.059 us, 81.720 us, 83.377 us]` | recorded actor-backed API baseline |
+| `public_api/delete_relation/small` | small schema | `[45.458 us, 47.419 us, 49.389 us]` | recorded actor-backed API baseline |
+| `public_api/delete_namespace/small` | small schema | `[46.536 us, 47.614 us, 49.294 us]` | recorded actor-backed API baseline |
+| `public_api/check/100k` | 100k org rules | `[2.7956 us, 2.8265 us, 2.8615 us]` | passes <= 10 us |
+| `public_api/expand/100k` | 100k org rules | `[4.6261 us, 4.6535 us, 4.7004 us]` | recorded baseline |
+| `public_api/lookup_resources/100k` | 100k org rules | `[3.2256 ms, 3.2559 ms, 3.2761 ms]` | passes <= 10 ms |
+| `public_api/lookup_subjects/100k` | 100k org rules | `[6.3363 us, 6.4295 us, 6.4977 us]` | passes <= 10 ms |
+| `public_api/lookup_permissions/100k` | 100k org rules | `[15.554 us, 15.681 us, 15.921 us]` | passes <= 250 us |
+| `public_api/lookup_object_permissions/100k` | 100k org rules | `[13.676 us, 13.794 us, 13.928 us]` | passes <= 25 ms |
+| `public_api/write_relationships/1k_batch` | 100k org rules base | `[7.3734 ms, 7.9690 ms, 8.5949 ms]` | recorded baseline |
+| `public_api/apply_policy_text/1k` | 1k org rules | `[1.2749 ms, 1.3526 ms, 1.4315 ms]` | recorded baseline |
+| `public_api/export_policy_text/100k` | 100k org rules | `[38.939 ms, 39.808 ms, 40.893 ms]` | recorded baseline |
+| `public_api/export_policy_files/1k` | 1k org rules | `[1.0172 ms, 1.0568 ms, 1.0931 ms]` | recorded baseline |
+| `public_api/snapshot_save_uncompressed/100k` | 100k org rules | `[47.025 ms, 47.823 ms, 48.712 ms]` | recorded baseline |
+| `public_api/snapshot_load_uncompressed/100k` | 100k org rules | `[50.558 ms, 51.390 ms, 52.279 ms]` | recorded baseline |
+| `public_api/snapshot_save_zstd/100k` | 100k org rules | `[62.498 ms, 63.345 ms, 64.432 ms]` | recorded baseline |
+| `public_api/snapshot_load_zstd/100k` | 100k org rules | `[60.120 ms, 60.494 ms, 60.797 ms]` | recorded baseline |
+
+Focused 1M regression checks after the public API additions:
+
+| Operation | Dataset | Measurement | Target status |
+| --- | --- | ---: | --- |
+| `snapshot_build_from_relationships/1m` | 1M org rules | `[2.7622 s, 2.7858 s, 2.8144 s]` | recorded default full-build baseline |
+| `snapshot_save_uncompressed/1m` | 1M org rules | `[541.60 ms, 555.85 ms, 569.02 ms]` | passes <= 1.5 s |
+| `snapshot_load_compact/1m` full mode | 1M org rules | `[555.68 ms, 559.30 ms, 563.48 ms]` | passes <= 700 ms; no detected regression |
+| `snapshot_load_trusted_fast/1m` | 1M org rules | `[135.78 ms, 137.06 ms, 138.67 ms]` | passes <= 200 ms |
+| `snapshot_loaded_check_direct/1m` | 1M org rules | `[3.0067 us, 3.0236 us, 3.0453 us]` | passes <= 10 us |
+| `snapshot_loaded_check_inherited/1m` | 1M org rules | `[7.1645 us, 7.2265 us, 7.2778 us]` | passes <= 25 us |
+| `snapshot_loaded_lookup_resources/1m` | 1M org rules | `[3.8731 ms, 4.0003 ms, 4.2153 ms]` | passes <= 10 ms |
+| `snapshot_file_size/1m` | 1M org rules | `124,422,241 bytes` | recorded v2 size |
+| `snapshot_load_peak_rss/1m` | 1M org rules | `436,076,544-byte max RSS; 404,849,384-byte peak footprint` | passes <= 1.25x loaded RSS |
+| `snapshot_save_zstd/1m` | 1M org rules | `[641.69 ms, 644.70 ms, 647.67 ms]` | distribution-size baseline |
+| `snapshot_load_zstd/1m` | 1M org rules | `[625.35 ms, 628.92 ms, 632.45 ms]` | direct compressed-load baseline |
+| `snapshot_file_size_zstd/1m` | 1M org rules | `33,162,371 bytes` | 26.7% of raw `.szsnap` |
+| `org_authorization/1m_rules/check_denied_exclusion` | 1M org rules | `[981.46 ns, 990.13 ns, 995.71 ns]` | benefits from plain-exclusion short-circuit |
+
+## 3.6 Concurrent Runtime Benchmarks
+
+[20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md) adds a mixed
+read/write benchmark suite. The first implementation records evidence rather than enforcing hard
+gates because write throughput depends heavily on caller batching and tenant partitioning.
+
+| Operation | Dataset | Target |
+| --- | --- | ---: |
+| `concurrent_runtime/read_heavy_light_write` | 100k base + small batches | record read ops/s and write p95 |
+| `concurrent_runtime/read_heavy_medium_write_unbatched` | 100k base + single writes | record read ops/s and write p95 |
+| `concurrent_runtime/read_heavy_medium_write_batched` | same logical writes batched by 100 | record read ops/s and write p95 |
+| `concurrent_runtime/read_heavy_heavy_write_unbatched` | 100k base + sustained single writes | record read ops/s and write p95 |
+| `concurrent_runtime/read_heavy_heavy_write_batched` | same logical writes batched by 100 or 1k | record read ops/s and write p95 |
+| `concurrent_runtime/tenant_sharded_heavy_write` | same logical write volume split across tenants | record aggregate write ops/s |
+
+2026-05-23 evidence:
+
+| Scenario | Read ops/s | Write calls/s | Logical writes/s | Write p95 us |
+| --- | ---: | ---: | ---: | ---: |
+| `concurrent_runtime/read_heavy_light_write_batched` | 5,614,038 | 32 | 1,024 | 887 |
+| `concurrent_runtime/read_heavy_medium_write_unbatched` | 5,920,998 | 1,906 | 1,906 | 1,191 |
+| `concurrent_runtime/read_heavy_medium_write_batched` | 5,807,822 | 742 | 94,976 | 2,663 |
+| `concurrent_runtime/read_heavy_heavy_write_unbatched` | 5,688,228 | 3,908 | 3,908 | 2,635 |
+| `concurrent_runtime/read_heavy_heavy_write_batched` | 5,925,860 | 874 | 111,872 | 9,921 |
+| `concurrent_runtime/tenant_sharded_heavy_write_batched` | 7,816,622 | 3,274 | 419,072 | 2,753 |
+
+## 3.7 Real-World Authorization Benchmarks
+
+The synthetic org benchmark remains the historical trend line for compact storage and snapshot
+load. It is intentionally stable, but it over-represents a small set of hot objects and users. The
+`realworld_authorization` benchmark adds a larger SaaS collaboration sample with:
+
+- 128 tenants and workspace/project/folder/doc resources.
+- group membership, direct users, inherited viewers/editors, auditors, owners, and deny lists.
+- `check`, `lookup_resources`, `lookup_subjects`, `lookup_permissions`,
+  `lookup_object_permissions`, `expand`, mixed-read, snapshot-load, and snapshot-size measurements.
+
+2026-05-23 1M-rule evidence after the plain-exclusion short-circuit optimization:
+
+| Operation | Dataset | Measurement | Target status |
+| --- | --- | ---: | --- |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | 1M realworld rules | `[17.428 us, 17.608 us, 17.852 us]` | recorded realistic inherited baseline |
+| `realworld_authorization/1m_rules/check_doc_direct_user` | 1M realworld rules | `[3.7781 us, 3.8040 us, 3.8441 us]` | recorded direct baseline |
+| `realworld_authorization/1m_rules/check_doc_denied_by_ban` | 1M realworld rules | `[1.1511 us, 1.1627 us, 1.1735 us]` | fixed from pre-optimization ~607 us |
+| `realworld_authorization/1m_rules/check_doc_project_editor` | 1M realworld rules | `[6.3356 us, 6.3913 us, 6.4308 us]` | recorded editor inheritance baseline |
+| `realworld_authorization/1m_rules/lookup_resources_target_user` | 1M realworld rules | `[6.2352 us, 6.2939 us, 6.3217 us]` | recorded bounded lookup baseline |
+| `realworld_authorization/1m_rules/lookup_subjects_shared_doc` | 1M realworld rules | `[11.500 us, 11.581 us, 11.657 us]` | recorded subject lookup baseline |
+| `realworld_authorization/1m_rules/lookup_permissions_shared_doc` | 1M realworld rules | `[12.862 us, 13.015 us, 13.147 us]` | recorded permission enumeration baseline |
+| `realworld_authorization/1m_rules/lookup_object_permissions_shared_doc` | 1M realworld rules | `[28.118 us, 28.645 us, 29.035 us]` | recorded object audit baseline |
+| `realworld_authorization/1m_rules/expand_shared_doc` | 1M realworld rules | `[2.7888 us, 2.8134 us, 2.8311 us]` | recorded expand baseline |
+| `realworld_authorization/1m_rules/mixed_read_workload` | 1M realworld rules | `[63.188 us, 63.394 us, 63.577 us]` | fixed from pre-optimization ~679 us |
+| `realworld_authorization/1m_rules/snapshot_load_compact` | 1M realworld rules | `[557.61 ms, 560.65 ms, 563.14 ms]` | consistent with org 1M full-load gate |
+| `realworld_authorization/1m_rules/snapshot_load_trusted_fast` | 1M realworld rules | `[136.47 ms, 137.53 ms, 138.62 ms]` | passes <= 200 ms trusted gate |
+| `realworld_authorization/1m_rules/snapshot_file_size` | 1M realworld rules | `123,983,263 bytes` | comparable to org 1M artifact |
+
+## 3.8 Structural Performance Optimization Targets
+
+[21-performance-optimization-design.md](./21-performance-optimization-design.md) turns the
+post-M10 performance review into explicit gates. The implementation must first record 1M baselines
+for every new `perf_optimization` filter before claiming an improvement.
+
+| Area | Benchmark | Target |
+| --- | --- | ---: |
+| prepared check / ID-native eval | `perf_optimization/check_prepared_1m` | no public check regression; allocation count lower than baseline |
+| realistic inherited read | `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | >= 10% improvement or profile-backed recalibration |
+| realistic mixed read | `realworld_authorization/1m_rules/mixed_read_workload` | upper estimate <= 55 us |
+| streaming lookup | `perf_optimization/lookup_subjects_streaming_1m` and `perf_optimization/lookup_resources_streaming_1m` | no latency regression; lower allocation count |
+| full snapshot load | `snapshot_load_compact/1m` | upper estimate <= 450 ms after loader optimization |
+| load-time RSS | `snapshot_load_peak_rss/1m` | max RSS <= 400 MiB |
+| trusted fast load | `snapshot_load_trusted_fast/1m` | upper estimate <= 200 ms |
+| single write over 1M base | `perf_optimization/write_single_touch_1m` | p95 improves >= 3x versus pre-change 1M baseline |
+| mixed batch write over 1M base | `perf_optimization/write_mixed_batch_1m` | p95 improves >= 3x versus pre-change 1M baseline |
+| read-heavy heavy writes | `perf_optimization/read_heavy_heavy_write_batched_1m` | read throughput no > 5% regression; write p95 improves >= 2x |
+| index profiles | `snapshot_file_size_check_only/1m` plus RSS equivalent | >= 20% reduction versus `Full` |
+
+The hard <= 200 ms target is intentionally scoped to trusted artifacts. A default full loader that
+continues to prove hostile-file row and index semantics at startup is not expected to hit <= 200 ms
+without changing the trust boundary.
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.
@@ -166,6 +308,13 @@ benchmarks must still satisfy the loaded-query budgets in § 3.2.
 - No compatibility tuple-store mirror after schema publication.
 - No `BTreeSet` posting lists in the compact store.
 - No hot-path materialization of owned `Relationship` values during `check`.
+- No service-level `RwLock` on public read APIs after [20](./20-concurrent-engine-runtime-design.md).
+- Write throughput guidance must distinguish unbatched, batched, and tenant-sharded cases.
+- Real-world benchmark coverage must include deny-list, inheritance, group userset, and audit helper
+  cases; synthetic hot-path benchmarks alone are not sufficient evidence.
+- No full relationship-store clone per successful write after [21](./21-performance-optimization-design.md) Phase 12.4.
+- Index-profile optimizations must return typed unsupported-operation errors instead of silently
+  falling back to full scans.
 
 ## 5. Profiling Rules
 
@@ -180,4 +329,5 @@ benchmarks must still satisfy the loaded-query budgets in § 3.2.
 - <- Depends on: [12-relationship-store-design.md](./12-relationship-store-design.md), [14-evaluation-engine-design.md](./14-evaluation-engine-design.md), [60-crates-features-design.md](./60-crates-features-design.md)
 - -> Consumed by: [72-testing-verification-plan.md](./72-testing-verification-plan.md), [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
 - Memory layout: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
+- Performance optimization roadmap: [21-performance-optimization-design.md](./21-performance-optimization-design.md)
 - Related research: [../docs/research/study-spicedb.md § Query Filters and Indexes](../docs/research/study-spicedb.md#query-filters-and-indexes)

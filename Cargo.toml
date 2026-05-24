@@ -30,13 +30,13 @@ pest_derive = "2.8.6"
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 thiserror = "2.0.18"
 tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
+zstd = { version = "0.13.3", default-features = false }
 
 [features]
-default = ["std", "compat"]
+default = ["std"]
 std = []
 serde = ["dep:serde"]
 tracing = ["dep:tracing"]
-compat = []
 bench-internals = []
 
 [dev-dependencies]
@@ -60,9 +60,28 @@ name = "snapshot"
 harness = false
 test = false
 
+[[bench]]
+name = "public_api"
+harness = false
+test = false
+
+[[bench]]
+name = "concurrent_runtime"
+harness = false
+test = false
+
+[[bench]]
+name = "realworld_authorization"
+harness = false
+test = false
+
 [[example]]
 name = "file_permissions"
 path = "examples/file_permissions.rs"
+
+[[example]]
+name = "collaboration_workspace"
+path = "examples/collaboration_workspace.rs"
 
 [package.metadata.docs.rs]
 all-features = true

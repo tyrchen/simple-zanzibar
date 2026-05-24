@@ -4,7 +4,7 @@
 use std::str::FromStr;
 
 use simple_zanzibar::{
-    ZanzibarService,
+    ZanzibarEngine,
     domain::{DomainError, Relationship},
     eval::EvaluationLimits,
     model::{LookupResourcesRequest, LookupSubjectsRequest, Object, Relation, RelationTuple, User},
@@ -50,7 +50,7 @@ const DOCUMENT_SYSTEM_DSL: &str = r#"
 
 #[test]
 fn test_document_system_integration() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
 
     // Parse and load the DSL
     service.add_dsl(DOCUMENT_SYSTEM_DSL)?;
@@ -103,29 +103,29 @@ fn test_document_system_integration() -> Result<(), Box<dyn std::error::Error>> 
     })?;
 
     // Test direct ownership
-    assert!(service.check(&doc1, &owner_rel, &alice)?);
-    assert!(!service.check(&doc1, &owner_rel, &bob)?);
+    assert!(service.check_relation(&doc1, &owner_rel, &alice)?);
+    assert!(!service.check_relation(&doc1, &owner_rel, &bob)?);
 
     // Test viewer permissions (union of direct, owner, and inherited)
-    assert!(service.check(&doc1, &viewer_rel, &alice)?); // owner -> viewer
-    assert!(service.check(&doc1, &viewer_rel, &bob)?); // direct viewer
-    assert!(service.check(&doc1, &viewer_rel, &charlie)?); // editor -> viewer
+    assert!(service.check_relation(&doc1, &viewer_rel, &alice)?); // owner -> viewer
+    assert!(service.check_relation(&doc1, &viewer_rel, &bob)?); // direct viewer
+    assert!(service.check_relation(&doc1, &viewer_rel, &charlie)?); // editor -> viewer
 
     // Test inherited viewer permissions through parent relationship
-    assert!(service.check(&doc2, &viewer_rel, &alice)?); // inherited from doc1 owner
-    assert!(service.check(&doc2, &viewer_rel, &bob)?); // inherited from doc1 viewer
+    assert!(service.check_relation(&doc2, &viewer_rel, &alice)?); // inherited from doc1 owner
+    assert!(service.check_relation(&doc2, &viewer_rel, &bob)?); // inherited from doc1 viewer
 
     // Test editor permissions (intersection of viewer and exclusion of direct editors from owners)
-    assert!(!service.check(&doc1, &editor_rel, &alice)?); // owner, so excluded from editor
-    assert!(!service.check(&doc1, &editor_rel, &bob)?); // not an editor
-    assert!(service.check(&doc1, &editor_rel, &charlie)?); // direct editor and viewer
+    assert!(!service.check_relation(&doc1, &editor_rel, &alice)?); // owner, so excluded from editor
+    assert!(!service.check_relation(&doc1, &editor_rel, &bob)?); // not an editor
+    assert!(service.check_relation(&doc1, &editor_rel, &charlie)?); // direct editor and viewer
 
     Ok(())
 }
 
 #[test]
 fn test_folder_system_integration() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
 
     // Parse and load the DSL
     service.add_dsl(DOCUMENT_SYSTEM_DSL)?;
@@ -169,19 +169,19 @@ fn test_folder_system_integration() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Test direct permissions
-    assert!(service.check(&root_folder, &viewer_rel, &alice)?);
-    assert!(!service.check(&root_folder, &viewer_rel, &bob)?);
+    assert!(service.check_relation(&root_folder, &viewer_rel, &alice)?);
+    assert!(!service.check_relation(&root_folder, &viewer_rel, &bob)?);
 
     // Test inherited permissions
-    assert!(service.check(&sub_folder, &inherited_viewer_rel, &alice)?); // inherited from parent
-    assert!(service.check(&sub_folder, &inherited_viewer_rel, &bob)?); // direct permission
+    assert!(service.check_relation(&sub_folder, &inherited_viewer_rel, &alice)?); // inherited from parent
+    assert!(service.check_relation(&sub_folder, &inherited_viewer_rel, &bob)?); // direct permission
 
     Ok(())
 }
 
 #[test]
 fn test_expand_functionality() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
 
     // Simple DSL for testing expand
     let simple_dsl = r#"
@@ -224,7 +224,7 @@ fn test_expand_functionality() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Test expand functionality
-    let expanded = service.expand(&obj, &viewer_rel)?;
+    let expanded = service.expand_relation(&obj, &viewer_rel)?;
 
     // The expanded result should show the union structure
     // This is a basic test - in a real system you'd want more detailed assertions
@@ -236,7 +236,7 @@ fn test_expand_functionality() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_error_handling() {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
 
     // Test with invalid DSL
     let invalid_dsl = r"
@@ -259,12 +259,12 @@ fn test_error_handling() {
     let user = User::UserId("alice".to_string());
 
     // This should fail because namespace doesn't exist
-    assert!(service.check(&unknown_obj, &rel, &user).is_err());
+    assert!(service.check_relation(&unknown_obj, &rel, &user).is_err());
 }
 
 #[test]
 fn test_tuple_management() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
 
     // Simple namespace for testing
     let simple_dsl = r"
@@ -289,27 +289,27 @@ fn test_tuple_management() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Initially, alice should not have viewer permission
-    assert!(!service.check(&obj, &rel, &user)?);
+    assert!(!service.check_relation(&obj, &rel, &user)?);
 
     // Add the tuple
     service.write_tuple(tuple.clone())?;
 
     // Now alice should have viewer permission
-    assert!(service.check(&obj, &rel, &user)?);
+    assert!(service.check_relation(&obj, &rel, &user)?);
 
     // Remove the tuple
     service.delete_tuple(&tuple)?;
 
     // Alice should no longer have viewer permission
-    assert!(!service.check(&obj, &rel, &user)?);
+    assert!(!service.check_relation(&obj, &rel, &user)?);
 
     Ok(())
 }
 
 #[test]
-fn test_tuple_written_before_schema_should_backfill_indexed_store()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+fn test_tuple_write_should_require_schema_before_mutation() -> Result<(), Box<dyn std::error::Error>>
+{
+    let service = ZanzibarEngine::builder().build();
     let obj = Object {
         namespace: "test".to_string(),
         id: "item".to_string(),
@@ -317,11 +317,16 @@ fn test_tuple_written_before_schema_should_backfill_indexed_store()
     let rel = Relation("viewer".to_string());
     let user = User::UserId("alice".to_string());
 
-    service.write_tuple(RelationTuple {
+    let result = service.write_tuple(RelationTuple {
         object: obj.clone(),
         relation: rel.clone(),
         user: user.clone(),
-    })?;
+    });
+
+    assert!(matches!(
+        result,
+        Err(simple_zanzibar::EngineError::SchemaRequired)
+    ));
 
     service.add_dsl(
         r"
@@ -331,14 +336,19 @@ fn test_tuple_written_before_schema_should_backfill_indexed_store()
     ",
     )?;
 
-    assert!(service.check(&obj, &rel, &user)?);
+    service.write_tuple(RelationTuple {
+        object: obj.clone(),
+        relation: rel.clone(),
+        user: user.clone(),
+    })?;
+    assert!(service.check_relation(&obj, &rel, &user)?);
     Ok(())
 }
 
 #[test]
 fn test_relationship_batch_should_validate_and_apply_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(
         r"
         namespace doc {
@@ -349,7 +359,7 @@ fn test_relationship_batch_should_validate_and_apply_atomically()
 
     let alice = relationship("doc:readme#viewer@user:alice")?;
     let bob = relationship("doc:readme#viewer@user:bob")?;
-    service.apply_relationship_mutations(
+    service.write_relationships_with_preconditions(
         [
             RelationshipMutation::Create(alice.clone()),
             RelationshipMutation::Touch(bob.clone()),
@@ -364,13 +374,13 @@ fn test_relationship_batch_should_validate_and_apply_atomically()
         id: "readme".to_string(),
     };
     let relation = Relation("viewer".to_string());
-    assert!(service.check(&object, &relation, &User::UserId("alice".to_string()))?);
-    assert!(service.check(&object, &relation, &User::UserId("bob".to_string()))?);
+    assert!(service.check_relation(&object, &relation, &User::UserId("alice".to_string()))?);
+    assert!(service.check_relation(&object, &relation, &User::UserId("bob".to_string()))?);
 
     let missing = relationship("doc:missing#viewer@user:alice")?;
     assert!(
         service
-            .apply_relationship_mutations(
+            .write_relationships_with_preconditions(
                 [
                     RelationshipMutation::Create(relationship("doc:readme#viewer@user:charlie")?),
                     RelationshipMutation::Delete(missing),
@@ -379,18 +389,18 @@ fn test_relationship_batch_should_validate_and_apply_atomically()
             )
             .is_err()
     );
-    assert!(!service.check(&object, &relation, &User::UserId("charlie".to_string()))?);
+    assert!(!service.check_relation(&object, &relation, &User::UserId("charlie".to_string()))?);
 
     Ok(())
 }
 
 #[test]
 fn test_relationship_batch_should_require_schema() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
 
     assert!(
         service
-            .apply_relationship_mutations(
+            .write_relationships_with_preconditions(
                 [RelationshipMutation::Create(relationship(
                     "doc:readme#viewer@user:alice",
                 )?)],
@@ -405,7 +415,7 @@ fn test_relationship_batch_should_require_schema() -> Result<(), Box<dyn std::er
 #[test]
 fn test_lookup_resources_should_reuse_check_semantics_and_deduplicate()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(
         r#"
         namespace doc {
@@ -453,11 +463,13 @@ fn test_lookup_resources_should_reuse_check_semantics_and_deduplicate()
 
 #[test]
 fn test_lookup_resources_should_enforce_result_limit() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new().with_evaluation_limits(EvaluationLimits {
-        max_depth: non_zero(50),
-        max_fanout_per_step: non_zero(100),
-        max_lookup_results: std::num::NonZeroU32::MIN,
-    });
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(EvaluationLimits {
+            max_depth: non_zero(50),
+            max_fanout_per_step: non_zero(100),
+            max_lookup_results: std::num::NonZeroU32::MIN,
+        })
+        .build();
     service.add_dsl(
         r"
         namespace doc {
@@ -483,7 +495,7 @@ fn test_lookup_resources_should_enforce_result_limit() -> Result<(), Box<dyn std
 
 #[test]
 fn test_lookup_subjects_should_reuse_check_semantics() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(
         r"
         namespace doc {
@@ -519,7 +531,7 @@ fn test_lookup_subjects_should_reuse_check_semantics() -> Result<(), Box<dyn std
 
 #[test]
 fn test_lookup_subjects_should_return_userset_subjects() -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(
         r"
         namespace doc {
@@ -554,7 +566,7 @@ fn test_lookup_subjects_should_return_userset_subjects() -> Result<(), Box<dyn s
 #[test]
 fn test_lookup_subjects_should_reject_unknown_subject_namespace()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     service.add_dsl(
         r"
         namespace doc {
@@ -576,7 +588,7 @@ fn test_lookup_subjects_should_reject_unknown_subject_namespace()
 #[test]
 fn test_lookup_resources_should_honor_exact_consistency() -> Result<(), Box<dyn std::error::Error>>
 {
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
     let schema_token = service.add_dsl_with_token(
         r"
         namespace doc {

@@ -2,7 +2,7 @@
 
 Status: draft v1
 Owner: Simple Zanzibar
-Last updated: 2026-05-23
+Last updated: 2026-05-24
 
 ## 1. Readiness Assessment
 
@@ -53,7 +53,7 @@ Closes M0 foundation.
 | 1.2 | Add schema IR and resolver. | [11](./11-schema-system-design.md) | 1 day |
 | 1.3 | Compile legacy DSL into schema IR. | [11](./11-schema-system-design.md), [15](./15-public-api-design.md) | 1 day |
 | 1.4 | Add schema validator for duplicates and relation references. | [11](./11-schema-system-design.md) | 1.5 days |
-| 1.5 | Wire `ZanzibarService` facade through v2 schema where possible. | [15](./15-public-api-design.md) | 1 day |
+| 1.5 | Wire legacy mutable facade through v2 schema where possible. | [15](./15-public-api-design.md) | 1 day |
 | 1.6 | Add schema/domain tests and doctests. | [72](./72-testing-verification-plan.md) | 1 day |
 
 Exit criteria: M0 roadmap criteria pass.
@@ -186,6 +186,7 @@ The order is correct because:
 - compact storage is valuable only after the full indexed/snapshot/evaluator path exists and benchmark evidence identifies memory as the limiting resource
 - compact snapshot serialization is valuable only after the in-memory compact representation is stable and memory evidence identifies cold load as the next bottleneck
 - trusted fast-load is valuable only after the fully validating snapshot format exists and profiling identifies repeated semantic validation as the dominant cost
+- structural optimization is valuable only after the complete public API and concurrent runtime exist, because otherwise benchmarks would optimize a provisional surface
 
 ## 12a. Phase 9 - Trusted Fast Snapshot Load
 
@@ -208,10 +209,90 @@ Exit criteria:
 - trusted loaded query benchmarks pass the loaded-query budgets.
 - `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`, `cargo +nightly fmt --check`, strict clippy including boundary lints, `cargo audit`, and `cargo deny check` pass.
 
-## 13. Cross-References
+## 12b. Phase 10 - Public API Completeness
+
+Closes M9.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 10.1 | Add zstd snapshot compression options, bounded decompression, and raw/zstd load-save tests. | [19](./19-public-api-completeness-design.md), [17](./17-compact-snapshot-format-design.md), [70](./70-security-design.md) | 1 day |
+| 10.2 | Add `PolicyText`, policy import/export helpers, deterministic file export, and snapshot-from-policy helpers. | [19](./19-public-api-completeness-design.md), [15](./15-public-api-design.md) | 1.5 days |
+| 10.3 | Add schema replacement, namespace deletion, and relation deletion APIs with atomic revalidation. | [19](./19-public-api-completeness-design.md), [11](./11-schema-system-design.md), [13](./13-revision-consistency-design.md) | 1 day |
+| 10.4 | Add `lookup_permissions` and `lookup_object_permissions` request/response APIs on service and engine. | [19](./19-public-api-completeness-design.md), [14](./14-evaluation-engine-design.md), [15](./15-public-api-design.md) | 1 day |
+| 10.5 | Add integration tests for zstd, policy round trips, schema deletion failure atomicity, permission enumeration, and engine wrappers. | [19](./19-public-api-completeness-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+| 10.6 | Add `public_api` Criterion benchmark target and Makefile target; run and publish results. | [19](./19-public-api-completeness-design.md), [71](./71-performance-budgets-design.md) | 1 day |
+
+Exit criteria:
+
+- M9 roadmap criteria pass.
+- Existing snapshot full/trusted validation tests still pass.
+- zstd load applies the configured byte cap to both compressed and decompressed bytes.
+- Policy export/import is deterministic and behaviorally equivalent for check, expand, lookup, and permission enumeration.
+- Public API benchmark results are posted to the PR comment.
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`, `cargo +nightly fmt --check`, strict clippy including boundary lints, `cargo audit`, and `cargo deny check` pass.
+
+## 13. Phase 11 - Concurrent Runtime and Tenant Shards
+
+Closes M10.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 11.1 | Remove public legacy mutable facade and port examples/tests/benches to `ZanzibarEngine`. | [20](./20-concurrent-engine-runtime-design.md), [15](./15-public-api-design.md) | 1 day |
+| 11.2 | Add immutable `EngineState` and move read APIs to `ArcSwapOption<EngineState>`. | [20](./20-concurrent-engine-runtime-design.md), [13](./13-revision-consistency-design.md) | 1 day |
+| 11.3 | Add bounded single writer actor owning mutable writer state and publishing snapshots. | [20](./20-concurrent-engine-runtime-design.md) | 1.5 days |
+| 11.4 | Add actor lifecycle, writer failure, failed-write atomicity, and concurrent read/write tests. | [20](./20-concurrent-engine-runtime-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+| 11.5 | Add `TenantId` and `ZanzibarTenantShards` with lock-free existing-tenant reads. | [20](./20-concurrent-engine-runtime-design.md) | 1 day |
+| 11.6 | Add concurrent runtime Criterion benchmarks for read/write mix, batching, and tenant sharding. | [20](./20-concurrent-engine-runtime-design.md), [71](./71-performance-budgets-design.md) | 1 day |
+| 11.7 | Run full correctness gates and post benchmark evidence to the PR. | [72](./72-testing-verification-plan.md) | 1 day |
+
+Exit criteria:
+
+- M10 roadmap criteria pass.
+- Existing public snapshot, policy, schema, check, expand, lookup, and permission enumeration
+  behavior remains equivalent through `ZanzibarEngine`.
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`,
+  `cargo +nightly fmt --check`, strict clippy including boundary lints,
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo audit`, and
+  `cargo deny check` pass.
+
+## 14. Phase 12 - Structural Performance Optimization
+
+Closes M11.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 12.1 | Add `perf_optimization` benchmark harness, 1M write/mixed read baselines, snapshot phase timers, and `bench-perf-optimization` Makefile target. | [21](./21-performance-optimization-design.md), [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+| 12.2 | Remove writer submit mutex blocking, add sorted relation cache, add all-live row fast path, and switch full-load uniqueness to lazy retained state. | [20](./20-concurrent-engine-runtime-design.md), [21](./21-performance-optimization-design.md) | 2 days |
+| 12.3 | Add prepared-check path and ID-native evaluator keys for recursive check, computed userset, and tuple-to-userset. | [14](./14-evaluation-engine-design.md), [21](./21-performance-optimization-design.md) | 3 days |
+| 12.4 | Rework lookup internals to stream bounded candidates and reuse evaluation contexts without changing public response types. | [14](./14-evaluation-engine-design.md), [19](./19-public-api-completeness-design.md), [21](./21-performance-optimization-design.md) | 2 days |
+| 12.5 | Optimize snapshot load/save with fixed section lookup, optional bounded parallel index decode, and streaming writer. | [17](./17-compact-snapshot-format-design.md), [18](./18-trusted-fast-snapshot-load-design.md), [21](./21-performance-optimization-design.md) | 3 days |
+| 12.6 | Introduce internal segmented `StoreView` / `StoreDelta` publication with checkpoint thresholds and exact-revision retention. | [13](./13-revision-consistency-design.md), [16](./16-compact-relationship-store-design.md), [20](./20-concurrent-engine-runtime-design.md), [21](./21-performance-optimization-design.md) | 5 days |
+| 12.7 | Add `IndexProfile::{Full, CheckOnly, CheckAndObjectAudit}` to runtime/snapshot options with typed unsupported-operation errors. | [17](./17-compact-snapshot-format-design.md), [19](./19-public-api-completeness-design.md), [21](./21-performance-optimization-design.md) | 3 days |
+| 12.8 | Run full correctness gates, 1M perf benchmarks, RSS checks, and post detailed benchmark evidence to the PR. | [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+
+Exit criteria:
+
+- M11 roadmap criteria pass.
+- Public check, expand, lookup, permission enumeration, policy import/export, snapshot load/save,
+  and exact consistency behavior remain equivalent unless an unsupported index profile is explicitly
+  selected.
+- Segmented store property tests pass against a reference relationship set for random mutation
+  sequences and checkpoint boundaries.
+- `snapshot_load_compact/1m`, `snapshot_load_trusted_fast/1m`, `snapshot_load_peak_rss/1m`, 1M
+  read latency, 1M write latency, concurrent runtime, and index-profile size/RSS benchmarks are
+  recorded in [71](./71-performance-budgets-design.md).
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`,
+  `cargo +nightly fmt --check`, strict clippy including boundary lints,
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo audit`, and
+  `cargo deny check` pass.
+
+## 15. Cross-References
 
 - Stakeholder roadmap: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md)
 - Key decisions: [99-key-decisions.md](./99-key-decisions.md)
 - Verification gates: [72-testing-verification-plan.md](./72-testing-verification-plan.md)
 - Compact store design: [16-compact-relationship-store-design.md](./16-compact-relationship-store-design.md)
 - Compact snapshot format: [17-compact-snapshot-format-design.md](./17-compact-snapshot-format-design.md)
+- Public API completeness: [19-public-api-completeness-design.md](./19-public-api-completeness-design.md)
+- Concurrent engine runtime: [20-concurrent-engine-runtime-design.md](./20-concurrent-engine-runtime-design.md)
+- Performance optimization design: [21-performance-optimization-design.md](./21-performance-optimization-design.md)

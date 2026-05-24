@@ -4,7 +4,7 @@
 //! to implement a file permissions system with hierarchical access control.
 
 use simple_zanzibar::{
-    ZanzibarService,
+    ZanzibarEngine,
     model::{Object, Relation, RelationTuple, User},
 };
 
@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Simplified Zanzibar File Permissions Example");
     println!("=============================================\n");
 
-    let mut service = ZanzibarService::new();
+    let service = ZanzibarEngine::builder().build();
 
     // Define the policy using DSL
     let policy_dsl = r#"
@@ -126,55 +126,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Alice's permissions:");
     println!(
         "  Can view root folder: {}",
-        service.check(&root_folder, &viewer_rel, &alice)?
+        service.check_relation(&root_folder, &viewer_rel, &alice)?
     );
     println!(
         "  Can view docs folder: {}",
-        service.check(&docs_folder, &viewer_rel, &alice)?
+        service.check_relation(&docs_folder, &viewer_rel, &alice)?
     );
     println!(
         "  Can view README file: {}",
-        service.check(&readme_file, &viewer_rel, &alice)?
+        service.check_relation(&readme_file, &viewer_rel, &alice)?
     );
     println!(
         "  Can edit README file: {}",
-        service.check(&readme_file, &editor_rel, &alice)?
+        service.check_relation(&readme_file, &editor_rel, &alice)?
     );
     println!(
         "  Can view secret file: {}",
-        service.check(&secret_file, &viewer_rel, &alice)?
+        service.check_relation(&secret_file, &viewer_rel, &alice)?
     );
 
     println!("\nBob's permissions:");
     println!(
         "  Can view root folder: {}",
-        service.check(&root_folder, &viewer_rel, &bob)?
+        service.check_relation(&root_folder, &viewer_rel, &bob)?
     );
     println!(
         "  Can view README file: {}",
-        service.check(&readme_file, &viewer_rel, &bob)?
+        service.check_relation(&readme_file, &viewer_rel, &bob)?
     );
     println!(
         "  Can edit README file: {}",
-        service.check(&readme_file, &editor_rel, &bob)?
+        service.check_relation(&readme_file, &editor_rel, &bob)?
     );
     println!(
         "  Can view secret file: {}",
-        service.check(&secret_file, &viewer_rel, &bob)?
+        service.check_relation(&secret_file, &viewer_rel, &bob)?
     );
 
     println!("\nCharlie's permissions:");
     println!(
         "  Can view root folder: {}",
-        service.check(&root_folder, &viewer_rel, &charlie)?
+        service.check_relation(&root_folder, &viewer_rel, &charlie)?
     );
     println!(
         "  Can view README file: {}",
-        service.check(&readme_file, &viewer_rel, &charlie)?
+        service.check_relation(&readme_file, &viewer_rel, &charlie)?
     );
     println!(
         "  Can view secret file: {}",
-        service.check(&secret_file, &viewer_rel, &charlie)?
+        service.check_relation(&secret_file, &viewer_rel, &charlie)?
     );
 
     println!("\nTesting dynamic permission changes...\n");
@@ -190,11 +190,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Bob's updated permissions:");
     println!(
         "  Can view root folder: {}",
-        service.check(&root_folder, &viewer_rel, &bob)?
+        service.check_relation(&root_folder, &viewer_rel, &bob)?
     );
     println!(
         "  Can view docs folder: {}",
-        service.check(&docs_folder, &viewer_rel, &bob)?
+        service.check_relation(&docs_folder, &viewer_rel, &bob)?
     );
 
     // Revoke Bob's editor access to README
@@ -208,16 +208,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Bob's permissions after revocation:");
     println!(
         "  Can view README file: {}",
-        service.check(&readme_file, &viewer_rel, &bob)?
+        service.check_relation(&readme_file, &viewer_rel, &bob)?
     );
     println!(
         "  Can edit README file: {}",
-        service.check(&readme_file, &editor_rel, &bob)?
+        service.check_relation(&readme_file, &editor_rel, &bob)?
     );
 
     println!("\nTesting expand functionality...\n");
 
-    let expanded = service.expand(&readme_file, &viewer_rel)?;
+    let expanded = service.expand_relation(&readme_file, &viewer_rel)?;
     println!("Users who can view README file: {expanded:?}");
 
     println!("\nExample completed successfully!");

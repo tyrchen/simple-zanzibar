@@ -40,7 +40,7 @@ The public API remains ergonomic, but internally every request flows through val
 | G2 | Make reads fast by design. | Direct checks over 100k relationships avoid full-store scans and use resource/subject indexes. Benchmark gates are defined in [71-performance-budgets-design.md](./71-performance-budgets-design.md). |
 | G3 | Add deterministic local consistency. | Every schema or relationship write returns a token; exact-token checks read a stable snapshot. |
 | G4 | Support core Zanzibar APIs as a library. | `check`, `expand`, `lookup_resources`, and `lookup_subjects` are backed by one engine and share validation, snapshots, and membership algebra. |
-| G5 | Preserve a compatibility path. | Existing `ZanzibarService` examples and tests either keep working or fail with documented migration errors. |
+| G5 | Expose one coherent public runtime. | `ZanzibarEngine` is the only public engine facade; legacy mutable facade is removed before API stabilization. |
 | G6 | Meet project engineering policy. | `cargo build`, `cargo test`, `cargo +nightly fmt --check`, `cargo clippy -- -D warnings -W clippy::pedantic`, `cargo audit`, and `cargo deny check` pass before each implementation phase closes. |
 | G7 | Keep large local authorization datasets memory-efficient. | The 1M-rule org authorization benchmark has steady-state max RSS <= 400 MiB after the compact relationship store lands. |
 
@@ -72,7 +72,7 @@ Anti-personas:
 
 ## 6. Success Metrics
 
-- All legacy tests pass through the v2 compatibility facade.
+- Public behavior tests pass through `ZanzibarEngine` without a legacy mutable facade.
 - At least 20 schema-validation negative tests reject invalid computed-userset, tuple-to-userset, and duplicate relation definitions.
 - At least 10 property tests cover relationship-store index consistency.
 - Direct-check benchmark demonstrates indexed lookup rather than scan behavior at 10k, 100k, and 1M relationship scales.
