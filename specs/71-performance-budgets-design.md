@@ -495,6 +495,20 @@ Representative completion-phase timer:
 | `indexes` | `145.074458 ms` |
 | `publish` | `1.834 us` |
 
+## 3.14 Compiled Computed-Userset Shortcut Follow-Up
+
+Measured 2026-05-24 after the deep follow-up review in
+[25](./25-compiled-computed-userset-shortcut-design.md). The parser migration idea was deferred
+because schema parse/compile is ~51 us inside the ~572 ms full snapshot-load path and is absent from
+steady-state reads. The implemented follow-up instead moves computed-userset plain-target knowledge
+into compiled schema IR.
+
+| Benchmark | Phase 14 completion | Follow-up | Result |
+| --- | ---: | ---: | --- |
+| `perf_optimization/check_prepared_1m` | `[4.3107 us, 4.3867 us, 4.4450 us]` | `[4.2240 us, 4.2590 us, 4.3065 us]` | upper `-3.12%`; no regression |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | `[11.540 us, 11.599 us, 11.646 us]` | `[11.211 us, 11.341 us, 11.559 us]` | upper `-0.75%`; no regression |
+| `realworld_authorization/1m_rules/mixed_read_workload` | `[41.599 us, 42.085 us, 42.690 us]` | `[40.921 us, 41.317 us, 41.808 us]` | upper `-2.07%`; no regression |
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.

@@ -322,6 +322,8 @@ pub(crate) enum CompiledUsersetExpression {
         relation: RelationName,
         /// Referenced relation id retained for schema lookup.
         relation_id: SchemaRelationId,
+        /// Whether the referenced relation has its own rewrite.
+        target_has_rewrite: bool,
     },
     /// A relation reached through userset subjects on another relation.
     TupleToUserset {
@@ -678,9 +680,14 @@ fn compile_resolved_expression(
     match expression {
         UsersetExpression::This => Ok(CompiledUsersetExpression::This),
         UsersetExpression::ComputedUserset { relation } => {
+            let target_has_rewrite = resolver
+                .relation(namespace, relation)?
+                .userset_rewrite()
+                .is_some();
             Ok(CompiledUsersetExpression::ComputedUserset {
                 relation: relation.clone(),
                 relation_id: resolver.relation_id(namespace, relation)?,
+                target_has_rewrite,
             })
         }
         UsersetExpression::TupleToUserset {

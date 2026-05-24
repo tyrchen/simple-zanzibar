@@ -477,16 +477,9 @@ impl<'a> EvaluationContext<'a> {
             CompiledUsersetExpression::ComputedUserset {
                 relation,
                 relation_id,
+                target_has_rewrite,
             } => {
-                if self
-                    .snapshot
-                    .schema()
-                    .resolver()
-                    .relation_by_id(*relation_id)
-                    .ok_or_else(compiled_schema_invariant_error)?
-                    .compiled_userset_rewrite()
-                    .is_none()
-                {
+                if !target_has_rewrite {
                     return self.eval_plain_computed_userset(object, relation, user);
                 }
                 self.check_relation_id(object, relation, *relation_id, user)
@@ -659,7 +652,7 @@ impl<'a> EvaluationContext<'a> {
         base: &CompiledUsersetExpression,
         exclude: &CompiledUsersetExpression,
     ) -> Result<Membership, ZanzibarError> {
-        if self.should_eval_exclude_first(object, exclude) {
+        if Self::should_eval_exclude_first(exclude) {
             let exclude_result =
                 self.eval_compiled_schema_expression(object, relation_name, user, exclude)?;
             if exclude_result == Membership::Allowed {
@@ -678,32 +671,17 @@ impl<'a> EvaluationContext<'a> {
         Ok(base.exclusion(exclude))
     }
 
-    fn should_eval_exclude_first(
-        &self,
-        object: &Object,
-        exclude: &CompiledUsersetExpression,
-    ) -> bool {
+    fn should_eval_exclude_first(exclude: &CompiledUsersetExpression) -> bool {
         match exclude {
             CompiledUsersetExpression::This => true,
-            CompiledUsersetExpression::ComputedUserset { relation, .. } => {
-                self.computed_userset_is_plain_relation(object, relation)
-            }
+            CompiledUsersetExpression::ComputedUserset {
+                target_has_rewrite, ..
+            } => !target_has_rewrite,
             CompiledUsersetExpression::TupleToUserset { .. }
             | CompiledUsersetExpression::Union(_)
             | CompiledUsersetExpression::Intersection(_)
             | CompiledUsersetExpression::Exclusion { .. } => false,
         }
-    }
-
-    fn computed_userset_is_plain_relation(&self, object: &Object, relation: &RelationName) -> bool {
-        let Ok(object_type) = ObjectType::try_from(object.namespace.as_str()) else {
-            return false;
-        };
-        self.snapshot
-            .schema()
-            .resolver()
-            .relation(&object_type, relation)
-            .is_ok_and(|definition| definition.userset_rewrite().is_none())
     }
 
     fn expand_compiled_schema_expression(
