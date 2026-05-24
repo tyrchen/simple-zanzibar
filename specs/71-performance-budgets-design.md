@@ -371,6 +371,55 @@ Full-profile index group payload:
 | `subject_type_relation` | 2,666,704 | 666,666 |
 | `subject_type` | 4,000,060 | 1,000,000 |
 
+## 3.11 M12 Snapshot File-Size Measurements
+
+Measured 2026-05-24 on the same 1M org fixture after the v3 posting delta-varint stream,
+singleton/multi index split, group-specific compact key widths, row-id width encoding, compact
+symbol table entries, and compact symbol lookup ids.
+
+| Profile | Raw bytes | Zstd bytes | Index payload | Non-index payload | Target status |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `Full` | 77,573,519 | 22,317,770 | 28,118,798 | 49,454,337 | passes <= 100 MB |
+| `CheckOnly` | 59,078,231 | 19,031,692 | 9,623,510 | 49,454,337 | passes <= 65 MB |
+| `CheckAndObjectAudit` | 59,078,231 | 19,031,693 | 9,623,510 | 49,454,337 | same capability alias as `CheckOnly` |
+
+`CheckOnly` and `CheckAndObjectAudit` save 18,495,288 raw bytes versus `Full`, or 23.84%.
+
+Largest remaining sections:
+
+| Section | Bytes |
+| --- | ---: |
+| `relationship_rows` | 18,000,000 |
+| `symbol_bytes` | 16,153,374 |
+| `symbol_hashes` | 8,160,104 |
+| `symbol_table` | 4,080,052 |
+| `symbol_lookup` | 3,060,039 |
+
+Full-profile index payload by group:
+
+| Index group | Payload bytes | Total postings |
+| --- | ---: | ---: |
+| `resource` | 9,623,370 | 1,000,000 |
+| `resource_object` | 7,578,359 | 1,000,000 |
+| `resource_type_relation` | 1,000,083 | 1,000,000 |
+| `resource_type` | 1,000,036 | 1,000,000 |
+| `subject` | 7,250,082 | 1,666,666 |
+| `subject_type_relation` | 666,692 | 666,666 |
+| `subject_type` | 1,000,036 | 1,000,000 |
+
+Phase 13 gate evidence:
+
+| Benchmark | Evidence | Status |
+| --- | --- | --- |
+| `snapshot_load_compact/1m` | `[579.68 ms, 585.81 ms, 593.91 ms]` | passes <= 700 ms; within 5% of the M11 full-load upper estimate |
+| `snapshot_load_trusted_fast/1m` | `[183.45 ms, 185.11 ms, 186.84 ms]` | passes <= 200 ms |
+| `snapshot_load_zstd/1m` | `[625.59 ms, 629.45 ms, 633.10 ms]` | no detected regression |
+| `snapshot_file_size/1m` | `77,573,646 bytes` | recorded v3 full-size artifact in the snapshot bench fixture |
+| `snapshot_file_size_zstd/1m` | `22,384,838 bytes` | recorded zstd artifact in the snapshot bench fixture |
+| `snapshot_file_size_check_only/1m` | `full=77,573,519 bytes check_only=59,078,231 bytes` | 23.84% smaller than `Full`; passes >= 20% |
+| `snapshot_load_peak_rss/1m` | `343,851,008-byte max RSS; 312,705,672-byte peak footprint` | passes <= 400 MiB RSS target |
+| `perf_optimization/snapshot_load_phase_timers_1m` | `[578.05 ms, 586.63 ms, 597.34 ms]`; `file_read=7.85 ms`, `checksum=32.79 ms`, `symbols=87.53 ms`, `rows=314.50 ms`, `indexes=145.07 ms` | recorded post-v3 load phase costs |
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.

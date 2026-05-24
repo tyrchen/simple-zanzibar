@@ -14,8 +14,8 @@ use simple_zanzibar::{
 
 const HEADER_LEN: usize = 76;
 const DIRECTORY_ENTRY_LEN: usize = 28;
+const RELATIONSHIP_COUNT_OFFSET: usize = 60;
 const RELATIONSHIP_ROWS_SECTION: u16 = 4;
-const DISK_RELATIONSHIP_ROW_LEN: usize = 24;
 
 #[test]
 fn test_should_build_lazy_uniqueness_after_full_snapshot_load()
@@ -293,17 +293,22 @@ fn seeded_engine() -> Result<ZanzibarEngine, Box<dyn std::error::Error>> {
 
 fn duplicate_second_relationship_row(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let mut bytes = fs::read(path)?;
-    let rows = section_range(&bytes, RELATIONSHIP_ROWS_SECTION)?;
-    let second_start = rows
-        .start
-        .checked_add(DISK_RELATIONSHIP_ROW_LEN)
-        .ok_or("row offset overflowed")?;
-    let second_end = second_start
-        .checked_add(DISK_RELATIONSHIP_ROW_LEN)
-        .ok_or("row offset overflowed")?;
-    if second_end > rows.end {
+    let row_count = usize::try_from(read_u32(&bytes, RELATIONSHIP_COUNT_OFFSET)?)?;
+    if row_count < 2 {
         return Err("snapshot fixture needs at least two relationship rows".into());
     }
+    let rows = section_range(&bytes, RELATIONSHIP_ROWS_SECTION)?;
+    if rows.len() % row_count != 0 {
+        return Err("relationship row section length does not match row count".into());
+    }
+    let row_len = rows.len() / row_count;
+    let second_start = rows
+        .start
+        .checked_add(row_len)
+        .ok_or("row offset overflowed")?;
+    let second_end = second_start
+        .checked_add(row_len)
+        .ok_or("row offset overflowed")?;
     let first = bytes
         .get(rows.start..second_start)
         .ok_or("first row range is invalid")?
@@ -339,6 +344,14 @@ fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, Box<dyn std::error::Erro
     let mut value = [0_u8; 2];
     value.copy_from_slice(slice);
     Ok(u16::from_le_bytes(value))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, Box<dyn std::error::Error>> {
+    let end = offset.checked_add(4).ok_or("u32 offset overflowed")?;
+    let slice = bytes.get(offset..end).ok_or("u32 range is invalid")?;
+    let mut value = [0_u8; 4];
+    value.copy_from_slice(slice);
+    Ok(u32::from_le_bytes(value))
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, Box<dyn std::error::Error>> {

@@ -34,7 +34,13 @@ const SECTION_KIND_POSTING_RANGES: u16 = 7;
 const SECTION_KIND_POSTING_ROW_IDS: u16 = 8;
 const SECTION_KIND_SYMBOL_HASHES: u16 = 9;
 const SECTION_KIND_SYMBOL_LOOKUP: u16 = 10;
-const DISK_SYMBOL_LOOKUP_LEN: usize = 4;
+const SECTION_WIDTH_MASK: u16 = 0b11;
+const SYMBOL_TABLE_LEN_WIDTH_SHIFT: u16 = 2;
+const SYMBOL_TABLE_LEN_WIDTH_MASK: u16 = 0b1100;
+const INDEX_DIRECTORY_FLAG_V3_COMPACT: u16 = 1;
+const INDEX_DIRECTORY_KEY_WIDTH_SHIFT: u16 = 1;
+const INDEX_DIRECTORY_KEY_WIDTH_MASK: u16 = 0b110;
+const DISK_POSTING_RANGE_LEN: usize = 12;
 
 #[test]
 fn test_should_save_and_load_snapshot_with_equivalent_behavior()
@@ -342,15 +348,17 @@ fn test_should_reject_malformed_symbol_lookup() -> Result<(), Box<dyn std::error
     let bytes = snapshot_bytes()?;
     let hashes = section_range(&bytes, SECTION_KIND_SYMBOL_HASHES)?;
     let lookup = section_range(&bytes, SECTION_KIND_SYMBOL_LOOKUP)?;
-    assert!(lookup.len() >= DISK_SYMBOL_LOOKUP_LEN * 2);
+    let lookup_width = section_width(&bytes, SECTION_KIND_SYMBOL_LOOKUP)?;
+    assert!(lookup.len() >= lookup_width * 2);
 
     let mut unsorted = bytes.clone();
-    let first_id = read_u32(&unsorted, lookup.start)?;
-    let second_id = read_u32(&unsorted, lookup.start + DISK_SYMBOL_LOOKUP_LEN)?;
-    set_u32(&mut unsorted, lookup.start, second_id)?;
-    set_u32(
+    let first_id = read_uint_width(&unsorted, lookup.start, lookup_width)?;
+    let second_id = read_uint_width(&unsorted, lookup.start + lookup_width, lookup_width)?;
+    set_uint_width(&mut unsorted, lookup.start, lookup_width, second_id)?;
+    set_uint_width(
         &mut unsorted,
-        lookup.start + DISK_SYMBOL_LOOKUP_LEN,
+        lookup.start + lookup_width,
+        lookup_width,
         first_id,
     )?;
     rewrite_checksum(&mut unsorted)?;
@@ -370,10 +378,11 @@ fn test_should_reject_malformed_symbol_lookup() -> Result<(), Box<dyn std::error
     assert_corrupt_rejected("bad_symbol_lookup_hash", &bad_hash)?;
 
     let mut duplicate_id = bytes;
-    let first_id = read_u32(&duplicate_id, lookup.start)?;
-    set_u32(
+    let first_id = read_uint_width(&duplicate_id, lookup.start, lookup_width)?;
+    set_uint_width(
         &mut duplicate_id,
-        lookup.start + DISK_SYMBOL_LOOKUP_LEN,
+        lookup.start + lookup_width,
+        lookup_width,
         first_id,
     )?;
     rewrite_checksum(&mut duplicate_id)?;
@@ -394,10 +403,12 @@ fn test_should_reject_malformed_utf8_and_invalid_symbol_ids()
 
     let mut invalid_symbol = bytes;
     let rows = section_range(&invalid_symbol, SECTION_KIND_RELATIONSHIP_ROWS)?;
+    let row_symbol_width = section_width(&invalid_symbol, SECTION_KIND_RELATIONSHIP_ROWS)?;
     let symbol_count = read_u32(&invalid_symbol, SYMBOL_COUNT_OFFSET)?;
-    set_u32(
+    set_uint_width(
         &mut invalid_symbol,
         rows.start,
+        row_symbol_width,
         symbol_count
             .checked_add(1)
             .ok_or("symbol count overflowed")?,
@@ -414,11 +425,20 @@ fn test_should_reject_duplicate_symbols_and_invalid_posting_row_ids()
 
     let mut duplicate_symbol = bytes.clone();
     let symbol_table = section_range(&duplicate_symbol, SECTION_KIND_SYMBOL_TABLE)?;
-    assert!(symbol_table.len() >= 16);
-    let first_start = read_u32(&duplicate_symbol, symbol_table.start)?;
-    let first_len = read_u32(&duplicate_symbol, symbol_table.start + 4)?;
-    set_u32(&mut duplicate_symbol, symbol_table.start + 8, first_start)?;
-    set_u32(&mut duplicate_symbol, symbol_table.start + 12, first_len)?;
+    let (symbol_start_width, symbol_len_width) = symbol_table_widths(&duplicate_symbol)?;
+    let symbol_entry_width = symbol_start_width
+        .checked_add(symbol_len_width)
+        .ok_or("symbol table entry width overflowed")?;
+    assert!(symbol_table.len() >= symbol_entry_width * 2);
+    let first_entry = copy_range(&duplicate_symbol, symbol_table.start, symbol_entry_width)?;
+    set_range(
+        &mut duplicate_symbol,
+        symbol_table
+            .start
+            .checked_add(symbol_entry_width)
+            .ok_or("symbol table entry offset overflowed")?,
+        &first_entry,
+    )?;
     rewrite_checksum(&mut duplicate_symbol)?;
     assert_corrupt_rejected("duplicate_symbol", &duplicate_symbol)?;
 
@@ -443,26 +463,64 @@ fn test_should_reject_unsorted_index_keys_and_bad_posting_ranges()
     let bytes = snapshot_bytes()?;
 
     let mut unsorted = bytes.clone();
-    let key_count = first_index_key_count(&unsorted)?;
-    assert!(key_count > 1);
-    let keys = section_range(&unsorted, SECTION_KIND_INDEX_KEYS)?;
-    let first_key = copy_range(&unsorted, keys.start, 12)?;
-    set_range(&mut unsorted, keys.start + 12, &first_key)?;
+    let first_key = first_compact_index_key_entry(&unsorted)?;
+    set_range(
+        &mut unsorted,
+        first_key.second_start,
+        &first_key.first_bytes,
+    )?;
     rewrite_checksum(&mut unsorted)?;
     assert_corrupt_rejected("unsorted_keys", &unsorted)?;
 
     let mut bad_posting = bytes;
     let ranges = section_range(&bad_posting, SECTION_KIND_POSTING_RANGES)?;
     let posting_ids = section_range(&bad_posting, SECTION_KIND_POSTING_ROW_IDS)?;
-    let posting_id_count = posting_ids.len() / 4;
     set_u32(
         &mut bad_posting,
         ranges.start + 4,
-        u32::try_from(posting_id_count)?,
+        u32::try_from(posting_ids.len())?,
     )?;
     set_u32(&mut bad_posting, ranges.start + 8, 1)?;
     rewrite_checksum(&mut bad_posting)?;
     assert_corrupt_rejected("bad_posting_range", &bad_posting)?;
+    Ok(())
+}
+
+#[test]
+fn test_should_reject_malformed_v3_posting_delta_varints() -> Result<(), Box<dyn std::error::Error>>
+{
+    let bytes = snapshot_bytes()?;
+    let (range_offset, overflow_start) = first_posting_range_with_overflow(&bytes)?;
+    let posting_ids = section_range(&bytes, SECTION_KIND_POSTING_ROW_IDS)?;
+    let first_overflow_byte = posting_ids
+        .start
+        .checked_add(overflow_start)
+        .ok_or("posting overflow byte offset overflowed")?;
+
+    let mut zero_delta = bytes.clone();
+    set_byte(&mut zero_delta, first_overflow_byte, 0)?;
+    rewrite_checksum(&mut zero_delta)?;
+    assert_corrupt_rejected("zero_delta_varint", &zero_delta)?;
+
+    let mut truncated = bytes.clone();
+    set_byte(&mut truncated, first_overflow_byte, 0x80)?;
+    set_u32(&mut truncated, range_offset + 8, 1)?;
+    rewrite_checksum(&mut truncated)?;
+    assert_corrupt_rejected("truncated_delta_varint", &truncated)?;
+
+    let mut wrong_row_count = bytes.clone();
+    let posting_ids_entry = directory_entry_offset(SECTION_KIND_POSTING_ROW_IDS)?;
+    set_u64(&mut wrong_row_count, posting_ids_entry + 20, 0)?;
+    rewrite_checksum(&mut wrong_row_count)?;
+    assert_corrupt_rejected("wrong_posting_row_id_count", &wrong_row_count)?;
+
+    let mut out_of_bounds = bytes;
+    let relationship_count = read_u32(&out_of_bounds, RELATIONSHIP_COUNT_OFFSET)?;
+    set_u32(&mut out_of_bounds, range_offset, relationship_count)?;
+    set_byte(&mut out_of_bounds, first_overflow_byte, 1)?;
+    set_u32(&mut out_of_bounds, range_offset + 8, 1)?;
+    rewrite_checksum(&mut out_of_bounds)?;
+    assert_corrupt_rejected("out_of_bounds_delta_varint", &out_of_bounds)?;
     Ok(())
 }
 
@@ -777,6 +835,35 @@ fn section_range(
     Err(format!("section {section_kind} not found").into())
 }
 
+fn section_flags(bytes: &[u8], section_kind: u16) -> Result<u16, Box<dyn std::error::Error>> {
+    let section_count = usize::try_from(read_u32(bytes, SECTION_COUNT_OFFSET)?)?;
+    for index in 0..section_count {
+        let entry = HEADER_LEN
+            .checked_add(
+                index
+                    .checked_mul(DIRECTORY_ENTRY_LEN)
+                    .ok_or("entry overflow")?,
+            )
+            .ok_or("entry overflow")?;
+        if read_u16(bytes, entry)? == section_kind {
+            return read_u16(bytes, entry + 2);
+        }
+    }
+    Err(format!("section {section_kind} not found").into())
+}
+
+fn section_width(bytes: &[u8], section_kind: u16) -> Result<usize, Box<dyn std::error::Error>> {
+    section_value_width(section_flags(bytes, section_kind)? & SECTION_WIDTH_MASK)
+}
+
+fn symbol_table_widths(bytes: &[u8]) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let flags = section_flags(bytes, SECTION_KIND_SYMBOL_TABLE)?;
+    Ok((
+        section_value_width(flags & SECTION_WIDTH_MASK)?,
+        section_value_width((flags & SYMBOL_TABLE_LEN_WIDTH_MASK) >> SYMBOL_TABLE_LEN_WIDTH_SHIFT)?,
+    ))
+}
+
 fn directory_entry_offset(section_kind: u16) -> Result<usize, Box<dyn std::error::Error>> {
     let bytes = snapshot_bytes()?;
     let section_count = usize::try_from(read_u32(&bytes, SECTION_COUNT_OFFSET)?)?;
@@ -795,9 +882,84 @@ fn directory_entry_offset(section_kind: u16) -> Result<usize, Box<dyn std::error
     Err(format!("section {section_kind} not found").into())
 }
 
-fn first_index_key_count(bytes: &[u8]) -> Result<u32, Box<dyn std::error::Error>> {
+#[derive(Debug)]
+struct CompactIndexKeyEntry {
+    first_bytes: Vec<u8>,
+    second_start: usize,
+}
+
+fn first_compact_index_key_entry(
+    bytes: &[u8],
+) -> Result<CompactIndexKeyEntry, Box<dyn std::error::Error>> {
     let directory = section_range(bytes, SECTION_KIND_INDEX_DIRECTORY)?;
-    read_u32(bytes, directory.start + 8)
+    let keys = section_range(bytes, SECTION_KIND_INDEX_KEYS)?;
+    let flags = read_u16(bytes, directory.start + 2)?;
+    if flags & INDEX_DIRECTORY_FLAG_V3_COMPACT == 0 {
+        return Err("first index group is not compact v3".into());
+    }
+    let key_width = compact_key_width(flags)?;
+    let key_count = read_u32(bytes, directory.start + 8)?;
+    let multi_count = read_u32(bytes, directory.start + 16)?;
+    let singleton_count = key_count
+        .checked_sub(multi_count)
+        .ok_or("singleton count underflowed")?;
+    if singleton_count < 2 {
+        return Err("first compact index group does not have two singleton keys".into());
+    }
+    let key_start = usize::try_from(read_u32(bytes, directory.start + 4)?)?;
+    let singleton_entry_len = key_width
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(4))
+        .ok_or("singleton entry length overflowed")?;
+    let first_start = keys
+        .start
+        .checked_add(key_start)
+        .ok_or("first key offset overflowed")?;
+    let second_start = first_start
+        .checked_add(singleton_entry_len)
+        .ok_or("second key offset overflowed")?;
+    Ok(CompactIndexKeyEntry {
+        first_bytes: copy_range(bytes, first_start, singleton_entry_len)?,
+        second_start,
+    })
+}
+
+fn compact_key_width(flags: u16) -> Result<usize, Box<dyn std::error::Error>> {
+    match (flags & INDEX_DIRECTORY_KEY_WIDTH_MASK) >> INDEX_DIRECTORY_KEY_WIDTH_SHIFT {
+        0 => Ok(1),
+        1 => Ok(2),
+        2 => Ok(3),
+        3 => Ok(4),
+        _ => Err("unsupported compact key width".into()),
+    }
+}
+
+fn section_value_width(bits: u16) -> Result<usize, Box<dyn std::error::Error>> {
+    match bits {
+        0 => Ok(1),
+        1 => Ok(2),
+        2 => Ok(3),
+        3 => Ok(4),
+        _ => Err("unsupported section value width".into()),
+    }
+}
+
+fn first_posting_range_with_overflow(
+    bytes: &[u8],
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let ranges = section_range(bytes, SECTION_KIND_POSTING_RANGES)?;
+    let mut offset = ranges.start;
+    while offset < ranges.end {
+        let overflow_len = read_u32(bytes, offset + 8)?;
+        if overflow_len != 0 {
+            let overflow_start = usize::try_from(read_u32(bytes, offset + 4)?)?;
+            return Ok((offset, overflow_start));
+        }
+        offset = offset
+            .checked_add(DISK_POSTING_RANGE_LEN)
+            .ok_or("posting range offset overflowed")?;
+    }
+    Err("snapshot has no posting range with overflow".into())
 }
 
 fn copy_range(
@@ -843,6 +1005,33 @@ fn set_u64(bytes: &mut [u8], offset: usize, value: u64) -> Result<(), Box<dyn st
     set_range(bytes, offset, &value.to_le_bytes())
 }
 
+fn read_uint_width(
+    bytes: &[u8],
+    offset: usize,
+    width: usize,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    let mut array = [0_u8; 4];
+    for (index, byte) in copy_range(bytes, offset, width)?.into_iter().enumerate() {
+        let slot = array.get_mut(index).ok_or("integer width out of bounds")?;
+        *slot = byte;
+    }
+    Ok(u32::from_le_bytes(array))
+}
+
+fn set_uint_width(
+    bytes: &mut [u8],
+    offset: usize,
+    width: usize,
+    value: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let value = value.to_le_bytes();
+    set_range(
+        bytes,
+        offset,
+        value.get(..width).ok_or("integer width out of bounds")?,
+    )
+}
+
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, Box<dyn std::error::Error>> {
     let mut array = [0_u8; 2];
     array.copy_from_slice(copy_range(bytes, offset, 2)?.as_slice());
@@ -862,7 +1051,10 @@ fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, Box<dyn std::error::Erro
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let trimmed = value.trim();
+    let trimmed = value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
     if !trimmed.len().is_multiple_of(2) {
         return Err("hex fixture has odd length".into());
     }

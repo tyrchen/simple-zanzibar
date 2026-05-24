@@ -27,8 +27,10 @@ use crate::{
     schema::{self, CompiledSchema},
 };
 
-const MAGIC: [u8; 8] = *b"SZSNAP\0\x02";
-const FORMAT_VERSION: u16 = 2;
+const MAGIC_PREFIX: [u8; 7] = *b"SZSNAP\0";
+const FORMAT_V2_MAGIC: [u8; 8] = *b"SZSNAP\0\x02";
+const FORMAT_V3_MAGIC: [u8; 8] = *b"SZSNAP\0\x03";
+const CURRENT_FORMAT_VERSION: SnapshotFormatVersion = SnapshotFormatVersion::V3;
 const HEADER_LEN: usize = 76;
 const HEADER_LEN_U32: u32 = 76;
 const DIRECTORY_ENTRY_LEN: usize = 28;
@@ -48,7 +50,7 @@ pub struct SnapshotSaveOptions {
     pub zstd_level: i32,
     /// Whether serialized lookup indexes are included.
     ///
-    /// Version 2 requires indexes because fast loading depends on stable sorted index arrays.
+    /// Snapshot artifacts require indexes because fast loading depends on stable sorted arrays.
     pub include_indexes: bool,
     /// Index profile encoded in the snapshot artifact.
     pub index_profile: IndexProfile,
@@ -94,8 +96,53 @@ impl SnapshotSaveOptions {
 pub enum SnapshotCompression {
     /// Store all sections uncompressed.
     None,
-    /// Wrap the raw `.szsnap` v2 payload in a single zstd frame.
+    /// Wrap the raw `.szsnap` payload in a single zstd frame.
     Zstd,
+}
+
+/// Supported compact snapshot artifact format versions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotFormatVersion {
+    /// Version 2 stores fixed-width `u32` posting overflow row ids.
+    V2,
+    /// Version 3 stores posting overflow row ids as per-range delta varints.
+    V3,
+}
+
+impl SnapshotFormatVersion {
+    const fn raw(self) -> u16 {
+        match self {
+            Self::V2 => 2,
+            Self::V3 => 3,
+        }
+    }
+
+    const fn magic(self) -> [u8; 8] {
+        match self {
+            Self::V2 => FORMAT_V2_MAGIC,
+            Self::V3 => FORMAT_V3_MAGIC,
+        }
+    }
+
+    fn from_header(magic: [u8; 8], version: u16) -> Result<Self, SnapshotIoError> {
+        let Some(prefix) = magic.get(..MAGIC_PREFIX.len()) else {
+            return Err(SnapshotIoError::Format {
+                reason: "snapshot magic is invalid",
+            });
+        };
+        if prefix != MAGIC_PREFIX {
+            return Err(SnapshotIoError::Format {
+                reason: "snapshot magic is invalid",
+            });
+        }
+        match (magic, version) {
+            (FORMAT_V2_MAGIC, 2) => Ok(Self::V2),
+            (FORMAT_V3_MAGIC, 3) => Ok(Self::V3),
+            _ => Err(SnapshotIoError::Format {
+                reason: "snapshot format version is unsupported",
+            }),
+        }
+    }
 }
 
 /// Relationship index profile encoded in runtime state and snapshot artifacts.
@@ -376,6 +423,7 @@ impl SectionKind {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SnapshotHeader {
+    pub(crate) format_version: SnapshotFormatVersion,
     pub(crate) schema_hash: SchemaHash,
     pub(crate) relationship_count: u32,
     pub(crate) symbol_count: u32,
@@ -386,6 +434,7 @@ pub(crate) struct SnapshotHeader {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SnapshotSection<'a> {
     bytes: &'a [u8],
+    flags: u16,
     row_count: u64,
 }
 
@@ -394,6 +443,12 @@ impl<'a> SnapshotSection<'a> {
     #[must_use]
     pub(crate) const fn bytes(self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// Returns the section-local encoding flags from the directory entry.
+    #[must_use]
+    pub(crate) const fn flags(self) -> u16 {
+        self.flags
     }
 
     /// Returns the section row count from the directory entry.
@@ -442,11 +497,7 @@ impl<'a> SnapshotReader<'a> {
             let raw_kind = cursor.read_u16()?;
             let kind = SectionKind::from_raw(raw_kind)?;
             let flags = cursor.read_u16()?;
-            if flags != 0 {
-                return Err(SnapshotIoError::Format {
-                    reason: "section flags are unsupported",
-                });
-            }
+            validate_section_flags(header.format_version, kind, flags)?;
             let offset = cursor.read_u64()?;
             let len = cursor.read_u64()?;
             let row_count = cursor.read_u64()?;
@@ -470,6 +521,7 @@ impl<'a> SnapshotReader<'a> {
             if let Some(section) = sections.get_mut(slot) {
                 *section = Some(SnapshotSection {
                     bytes: section_bytes,
+                    flags,
                     row_count,
                 });
             }
@@ -528,6 +580,17 @@ impl SnapshotSectionWriter {
         bytes: Vec<u8>,
         row_count: u64,
     ) -> Result<(), SnapshotIoError> {
+        self.add_section_with_flags(kind, 0, bytes, row_count)
+    }
+
+    /// Adds one snapshot section payload with section-local encoding flags.
+    pub(crate) fn add_section_with_flags(
+        &mut self,
+        kind: SectionKind,
+        flags: u16,
+        bytes: Vec<u8>,
+        row_count: u64,
+    ) -> Result<(), SnapshotIoError> {
         if self.sections.iter().any(|section| section.kind == kind) {
             return Err(SnapshotIoError::Format {
                 reason: "duplicate snapshot section",
@@ -535,6 +598,7 @@ impl SnapshotSectionWriter {
         }
         self.sections.push(SectionPayload {
             kind,
+            flags,
             bytes,
             row_count,
         });
@@ -560,6 +624,7 @@ impl SnapshotSectionWriter {
 #[derive(Debug)]
 struct SectionPayload {
     kind: SectionKind,
+    flags: u16,
     bytes: Vec<u8>,
     row_count: u64,
 }
@@ -567,6 +632,7 @@ struct SectionPayload {
 #[derive(Debug)]
 struct SectionDirectoryEntry {
     kind: SectionKind,
+    flags: u16,
     offset: u64,
     len: u64,
     row_count: u64,
@@ -958,6 +1024,7 @@ fn snapshot_sections_with_footer(
     let mut sections = writer.into_sorted_sections();
     sections.push(SectionPayload {
         kind: SectionKind::Footer,
+        flags: 0,
         bytes: vec![0; FOOTER_LEN],
         row_count: 1,
     });
@@ -979,6 +1046,7 @@ fn section_directory(
         let len = section.bytes.len();
         directory.push(SectionDirectoryEntry {
             kind: section.kind,
+            flags: section.flags,
             offset: checked_u64_from_usize(next_offset)?,
             len: checked_u64_from_usize(len)?,
             row_count: section.row_count,
@@ -1085,8 +1153,8 @@ fn write_header(
     file_len: u64,
     index_profile: IndexProfile,
 ) {
-    target.extend_from_slice(&MAGIC);
-    target.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    target.extend_from_slice(&CURRENT_FORMAT_VERSION.magic());
+    target.extend_from_slice(&CURRENT_FORMAT_VERSION.raw().to_le_bytes());
     target.extend_from_slice(&index_profile.flag_bits().to_le_bytes());
     target.extend_from_slice(&HEADER_LEN_U32.to_le_bytes());
     target.extend_from_slice(&REQUIRED_SECTION_COUNT_U32.to_le_bytes());
@@ -1099,7 +1167,7 @@ fn write_header(
 
 fn write_directory_entry(target: &mut Vec<u8>, entry: &SectionDirectoryEntry) {
     target.extend_from_slice(&entry.kind.raw().to_le_bytes());
-    target.extend_from_slice(&0_u16.to_le_bytes());
+    target.extend_from_slice(&entry.flags.to_le_bytes());
     target.extend_from_slice(&entry.offset.to_le_bytes());
     target.extend_from_slice(&entry.len.to_le_bytes());
     target.extend_from_slice(&entry.row_count.to_le_bytes());
@@ -1110,17 +1178,8 @@ fn parse_header(bytes: &[u8]) -> Result<SnapshotHeader, SnapshotIoError> {
         reason: "snapshot header is truncated",
     })?);
     let magic = cursor.read_array::<8>()?;
-    if magic != MAGIC {
-        return Err(SnapshotIoError::Format {
-            reason: "snapshot magic is invalid",
-        });
-    }
     let version = cursor.read_u16()?;
-    if version != FORMAT_VERSION {
-        return Err(SnapshotIoError::Format {
-            reason: "snapshot format version is unsupported",
-        });
-    }
+    let format_version = SnapshotFormatVersion::from_header(magic, version)?;
     let index_profile = IndexProfile::from_flag_bits(cursor.read_u16()?)?;
     let header_len = cursor.read_u32()?;
     if header_len != HEADER_LEN_U32 {
@@ -1152,6 +1211,7 @@ fn parse_header(bytes: &[u8]) -> Result<SnapshotHeader, SnapshotIoError> {
                 reason: "snapshot revision must be non-zero",
             })?;
     Ok(SnapshotHeader {
+        format_version,
         schema_hash,
         relationship_count,
         symbol_count,
@@ -1169,6 +1229,27 @@ fn parse_section_count(bytes: &[u8]) -> Result<usize, SnapshotIoError> {
     let mut array = [0_u8; 4];
     array.copy_from_slice(count_bytes);
     checked_usize_from_u32(u32::from_le_bytes(array))
+}
+
+fn validate_section_flags(
+    version: SnapshotFormatVersion,
+    kind: SectionKind,
+    flags: u16,
+) -> Result<(), SnapshotIoError> {
+    if flags == 0 {
+        return Ok(());
+    }
+    if version == SnapshotFormatVersion::V3
+        && matches!(
+            kind,
+            SectionKind::SymbolTable | SectionKind::RelationshipRows | SectionKind::SymbolLookup
+        )
+    {
+        return Ok(());
+    }
+    Err(SnapshotIoError::Format {
+        reason: "section flags are unsupported",
+    })
 }
 
 fn validate_required_sections(sections: &SnapshotSections<'_>) -> Result<(), SnapshotIoError> {

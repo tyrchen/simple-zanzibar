@@ -48,6 +48,12 @@ The current non-index lower bound is dominated by rows and symbols:
 | `symbol_hashes` | 8,160,104 |
 | `symbol_lookup` | 4,080,052 |
 
+Phase 13 implementation evidence is recorded in
+[71-performance-budgets-design.md § 3.11](./71-performance-budgets-design.md#311-m12-snapshot-file-size-measurements).
+The implemented v3 layout reduced `Full` raw bytes to 77,573,519 and `CheckOnly` raw bytes to
+59,078,231 on the same fixture. The non-index payload is now 49,454,337 bytes after width encoding
+for rows, the symbol table, and symbol lookup ids.
+
 ## 3. Goals
 
 | # | Goal | Measure |
@@ -137,6 +143,10 @@ row ids outside `1..=relationship_count`, non-monotonic lists, and byte ranges o
 section. The existing `PostingRange` width stays 12 bytes, so random key lookup still slices one
 range and decodes only that posting list.
 
+Implemented shape: v3 stores `overflow_start` and `overflow_len` as byte offsets into the
+delta-varint stream. The `posting_row_ids` section row count remains the logical decoded
+overflow-row-id count for benchmark reporting.
+
 ### 6.3 Singleton and Multi-Posting Split
 
 The high-cardinality `resource` and `resource_object` groups spend most bytes on `key + range`
@@ -197,6 +207,11 @@ This is a later phase because it touches row decode, validation, and all index r
 Symbol acceleration sections also deserve measurement: `symbol_hashes + symbol_lookup` cost
 12,240,156 bytes. Dropping them is not valid for normal public string-to-id lookup, but width
 compressing `symbol_lookup` from `u32` to `u24` can be evaluated once row/id width support exists.
+
+Implemented shape: the Phase 13 evidence justified width encoding in the same v3 pass.
+Relationship rows keep the same six logical fields but choose a section-local symbol-id width. The
+symbol table stores section-local widths for byte starts and byte lengths. `symbol_lookup` stores
+ids with the same width selector. v2 fixed-width decoding remains supported for old artifacts.
 
 ### 6.6 Profile Semantics
 
