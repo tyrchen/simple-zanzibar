@@ -296,6 +296,53 @@ The hard <= 200 ms target is intentionally scoped to trusted artifacts. A defaul
 continues to prove hostile-file row and index semantics at startup is not expected to hit <= 200 ms
 without changing the trust boundary.
 
+## 3.9 M11 Structural Optimization Measurements
+
+Measured on 2026-05-24 on the reference macOS machine after the Phase 12 low-risk read-path,
+snapshot-loader instrumentation, streaming raw writer, lazy uniqueness, segmented store
+publication, and index-profile work.
+
+| Operation | Dataset | Measurement | Target status |
+| --- | --- | ---: | --- |
+| `perf_optimization/check_prepared_1m` | 1M org rules | `[5.8971 us, 5.9513 us, 6.0009 us]` | no regression versus prior prepared-check baseline |
+| `perf_optimization/lookup_resources_streaming_1m` | 1M org rules | `[3.0446 ms, 3.1188 ms, 3.1883 ms]` | no regression versus prior 1M lookup budget |
+| `perf_optimization/lookup_subjects_streaming_1m` | 1M org rules | `[6.2956 us, 6.3200 us, 6.3451 us]` | no regression versus prior streaming lookup baseline |
+| `perf_optimization/write_single_touch_1m` | 1M org rules | `[130.26 us, 192.30 us, 227.23 us]` | > 100x p95 improvement versus the pre-segmentation 27.861 ms upper estimate |
+| `perf_optimization/write_mixed_batch_1m` | 1M org rules | `[982.19 us, 3.7111 ms, 7.7351 ms]` | > 3x p95 improvement versus the pre-segmentation 24.080 ms upper estimate |
+| `perf_optimization/read_heavy_light_write_1m` | 1M org rules | `[13.610 us, 14.471 us, 15.338 us]` | write amplification removed from mixed harness |
+| `perf_optimization/read_heavy_medium_write_unbatched_1m` | 1M org rules | `[13.699 us, 14.521 us, 15.171 us]` | write amplification removed from mixed harness |
+| `perf_optimization/read_heavy_medium_write_batched_1m` | 1M org rules | `[16.942 us, 17.353 us, 17.884 us]` | write amplification removed from mixed harness |
+| `perf_optimization/read_heavy_heavy_write_unbatched_1m` | 1M org rules | `[14.408 us, 15.769 us, 17.371 us]` | write amplification removed from mixed harness |
+| `perf_optimization/read_heavy_heavy_write_batched_1m` | 1M org rules | `[15.181 us, 16.530 us, 17.844 us]` | > 2x improvement versus the pre-segmentation 1.6742 ms upper estimate |
+| `perf_optimization/snapshot_load_phase_timers_1m` | 1M org rules | `[552.91 ms, 556.03 ms, 559.16 ms]` | phase evidence recorded; full-load <= 450 ms not yet met |
+| `snapshot_load_compact/1m` | 1M org rules | `[556.47 ms, 572.87 ms, 589.75 ms]` | still above Phase 12 <= 450 ms target |
+| `snapshot_load_peak_rss/1m` | 1M org rules | `[538.48 ms, 541.61 ms, 545.36 ms]` | timing filter recorded; RSS still requires external `/usr/bin/time` evidence |
+| `snapshot_load_trusted_fast/1m` | 1M org rules | `[135.38 ms, 136.84 ms, 138.34 ms]` | passes <= 200 ms trusted gate |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | 1M realworld rules | `[14.793 us, 14.966 us, 15.110 us]` | >= 10% improvement versus 17.852 us prior upper estimate |
+| `realworld_authorization/1m_rules/mixed_read_workload` | 1M realworld rules | `[57.221 us, 57.733 us, 58.164 us]` | still above the <= 55 us target |
+| `snapshot_file_size_check_only/1m` | 1M org rules | `78,188,326 bytes` vs `124,422,114 bytes` full | 37.2% reduction; passes >= 20% file-size target |
+
+One representative `snapshot_load_phase_timers_1m` run produced:
+
+| Phase | Duration |
+| --- | ---: |
+| `file_read` | `12.007417 ms` |
+| `decompression` | `41 ns` |
+| `header_and_sections` | `4.001 us` |
+| `checksum` | `53.784833 ms` |
+| `schema_parse_compile` | `42.375 us` |
+| `symbols` | `80.906917 ms` |
+| `rows` | `299.240541 ms` |
+| `indexes` | `106.616042 ms` |
+| `publish` | `2.042 us` |
+
+The evidence shows the read-side allocation fixes are effective, segmented publication removes the
+1M-base write-copy ceiling, trusted fast-load remains within budget, and check-only artifacts exceed
+the disk-size reduction target. The remaining full-load target is dominated by safe row validation
+plus symbol/index decoding. The remaining realistic mixed-read target needs another evaluator
+profile pass because the synthetic mixed read/write harness now spends negligible time cloning the
+relationship store.
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.

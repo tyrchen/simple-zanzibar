@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    slice,
     sync::Arc,
 };
 
@@ -291,12 +292,14 @@ pub struct SchemaResolver {
     definitions: Arc<[NamespaceDefinition]>,
     namespace_indexes: HashMap<ObjectType, usize>,
     relation_indexes: HashMap<ObjectType, HashMap<RelationName, usize>>,
+    sorted_relation_indexes: HashMap<ObjectType, Arc<[usize]>>,
 }
 
 impl SchemaResolver {
     fn new(definitions: Arc<[NamespaceDefinition]>) -> Result<Self, SchemaError> {
         let mut namespace_indexes = HashMap::with_capacity(definitions.len());
         let mut relation_indexes = HashMap::with_capacity(definitions.len());
+        let mut sorted_relation_indexes = HashMap::with_capacity(definitions.len());
 
         for (namespace_index, namespace) in definitions.iter().enumerate() {
             let previous = namespace_indexes.insert(namespace.name.clone(), namespace_index);
@@ -316,6 +319,23 @@ impl SchemaResolver {
                     });
                 }
             }
+            let mut sorted_indexes = (0..namespace.relations.len()).collect::<Vec<_>>();
+            sorted_indexes.sort_by(|left, right| {
+                namespace
+                    .relations
+                    .get(*left)
+                    .map(RelationDefinition::name)
+                    .cmp(
+                        &namespace
+                            .relations
+                            .get(*right)
+                            .map(RelationDefinition::name),
+                    )
+            });
+            sorted_relation_indexes.insert(
+                namespace.name.clone(),
+                Arc::from(sorted_indexes.into_boxed_slice()),
+            );
             relation_indexes.insert(namespace.name.clone(), relations);
         }
 
@@ -323,6 +343,7 @@ impl SchemaResolver {
             definitions,
             namespace_indexes,
             relation_indexes,
+            sorted_relation_indexes,
         })
     }
 
@@ -377,10 +398,47 @@ impl SchemaResolver {
             })
     }
 
+    pub(crate) fn sorted_relations(
+        &self,
+        object_type: &ObjectType,
+    ) -> Result<SortedRelations<'_>, SchemaError> {
+        let namespace = self.namespace(object_type)?;
+        let indexes = self
+            .sorted_relation_indexes
+            .get(object_type)
+            .ok_or_else(|| SchemaError::NamespaceNotFound {
+                namespace: object_type.to_string(),
+            })?;
+        Ok(SortedRelations {
+            namespace,
+            indexes: indexes.iter(),
+        })
+    }
+
     fn relation_exists_anywhere(&self, relation: &RelationName) -> bool {
         self.relation_indexes
             .values()
             .any(|relations| relations.contains_key(relation))
+    }
+}
+
+/// Iterator over relation definitions in stable name order.
+#[derive(Debug)]
+pub(crate) struct SortedRelations<'a> {
+    namespace: &'a NamespaceDefinition,
+    indexes: slice::Iter<'a, usize>,
+}
+
+impl<'a> Iterator for SortedRelations<'a> {
+    type Item = &'a RelationDefinition;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for index in self.indexes.by_ref() {
+            if let Some(relation) = self.namespace.relations().get(*index) {
+                return Some(relation);
+            }
+        }
+        None
     }
 }
 

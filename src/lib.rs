@@ -91,8 +91,8 @@ pub use crate::{
     api::{EngineError, TenantId, ZanzibarEngine, ZanzibarEngineBuilder, ZanzibarTenantShards},
     policy::{PolicyIoError, PolicyText, PolicyTextFile},
     snapshot::{
-        SnapshotCompression, SnapshotIntegrityMode, SnapshotIoError, SnapshotLoadOptions,
-        SnapshotLoadProfile, SnapshotSaveOptions, SnapshotValidationMode,
+        IndexProfile, SnapshotCompression, SnapshotIntegrityMode, SnapshotIoError,
+        SnapshotLoadOptions, SnapshotLoadProfile, SnapshotSaveOptions, SnapshotValidationMode,
     },
 };
 use crate::{
@@ -101,7 +101,7 @@ use crate::{
     model::{NamespaceConfig, Relation},
     relationship::{
         IndexedRelationshipStore, Precondition, RelationshipFilter, RelationshipMutation,
-        SubjectFilter,
+        RelationshipStoreView, SubjectFilter,
     },
     revision::{
         ConsistencyError, ConsistencyToken, DatastoreId, PublishedSnapshot, Revision, SchemaHash,
@@ -114,7 +114,7 @@ use crate::{
 pub(crate) struct WriterState {
     configs: HashMap<String, NamespaceConfig>,
     schema: Option<CompiledSchema>,
-    relationships: Arc<IndexedRelationshipStore>,
+    relationships: Arc<RelationshipStoreView>,
     current_snapshot: ArcSwapOption<PublishedSnapshot>,
     snapshot_history: VecDeque<Arc<PublishedSnapshot>>,
     datastore_id: DatastoreId,
@@ -159,7 +159,7 @@ impl WriterState {
         WriterState {
             configs: HashMap::new(),
             schema: None,
-            relationships: Arc::new(IndexedRelationshipStore::default()),
+            relationships: Arc::new(RelationshipStoreView::default()),
             current_snapshot: ArcSwapOption::empty(),
             snapshot_history: VecDeque::new(),
             datastore_id: DatastoreId::new_unique(),
@@ -341,9 +341,10 @@ impl WriterState {
             validate_precondition_filter(&schema, precondition)?;
         }
 
-        let mut candidate = (*self.relationships).clone();
-        candidate.apply_mutations(mutations, preconditions)?;
-        self.publish_snapshot(self.configs.clone(), schema, Arc::new(candidate))
+        let next_relationships = self
+            .relationships
+            .apply_mutations(mutations, preconditions)?;
+        self.publish_snapshot(self.configs.clone(), schema, next_relationships)
     }
 
     /// Saves the latest published snapshot to a versioned `.szsnap` artifact.
@@ -400,30 +401,32 @@ impl WriterState {
     fn relationship_store_for_schema(
         &self,
         schema: &CompiledSchema,
-    ) -> Result<Arc<IndexedRelationshipStore>, ZanzibarError> {
+    ) -> Result<Arc<RelationshipStoreView>, ZanzibarError> {
         if self.schema.is_some() {
             return self.revalidate_relationship_store(schema);
         }
-        Ok(Arc::new(IndexedRelationshipStore::default()))
+        Ok(Arc::new(RelationshipStoreView::default()))
     }
 
     fn revalidate_relationship_store(
         &self,
         schema: &CompiledSchema,
-    ) -> Result<Arc<IndexedRelationshipStore>, ZanzibarError> {
+    ) -> Result<Arc<RelationshipStoreView>, ZanzibarError> {
         let mut relationships = IndexedRelationshipStore::default();
         for relationship in self.relationships.rows() {
             schema.validate_relationship(&relationship)?;
             relationships.apply_mutations([RelationshipMutation::Touch(relationship)], [])?;
         }
-        Ok(Arc::new(relationships))
+        Ok(Arc::new(RelationshipStoreView::from_checkpoint(Arc::new(
+            relationships,
+        ))))
     }
 
     fn publish_snapshot(
         &mut self,
         configs: HashMap<String, NamespaceConfig>,
         schema: CompiledSchema,
-        relationships: Arc<IndexedRelationshipStore>,
+        relationships: Arc<RelationshipStoreView>,
     ) -> Result<ConsistencyToken, ZanzibarError> {
         let revision = self.next_revision()?;
         let schema_hash = SchemaHash::for_schema(&schema);

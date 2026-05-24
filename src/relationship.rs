@@ -8,6 +8,8 @@ use std::{
     hash::{Hash, Hasher},
     num::{NonZeroU32, NonZeroUsize},
     str,
+    sync::Arc,
+    time::Instant,
 };
 
 use thiserror::Error;
@@ -18,11 +20,12 @@ use crate::{
         SubjectRef, SubjectType,
     },
     error::ZanzibarError,
-    model::User,
+    model::{Object, Relation, User},
     snapshot::{
-        BinaryCursor, SectionKind, SnapshotIoError, SnapshotLoadProfile, SnapshotReader,
-        SnapshotSectionWriter, SnapshotValidationMode, checked_add_usize, checked_mul_usize,
-        checked_u32_from_usize, checked_usize_from_u32, checked_usize_from_u64, insert_unique,
+        BinaryCursor, IndexProfile, SectionKind, SnapshotIoError, SnapshotLoadPhaseTimings,
+        SnapshotLoadProfile, SnapshotReader, SnapshotSectionWriter, SnapshotValidationMode,
+        checked_add_usize, checked_mul_usize, checked_u32_from_usize, checked_usize_from_u32,
+        checked_usize_from_u64, insert_unique,
     },
 };
 
@@ -30,6 +33,8 @@ const DEFAULT_QUERY_LIMIT: usize = 1_000;
 const MAX_MUTATIONS_PER_BATCH: usize = 10_000;
 const MAX_PRECONDITIONS_PER_BATCH: usize = 100;
 const COMPACT_DEAD_ROWS: usize = 100_000;
+const STORE_VIEW_MAX_DELTA_MUTATIONS: usize = 100_000;
+const STORE_VIEW_MAX_DELTA_TOMBSTONES: usize = 100_000;
 const DISK_SYMBOL_LEN: usize = 8;
 const DISK_SYMBOL_HASH_LEN: usize = 8;
 const DISK_SYMBOL_LOOKUP_LEN: usize = 4;
@@ -118,6 +123,17 @@ impl From<DomainError> for StoreError {
             message: value.to_string(),
         }
     }
+}
+
+/// Compact evaluator recursion key built from interned store identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StoreCheckKey {
+    object_type: NonZeroU32,
+    object_id: NonZeroU32,
+    relation: NonZeroU32,
+    subject_type: NonZeroU32,
+    subject_id: NonZeroU32,
+    subject_relation: Option<NonZeroU32>,
 }
 
 /// Maximum number of query results.
@@ -410,12 +426,12 @@ pub trait RelationshipReader {
 /// Indexed immutable-row in-memory relationship store.
 #[derive(Debug)]
 pub struct IndexedRelationshipStore {
+    index_profile: IndexProfile,
     interner: IdentifierInterner,
     rows: Vec<RelationshipRow>,
     live_rows: LiveRows,
     dead_row_count: usize,
-    uniqueness: RelationshipIdentityIndex,
-    uniqueness_ready: bool,
+    uniqueness: UniquenessState,
     by_resource: PostingIndex<ResourceIndexKey>,
     by_resource_object: PostingIndex<ResourceObjectIndexKey>,
     by_resource_type_relation: PostingIndex<ResourceTypeRelationIndexKey>,
@@ -428,12 +444,12 @@ pub struct IndexedRelationshipStore {
 impl Default for IndexedRelationshipStore {
     fn default() -> Self {
         Self {
+            index_profile: IndexProfile::Full,
             interner: IdentifierInterner::default(),
             rows: Vec::new(),
             live_rows: LiveRows::default(),
             dead_row_count: 0,
-            uniqueness: RelationshipIdentityIndex::default(),
-            uniqueness_ready: true,
+            uniqueness: UniquenessState::Ready(RelationshipIdentityIndex::default()),
             by_resource: PostingIndex::default(),
             by_resource_object: PostingIndex::default(),
             by_resource_type_relation: PostingIndex::default(),
@@ -448,12 +464,12 @@ impl Default for IndexedRelationshipStore {
 impl Clone for IndexedRelationshipStore {
     fn clone(&self) -> Self {
         Self {
+            index_profile: self.index_profile,
             interner: self.interner.clone(),
             rows: self.rows.clone(),
             live_rows: self.live_rows.clone(),
             dead_row_count: self.dead_row_count,
             uniqueness: self.uniqueness.clone(),
-            uniqueness_ready: self.uniqueness_ready,
             by_resource: self.by_resource.clone(),
             by_resource_object: self.by_resource_object.clone(),
             by_resource_type_relation: self.by_resource_type_relation.clone(),
@@ -463,6 +479,400 @@ impl Clone for IndexedRelationshipStore {
             by_subject_type: self.by_subject_type.clone(),
         }
     }
+}
+
+/// Immutable relationship view published with each exact revision.
+///
+/// A view is a full indexed checkpoint plus an optional bounded delta overlay. Write publication
+/// clones and updates the overlay instead of cloning the full checkpoint, while readers continue to
+/// see an immutable `Arc` for the exact revision they requested.
+#[derive(Debug, Clone)]
+pub struct RelationshipStoreView {
+    checkpoint: Arc<IndexedRelationshipStore>,
+    delta: Option<StoreDelta>,
+}
+
+impl Default for RelationshipStoreView {
+    fn default() -> Self {
+        Self::from_checkpoint(Arc::new(IndexedRelationshipStore::default()))
+    }
+}
+
+impl RelationshipStoreView {
+    /// Creates a view from one fully indexed checkpoint and no delta overlay.
+    #[must_use]
+    pub fn from_checkpoint(checkpoint: Arc<IndexedRelationshipStore>) -> Self {
+        Self {
+            checkpoint,
+            delta: None,
+        }
+    }
+
+    pub(crate) fn apply_mutations(
+        &self,
+        mutations: impl IntoIterator<Item = RelationshipMutation>,
+        preconditions: impl IntoIterator<Item = Precondition>,
+    ) -> Result<Arc<Self>, StoreError> {
+        let preconditions = preconditions.into_iter().collect::<Vec<_>>();
+        if preconditions.len() > MAX_PRECONDITIONS_PER_BATCH {
+            return Err(StoreError::PreconditionBatchTooLarge {
+                limit: MAX_PRECONDITIONS_PER_BATCH,
+                actual: preconditions.len(),
+            });
+        }
+        for precondition in &preconditions {
+            self.check_precondition(precondition)?;
+        }
+
+        let mutations = mutations.into_iter().collect::<Vec<_>>();
+        if mutations.len() > MAX_MUTATIONS_PER_BATCH {
+            return Err(StoreError::MutationBatchTooLarge {
+                limit: MAX_MUTATIONS_PER_BATCH,
+                actual: mutations.len(),
+            });
+        }
+        let mut seen = HashSet::with_capacity(mutations.len());
+        for mutation in &mutations {
+            let relationship = mutation.relationship();
+            if !seen.insert(relationship.clone()) {
+                return Err(StoreError::DuplicateMutation {
+                    relationship: Box::new(relationship.clone()),
+                });
+            }
+        }
+        if mutations.is_empty() {
+            return Ok(Arc::new(self.clone()));
+        }
+
+        let mut base = self.clone();
+        base.ensure_checkpoint_mutation_ready()?;
+
+        let mut inserted = base
+            .delta
+            .as_ref()
+            .map_or_else(IndexedRelationshipStore::default, |delta| {
+                (*delta.inserted).clone()
+            });
+        let mut deleted = base
+            .delta
+            .as_ref()
+            .map_or_else(HashSet::new, |delta| (*delta.deleted).clone());
+
+        for mutation in mutations.iter().cloned() {
+            base.apply_delta_mutation(&mut inserted, &mut deleted, mutation)?;
+        }
+
+        let previous_mutations = base
+            .delta
+            .as_ref()
+            .map_or(0, |delta| delta.mutation_count.get());
+        let mutation_count = previous_mutations
+            .checked_add(mutations.len())
+            .and_then(NonZeroUsize::new)
+            .ok_or(StoreError::CapacityExceeded {
+                component: "store view delta mutations",
+            })?;
+        let candidate = Self {
+            checkpoint: Arc::clone(&base.checkpoint),
+            delta: Some(StoreDelta {
+                inserted: Arc::new(inserted),
+                deleted: Arc::new(deleted),
+                mutation_count,
+            }),
+        };
+        if candidate.should_checkpoint() {
+            return Ok(Arc::new(candidate.checkpointed()?));
+        }
+        Ok(Arc::new(candidate))
+    }
+
+    /// Returns true when at least one resource-side relationship matches.
+    #[must_use]
+    pub fn any_resource_match(&self, filter: &RelationshipFilter) -> bool {
+        self.query_compact_relationships(filter).next().is_some()
+    }
+
+    /// Returns all live relationships in deterministic order.
+    #[must_use]
+    pub fn rows(&self) -> Vec<Relationship> {
+        let Some(delta) = &self.delta else {
+            return self.checkpoint.rows();
+        };
+        let mut relationships = self
+            .checkpoint
+            .rows()
+            .into_iter()
+            .filter(|relationship| !delta.deleted.contains(relationship))
+            .collect::<Vec<_>>();
+        relationships.extend(delta.inserted.rows());
+        relationships
+    }
+
+    pub(crate) fn encode_snapshot_sections(
+        &self,
+        writer: &mut SnapshotSectionWriter,
+        index_profile: IndexProfile,
+    ) -> Result<(), SnapshotIoError> {
+        self.canonical_store()?
+            .encode_snapshot_sections(writer, index_profile)
+    }
+
+    pub(crate) fn query_compact_relationships(
+        &self,
+        filter: &RelationshipFilter,
+    ) -> StoreViewCompactIter<'_> {
+        StoreViewCompactIter {
+            inserted: self
+                .delta
+                .as_ref()
+                .map(|delta| delta.inserted.query_compact_relationships(filter)),
+            checkpoint: self.checkpoint.query_compact_relationships(filter),
+            deleted: self.delta.as_ref().map(|delta| delta.deleted.as_ref()),
+            phase: StoreViewIterPhase::Inserted,
+        }
+    }
+
+    pub(crate) fn reverse_query_compact_relationships(
+        &self,
+        filter: &SubjectFilter,
+    ) -> StoreViewCompactIter<'_> {
+        StoreViewCompactIter {
+            inserted: self
+                .delta
+                .as_ref()
+                .map(|delta| delta.inserted.reverse_query_compact_relationships(filter)),
+            checkpoint: self.checkpoint.reverse_query_compact_relationships(filter),
+            deleted: self.delta.as_ref().map(|delta| delta.deleted.as_ref()),
+            phase: StoreViewIterPhase::Inserted,
+        }
+    }
+
+    pub(crate) fn index_profile(&self) -> IndexProfile {
+        self.checkpoint.index_profile()
+    }
+
+    pub(crate) fn store_check_key(
+        &self,
+        object: &Object,
+        relation: &Relation,
+        user: &User,
+    ) -> Option<StoreCheckKey> {
+        if self.delta.is_some() {
+            return None;
+        }
+        self.checkpoint.store_check_key(object, relation, user)
+    }
+
+    pub(crate) fn store_check_key_for_relation_name(
+        &self,
+        object: &Object,
+        relation: &RelationName,
+        user: &User,
+    ) -> Option<StoreCheckKey> {
+        if self.delta.is_some() {
+            return None;
+        }
+        self.checkpoint
+            .store_check_key_for_relation_name(object, relation, user)
+    }
+
+    fn check_precondition(&self, precondition: &Precondition) -> Result<(), StoreError> {
+        match precondition {
+            Precondition::MustMatch(filter) if !self.any_resource_match(filter) => {
+                Err(StoreError::PreconditionFailed {
+                    precondition: Box::new(precondition.clone()),
+                })
+            }
+            Precondition::MustNotMatch(filter) if self.any_resource_match(filter) => {
+                Err(StoreError::PreconditionFailed {
+                    precondition: Box::new(precondition.clone()),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn ensure_checkpoint_mutation_ready(&mut self) -> Result<(), StoreError> {
+        if self.checkpoint.has_ready_uniqueness() {
+            return Ok(());
+        }
+        let mut checkpoint = (*self.checkpoint).clone();
+        checkpoint.ensure_uniqueness_index()?;
+        self.checkpoint = Arc::new(checkpoint);
+        Ok(())
+    }
+
+    fn apply_delta_mutation(
+        &self,
+        inserted: &mut IndexedRelationshipStore,
+        deleted: &mut HashSet<Relationship>,
+        mutation: RelationshipMutation,
+    ) -> Result<(), StoreError> {
+        match mutation {
+            RelationshipMutation::Create(relationship) => {
+                self.create_delta_relationship(inserted, deleted, relationship)
+            }
+            RelationshipMutation::Touch(relationship) => {
+                self.touch_delta_relationship(inserted, deleted, &relationship)
+            }
+            RelationshipMutation::Delete(relationship) => {
+                self.delete_delta_relationship(inserted, deleted, relationship)
+            }
+        }
+    }
+
+    fn create_delta_relationship(
+        &self,
+        inserted: &mut IndexedRelationshipStore,
+        deleted: &mut HashSet<Relationship>,
+        relationship: Relationship,
+    ) -> Result<(), StoreError> {
+        let location = self.relationship_location(inserted, deleted, &relationship);
+        match location {
+            RelationshipLocation::Inserted | RelationshipLocation::CheckpointLive => {
+                Err(StoreError::RelationshipAlreadyExists {
+                    relationship: Box::new(relationship),
+                })
+            }
+            RelationshipLocation::CheckpointDeleted => {
+                deleted.remove(&relationship);
+                Ok(())
+            }
+            RelationshipLocation::Absent => inserted.insert(&relationship),
+        }
+    }
+
+    fn touch_delta_relationship(
+        &self,
+        inserted: &mut IndexedRelationshipStore,
+        deleted: &mut HashSet<Relationship>,
+        relationship: &Relationship,
+    ) -> Result<(), StoreError> {
+        match self.relationship_location(inserted, deleted, relationship) {
+            RelationshipLocation::Inserted | RelationshipLocation::CheckpointLive => Ok(()),
+            RelationshipLocation::CheckpointDeleted => {
+                deleted.remove(relationship);
+                Ok(())
+            }
+            RelationshipLocation::Absent => inserted.insert(relationship),
+        }
+    }
+
+    fn delete_delta_relationship(
+        &self,
+        inserted: &mut IndexedRelationshipStore,
+        deleted: &mut HashSet<Relationship>,
+        relationship: Relationship,
+    ) -> Result<(), StoreError> {
+        match self.relationship_location(inserted, deleted, &relationship) {
+            RelationshipLocation::Inserted => inserted.delete(&relationship),
+            RelationshipLocation::CheckpointLive => {
+                deleted.insert(relationship);
+                Ok(())
+            }
+            RelationshipLocation::CheckpointDeleted | RelationshipLocation::Absent => {
+                Err(StoreError::RelationshipNotFound {
+                    relationship: Box::new(relationship),
+                })
+            }
+        }
+    }
+
+    fn relationship_location(
+        &self,
+        inserted: &IndexedRelationshipStore,
+        deleted: &HashSet<Relationship>,
+        relationship: &Relationship,
+    ) -> RelationshipLocation {
+        if inserted.contains_relationship(relationship) {
+            return RelationshipLocation::Inserted;
+        }
+        if self.checkpoint.contains_relationship(relationship) {
+            if deleted.contains(relationship) {
+                RelationshipLocation::CheckpointDeleted
+            } else {
+                RelationshipLocation::CheckpointLive
+            }
+        } else {
+            RelationshipLocation::Absent
+        }
+    }
+
+    fn should_checkpoint(&self) -> bool {
+        self.delta.as_ref().is_some_and(|delta| {
+            delta.mutation_count.get() >= STORE_VIEW_MAX_DELTA_MUTATIONS
+                || delta.deleted.len() >= STORE_VIEW_MAX_DELTA_TOMBSTONES
+        })
+    }
+
+    fn checkpointed(&self) -> Result<Self, StoreError> {
+        Ok(Self::from_checkpoint(Arc::new(self.canonical_store()?)))
+    }
+
+    fn canonical_store(&self) -> Result<IndexedRelationshipStore, StoreError> {
+        let mut store = IndexedRelationshipStore::default();
+        for relationship in self.rows() {
+            store.insert(&relationship)?;
+        }
+        Ok(store)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StoreDelta {
+    inserted: Arc<IndexedRelationshipStore>,
+    deleted: Arc<HashSet<Relationship>>,
+    mutation_count: NonZeroUsize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelationshipLocation {
+    Inserted,
+    CheckpointLive,
+    CheckpointDeleted,
+    Absent,
+}
+
+#[derive(Debug)]
+pub(crate) struct StoreViewCompactIter<'a> {
+    inserted: Option<CompactRelationshipIter<'a>>,
+    checkpoint: CompactRelationshipIter<'a>,
+    deleted: Option<&'a HashSet<Relationship>>,
+    phase: StoreViewIterPhase,
+}
+
+impl<'a> Iterator for StoreViewCompactIter<'a> {
+    type Item = RelationshipRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.phase {
+                StoreViewIterPhase::Inserted => {
+                    if let Some(inserted) = &mut self.inserted
+                        && let Some(relationship) = inserted.next()
+                    {
+                        return Some(relationship);
+                    }
+                    self.phase = StoreViewIterPhase::Checkpoint;
+                }
+                StoreViewIterPhase::Checkpoint => {
+                    let relationship = self.checkpoint.next()?;
+                    if self
+                        .deleted
+                        .is_none_or(|deleted| !relationship.is_deleted_by(deleted))
+                    {
+                        return Some(relationship);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreViewIterPhase {
+    Inserted,
+    Checkpoint,
 }
 
 impl IndexedRelationshipStore {
@@ -616,9 +1026,15 @@ impl IndexedRelationshipStore {
     }
 
     fn ensure_uniqueness_index(&mut self) -> Result<(), StoreError> {
-        if self.uniqueness_ready {
-            return Ok(());
-        }
+        let reason = match self.uniqueness {
+            UniquenessState::Ready(_) => return Ok(()),
+            UniquenessState::KnownUniqueButNotIndexed => {
+                "full snapshot duplicate detector was dropped after validation"
+            }
+            UniquenessState::UntrustedNotIndexed => {
+                "trusted snapshot contains duplicate relationship rows"
+            }
+        };
         let mut uniqueness = RelationshipIdentityIndex::default();
         for row in self
             .rows
@@ -626,14 +1042,11 @@ impl IndexedRelationshipStore {
             .filter(|row| self.live_rows.contains(row.row_id))
         {
             if uniqueness.find(&self.rows, row).is_some() {
-                return Err(StoreError::InternalInvariant {
-                    reason: "trusted snapshot contains duplicate relationship rows",
-                });
+                return Err(StoreError::InternalInvariant { reason });
             }
             uniqueness.insert(&self.rows, row.row_id, row);
         }
-        self.uniqueness = uniqueness;
-        self.uniqueness_ready = true;
+        self.uniqueness = UniquenessState::Ready(uniqueness);
         Ok(())
     }
 
@@ -656,6 +1069,7 @@ impl IndexedRelationshipStore {
     pub(crate) fn encode_snapshot_sections(
         &self,
         writer: &mut SnapshotSectionWriter,
+        index_profile: IndexProfile,
     ) -> Result<(), SnapshotIoError> {
         let mut symbol_table = Vec::with_capacity(
             self.interner
@@ -717,7 +1131,7 @@ impl IndexedRelationshipStore {
             })?,
         )?;
 
-        let indexes = EncodedSnapshotIndexes::from_rows(&disk_rows)?;
+        let indexes = EncodedSnapshotIndexes::from_rows(&disk_rows, index_profile)?;
         writer.add_section(
             SectionKind::IndexDirectory,
             indexes.directory,
@@ -742,17 +1156,60 @@ impl IndexedRelationshipStore {
         profile: SnapshotLoadProfile,
         validation: SnapshotValidationMode,
     ) -> Result<Self, SnapshotIoError> {
+        Self::decode_snapshot_sections_inner(reader, profile, validation, None)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn decode_snapshot_sections_with_timings(
+        reader: &SnapshotReader<'_>,
+        profile: SnapshotLoadProfile,
+        validation: SnapshotValidationMode,
+        timings: &mut SnapshotLoadPhaseTimings,
+    ) -> Result<Self, SnapshotIoError> {
+        Self::decode_snapshot_sections_inner(reader, profile, validation, Some(timings))
+    }
+
+    fn decode_snapshot_sections_inner(
+        reader: &SnapshotReader<'_>,
+        profile: SnapshotLoadProfile,
+        validation: SnapshotValidationMode,
+        mut timings: Option<&mut SnapshotLoadPhaseTimings>,
+    ) -> Result<Self, SnapshotIoError> {
+        let phase_start = Instant::now();
         let interner = IdentifierInterner::decode_snapshot_sections(reader, validation)?;
+        record_relationship_decode_phase(
+            &mut timings,
+            |timings, elapsed| {
+                timings.symbols = elapsed;
+            },
+            phase_start,
+        );
+        let phase_start = Instant::now();
         let decoded_rows = decode_snapshot_rows(reader, &interner, validation)?;
+        record_relationship_decode_phase(
+            &mut timings,
+            |timings, elapsed| {
+                timings.rows = elapsed;
+            },
+            phase_start,
+        );
+        let phase_start = Instant::now();
         let decoded_indexes =
             DecodedSnapshotIndexes::decode(reader, &decoded_rows.rows, profile, validation)?;
+        record_relationship_decode_phase(
+            &mut timings,
+            |timings, elapsed| {
+                timings.indexes = elapsed;
+            },
+            phase_start,
+        );
         Ok(Self {
             interner,
+            index_profile: reader.header().index_profile,
             rows: decoded_rows.rows,
             live_rows: decoded_rows.live_rows,
             dead_row_count: 0,
             uniqueness: decoded_rows.uniqueness,
-            uniqueness_ready: decoded_rows.uniqueness_ready,
             by_resource: decoded_indexes.resource,
             by_resource_object: decoded_indexes.resource_object,
             by_resource_type_relation: decoded_indexes.resource_type_relation,
@@ -785,6 +1242,7 @@ impl IndexedRelationshipStore {
         });
         CompactRelationshipIter {
             store: self,
+            all_rows_live: self.live_rows.is_all_live(),
             candidates,
             matcher: matcher.map(CompactRelationshipMatcher::Resource),
         }
@@ -800,8 +1258,71 @@ impl IndexedRelationshipStore {
         });
         CompactRelationshipIter {
             store: self,
+            all_rows_live: self.live_rows.is_all_live(),
             candidates,
             matcher: matcher.map(CompactRelationshipMatcher::Subject),
+        }
+    }
+
+    pub(crate) const fn index_profile(&self) -> IndexProfile {
+        self.index_profile
+    }
+
+    pub(crate) fn store_check_key(
+        &self,
+        object: &Object,
+        relation: &Relation,
+        user: &User,
+    ) -> Option<StoreCheckKey> {
+        self.store_check_key_for_relation(
+            object,
+            self.interner.lookup(relation.0.as_str()).map(RelationId)?,
+            user,
+        )
+    }
+
+    pub(crate) fn store_check_key_for_relation_name(
+        &self,
+        object: &Object,
+        relation: &RelationName,
+        user: &User,
+    ) -> Option<StoreCheckKey> {
+        self.store_check_key_for_relation(
+            object,
+            self.interner.lookup(relation.as_str()).map(RelationId)?,
+            user,
+        )
+    }
+
+    fn store_check_key_for_relation(
+        &self,
+        object: &Object,
+        relation: RelationId,
+        user: &User,
+    ) -> Option<StoreCheckKey> {
+        let subject = self.store_subject_key(user)?;
+        Some(StoreCheckKey {
+            object_type: self.interner.lookup(object.namespace.as_str())?.0,
+            object_id: self.interner.lookup(object.id.as_str())?.0,
+            relation: relation.0.0,
+            subject_type: subject.subject_type.0.0,
+            subject_id: subject.subject_id.0.0,
+            subject_relation: subject.relation.map(|relation| relation.0.0),
+        })
+    }
+
+    fn store_subject_key(&self, user: &User) -> Option<SubjectIndexKey> {
+        match user {
+            User::UserId(id) => Some(SubjectIndexKey {
+                subject_type: SubjectTypeId(self.interner.lookup("user")?),
+                subject_id: SubjectIdId(self.interner.lookup(id.as_str())?),
+                relation: None,
+            }),
+            User::Userset(object, relation) => Some(SubjectIndexKey {
+                subject_type: SubjectTypeId(self.interner.lookup(object.namespace.as_str())?),
+                subject_id: SubjectIdId(self.interner.lookup(object.id.as_str())?),
+                relation: Some(RelationId(self.interner.lookup(relation.0.as_str())?)),
+            }),
         }
     }
 
@@ -847,7 +1368,8 @@ impl IndexedRelationshipStore {
     fn insert(&mut self, relationship: &Relationship) -> Result<(), StoreError> {
         let row_id = RowId::from_len(self.rows.len())?;
         let row = RelationshipRow::from_relationship(row_id, relationship, &mut self.interner)?;
-        self.uniqueness.insert(&self.rows, row_id, &row);
+        let uniqueness = Self::ready_uniqueness_mut(&mut self.uniqueness)?;
+        uniqueness.insert(&self.rows, row_id, &row);
         self.index_relationship(row_id, &row);
         self.rows.push(row);
         self.live_rows.insert(row_id);
@@ -860,7 +1382,8 @@ impl IndexedRelationshipStore {
                 relationship: Box::new(relationship.clone()),
             }
         })?;
-        let row_id = self.uniqueness.remove(&self.rows, &row).ok_or_else(|| {
+        let uniqueness = Self::ready_uniqueness_mut(&mut self.uniqueness)?;
+        let row_id = uniqueness.remove(&self.rows, &row).ok_or_else(|| {
             StoreError::RelationshipNotFound {
                 relationship: Box::new(relationship.clone()),
             }
@@ -871,9 +1394,12 @@ impl IndexedRelationshipStore {
         Ok(())
     }
 
-    fn contains_relationship(&self, relationship: &Relationship) -> bool {
+    pub(crate) fn contains_relationship(&self, relationship: &Relationship) -> bool {
         self.lookup_relationship_row(relationship)
-            .is_some_and(|row| self.uniqueness.find(&self.rows, &row).is_some())
+            .is_some_and(|row| {
+                self.uniqueness_ref()
+                    .is_some_and(|index| index.find(&self.rows, &row).is_some())
+            })
     }
 
     fn lookup_relationship_row(&self, relationship: &Relationship) -> Option<RelationshipRow> {
@@ -1072,7 +1598,8 @@ impl IndexedRelationshipStore {
                 .transpose()?
                 .map(RelationId),
         };
-        self.uniqueness.insert(&self.rows, row_id, &compacted);
+        let uniqueness = Self::ready_uniqueness_mut(&mut self.uniqueness)?;
+        uniqueness.insert(&self.rows, row_id, &compacted);
         self.index_relationship(row_id, &compacted);
         self.rows.push(compacted);
         self.live_rows.insert(row_id);
@@ -1081,6 +1608,32 @@ impl IndexedRelationshipStore {
 
     fn resolve(&self, id: SymbolId) -> &str {
         self.interner.resolve(id).unwrap_or("<invalid>")
+    }
+
+    fn uniqueness_ref(&self) -> Option<&RelationshipIdentityIndex> {
+        match &self.uniqueness {
+            UniquenessState::Ready(index) => Some(index),
+            UniquenessState::KnownUniqueButNotIndexed | UniquenessState::UntrustedNotIndexed => {
+                None
+            }
+        }
+    }
+
+    fn has_ready_uniqueness(&self) -> bool {
+        matches!(self.uniqueness, UniquenessState::Ready(_))
+    }
+
+    fn ready_uniqueness_mut(
+        uniqueness: &mut UniquenessState,
+    ) -> Result<&mut RelationshipIdentityIndex, StoreError> {
+        match uniqueness {
+            UniquenessState::Ready(index) => Ok(index),
+            UniquenessState::KnownUniqueButNotIndexed | UniquenessState::UntrustedNotIndexed => {
+                Err(StoreError::InternalInvariant {
+                    reason: "relationship uniqueness index was not initialized before mutation",
+                })
+            }
+        }
     }
 }
 
@@ -1109,6 +1662,7 @@ impl RelationshipReader for MaterializedRelationshipReader<'_> {
             rows: &self.rows,
             compact_rows: &self.store.rows,
             live_rows: &self.store.live_rows,
+            all_rows_live: self.store.live_rows.is_all_live(),
             candidates,
             matcher: matcher.map(RelationshipMatcher::Resource),
         })
@@ -1126,6 +1680,7 @@ impl RelationshipReader for MaterializedRelationshipReader<'_> {
             rows: &self.rows,
             compact_rows: &self.store.rows,
             live_rows: &self.store.live_rows,
+            all_rows_live: self.store.live_rows.is_all_live(),
             candidates,
             matcher: matcher.map(RelationshipMatcher::Subject),
         })
@@ -1138,6 +1693,7 @@ pub struct RelationshipIter<'a> {
     rows: &'a [Relationship],
     compact_rows: &'a [RelationshipRow],
     live_rows: &'a LiveRows,
+    all_rows_live: bool,
     candidates: CandidateRowIds<'a>,
     matcher: Option<RelationshipMatcher>,
 }
@@ -1149,7 +1705,7 @@ impl<'a> Iterator for RelationshipIter<'a> {
         let matcher = self.matcher.as_mut()?;
         loop {
             let row_id = self.candidates.next()?;
-            if !self.live_rows.contains(row_id) {
+            if !self.all_rows_live && !self.live_rows.contains(row_id) {
                 continue;
             }
             let compact_row = self.compact_rows.get(row_id.index())?;
@@ -1177,6 +1733,7 @@ impl<'a> Iterator for RelationshipIter<'a> {
 #[derive(Debug)]
 pub(crate) struct CompactRelationshipIter<'a> {
     store: &'a IndexedRelationshipStore,
+    all_rows_live: bool,
     candidates: CandidateRowIds<'a>,
     matcher: Option<CompactRelationshipMatcher>,
 }
@@ -1188,7 +1745,7 @@ impl<'a> Iterator for CompactRelationshipIter<'a> {
         let matcher = self.matcher.as_mut()?;
         loop {
             let row_id = self.candidates.next()?;
-            if !self.store.live_rows.contains(row_id) {
+            if !self.all_rows_live && !self.store.live_rows.contains(row_id) {
                 continue;
             }
             let row = self.store.rows.get(row_id.index())?;
@@ -1226,6 +1783,12 @@ pub(crate) struct RelationshipRef<'a> {
 }
 
 impl RelationshipRef<'_> {
+    fn is_deleted_by(&self, deleted: &HashSet<Relationship>) -> bool {
+        self.store
+            .relationship_from_row(self.row)
+            .is_ok_and(|relationship| deleted.contains(&relationship))
+    }
+
     pub(crate) fn resource_object_legacy(&self) -> crate::model::Object {
         crate::model::Object {
             namespace: self.store.resolve(self.row.resource_type.0).to_string(),
@@ -1241,18 +1804,21 @@ impl RelationshipRef<'_> {
         crate::model::Relation(self.store.resolve(self.row.relation.0).to_string())
     }
 
-    pub(crate) fn subject_userset_legacy(
+    pub(crate) fn subject_userset_relation_name(
         &self,
-    ) -> Option<(crate::model::Object, crate::model::Relation)> {
-        self.row.subject_relation.map(|relation| {
-            (
-                crate::model::Object {
-                    namespace: self.store.resolve(self.row.subject_type.0).to_string(),
-                    id: self.store.resolve(self.row.subject_id.0).to_string(),
-                },
-                crate::model::Relation(self.store.resolve(relation.0).to_string()),
-            )
-        })
+    ) -> Result<Option<(crate::model::Object, RelationName)>, ZanzibarError> {
+        self.row
+            .subject_relation
+            .map(|relation| {
+                Ok((
+                    crate::model::Object {
+                        namespace: self.store.resolve(self.row.subject_type.0).to_string(),
+                        id: self.store.resolve(self.row.subject_id.0).to_string(),
+                    },
+                    RelationName::try_from(self.store.resolve(relation.0))?,
+                ))
+            })
+            .transpose()
     }
 
     pub(crate) fn expanded_subject(&self) -> Result<crate::model::ExpandedUserset, ZanzibarError> {
@@ -2026,6 +2592,13 @@ impl RelationshipIdentityIndex {
 }
 
 #[derive(Debug, Clone)]
+enum UniquenessState {
+    Ready(RelationshipIdentityIndex),
+    KnownUniqueButNotIndexed,
+    UntrustedNotIndexed,
+}
+
+#[derive(Debug, Clone)]
 struct RelationshipRow {
     row_id: RowId,
     resource_type: ObjectTypeId,
@@ -2369,14 +2942,17 @@ struct EncodedSnapshotIndexes {
 }
 
 impl EncodedSnapshotIndexes {
-    fn from_rows(rows: &[DiskRelationshipRow]) -> Result<Self, SnapshotIoError> {
+    fn from_rows(
+        rows: &[DiskRelationshipRow],
+        index_profile: IndexProfile,
+    ) -> Result<Self, SnapshotIoError> {
         let mut groups = SnapshotIndexGroups::default();
         for (index, row) in rows.iter().copied().enumerate() {
             let row_id =
                 checked_u32_from_usize(index.checked_add(1).ok_or(SnapshotIoError::Format {
                     reason: "row id overflowed",
                 })?)?;
-            groups.insert_row(row, row_id);
+            groups.insert_row(row, row_id, index_profile);
         }
 
         let mut directory = Vec::with_capacity(
@@ -2450,7 +3026,7 @@ struct SnapshotIndexGroups {
 }
 
 impl SnapshotIndexGroups {
-    fn insert_row(&mut self, row: DiskRelationshipRow, row_id: u32) {
+    fn insert_row(&mut self, row: DiskRelationshipRow, row_id: u32, index_profile: IndexProfile) {
         self.resource
             .entry(DiskIndexKey {
                 first: row.resource_type,
@@ -2459,6 +3035,9 @@ impl SnapshotIndexGroups {
             })
             .or_default()
             .push(row_id);
+        if !index_profile.supports_broad_resource_indexes() {
+            return;
+        }
         self.resource_object
             .entry(DiskIndexKey {
                 first: row.resource_type,
@@ -2483,6 +3062,9 @@ impl SnapshotIndexGroups {
             })
             .or_default()
             .push(row_id);
+        if !index_profile.supports_subject_reverse_lookup() {
+            return;
+        }
         self.subject
             .entry(DiskIndexKey {
                 first: row.subject_type,
@@ -2588,6 +3170,7 @@ impl DecodedSnapshotIndexes {
             rows,
             row_count,
             symbol_count,
+            index_profile: reader.header().index_profile,
             profile,
             validation,
         };
@@ -2601,6 +3184,7 @@ impl DecodedSnapshotIndexes {
                     row_matches_key: row_matches_resource_key,
                     coverage_bit: simple_index_coverage_bit,
                     expected_mask: |_| 1,
+                    required_by_profile: |_| true,
                 },
             )?,
             resource_object: decode_index(
@@ -2611,6 +3195,7 @@ impl DecodedSnapshotIndexes {
                     row_matches_key: row_matches_resource_object_key,
                     coverage_bit: simple_index_coverage_bit,
                     expected_mask: |_| 1,
+                    required_by_profile: IndexProfile::supports_broad_resource_indexes,
                 },
             )?,
             resource_type_relation: decode_index(
@@ -2621,6 +3206,7 @@ impl DecodedSnapshotIndexes {
                     row_matches_key: row_matches_resource_type_relation_key,
                     coverage_bit: simple_index_coverage_bit,
                     expected_mask: |_| 1,
+                    required_by_profile: IndexProfile::supports_broad_resource_indexes,
                 },
             )?,
             resource_type: decode_index(
@@ -2631,6 +3217,7 @@ impl DecodedSnapshotIndexes {
                     row_matches_key: row_matches_resource_type_key,
                     coverage_bit: simple_index_coverage_bit,
                     expected_mask: |_| 1,
+                    required_by_profile: IndexProfile::supports_broad_resource_indexes,
                 },
             )?,
             subject: decode_index(
@@ -2641,6 +3228,7 @@ impl DecodedSnapshotIndexes {
                     row_matches_key: row_matches_subject_key,
                     coverage_bit: subject_index_coverage_bit,
                     expected_mask: |row| if row.subject_relation.is_some() { 3 } else { 1 },
+                    required_by_profile: IndexProfile::supports_subject_reverse_lookup,
                 },
             )?,
             subject_type_relation: decode_index(
@@ -2651,6 +3239,7 @@ impl DecodedSnapshotIndexes {
                     row_matches_key: row_matches_subject_type_relation_key,
                     coverage_bit: simple_index_coverage_bit,
                     expected_mask: |row| u8::from(row.subject_relation.is_some()),
+                    required_by_profile: IndexProfile::supports_subject_reverse_lookup,
                 },
             )?,
             subject_type: decode_index(
@@ -2661,6 +3250,7 @@ impl DecodedSnapshotIndexes {
                     row_matches_key: row_matches_subject_type_key,
                     coverage_bit: simple_index_coverage_bit,
                     expected_mask: |_| 1,
+                    required_by_profile: IndexProfile::supports_subject_reverse_lookup,
                 },
             )?,
         })
@@ -2685,6 +3275,7 @@ struct SnapshotIndexDecodeInput<'a> {
     rows: &'a [RelationshipRow],
     row_count: u32,
     symbol_count: u32,
+    index_profile: IndexProfile,
     profile: SnapshotLoadProfile,
     validation: SnapshotValidationMode,
 }
@@ -2701,6 +3292,7 @@ struct SnapshotIndexDecoder<K> {
     row_matches_key: fn(&RelationshipRow, DiskIndexKey) -> bool,
     coverage_bit: fn(&RelationshipRow, DiskIndexKey) -> u8,
     expected_mask: fn(&RelationshipRow) -> u8,
+    required_by_profile: fn(IndexProfile) -> bool,
 }
 
 fn decode_index_directory(
@@ -2886,8 +3478,14 @@ where
         });
     }
 
+    let required_by_profile = (decoder.required_by_profile)(input.index_profile);
     for (row, actual) in input.rows.iter().zip(coverage.iter().copied()) {
-        if actual != (decoder.expected_mask)(row) {
+        let expected = if required_by_profile {
+            (decoder.expected_mask)(row)
+        } else {
+            0
+        };
+        if actual != expected {
             return Err(SnapshotIoError::Format {
                 reason: "index does not cover every required row",
             });
@@ -3219,8 +3817,17 @@ fn subject_index_coverage_bit(row: &RelationshipRow, key: DiskIndexKey) -> u8 {
 struct DecodedSnapshotRows {
     rows: Vec<RelationshipRow>,
     live_rows: LiveRows,
-    uniqueness: RelationshipIdentityIndex,
-    uniqueness_ready: bool,
+    uniqueness: UniquenessState,
+}
+
+fn record_relationship_decode_phase(
+    timings: &mut Option<&mut SnapshotLoadPhaseTimings>,
+    record: impl FnOnce(&mut SnapshotLoadPhaseTimings, std::time::Duration),
+    phase_start: Instant,
+) {
+    if let Some(timings) = timings.as_deref_mut() {
+        record(timings, phase_start.elapsed());
+    }
 }
 
 fn decode_snapshot_rows(
@@ -3244,7 +3851,7 @@ fn decode_snapshot_rows(
     }
     let mut cursor = BinaryCursor::new(section.bytes());
     let mut rows = Vec::with_capacity(row_count);
-    let mut uniqueness = RelationshipIdentityIndex::default();
+    let mut duplicate_detector = RelationshipIdentityIndex::default();
     let validate_semantics = validation == SnapshotValidationMode::Full;
     for index in 0..row_count {
         let row_id = RowId::from_len(index)?;
@@ -3280,20 +3887,24 @@ fn decode_snapshot_rows(
         };
         if validate_semantics {
             validate_row_domains(interner, &row)?;
-            if uniqueness.find(&rows, &row).is_some() {
+            if duplicate_detector.find(&rows, &row).is_some() {
                 return Err(SnapshotIoError::Format {
                     reason: "duplicate relationship row in snapshot",
                 });
             }
-            uniqueness.insert(&rows, row_id, &row);
+            duplicate_detector.insert(&rows, row_id, &row);
         }
         rows.push(row);
     }
+    let uniqueness = if validate_semantics {
+        UniquenessState::KnownUniqueButNotIndexed
+    } else {
+        UniquenessState::UntrustedNotIndexed
+    };
     Ok(DecodedSnapshotRows {
         rows,
         live_rows: LiveRows::full(row_count),
         uniqueness,
-        uniqueness_ready: validate_semantics,
     })
 }
 
@@ -3312,13 +3923,30 @@ fn validate_row_domains(
     Ok(())
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct LiveRows {
+    all_live_len: Option<usize>,
     words: Vec<u64>,
+}
+
+impl Default for LiveRows {
+    fn default() -> Self {
+        Self {
+            all_live_len: Some(0),
+            words: Vec::new(),
+        }
+    }
 }
 
 impl LiveRows {
     fn full(len: usize) -> Self {
+        Self {
+            all_live_len: Some(len),
+            words: Vec::new(),
+        }
+    }
+
+    fn sparse_full(len: usize) -> Self {
         let word_count = len.div_ceil(u64::BITS as usize);
         let mut words = vec![u64::MAX; word_count];
         let remainder = len % u64::BITS as usize;
@@ -3327,11 +3955,24 @@ impl LiveRows {
         {
             *last = (1_u64 << remainder) - 1;
         }
-        Self { words }
+        Self {
+            all_live_len: None,
+            words,
+        }
     }
 
     fn insert(&mut self, row_id: RowId) {
         let index = row_id.index();
+        if let Some(len) = self.all_live_len {
+            if index == len {
+                self.all_live_len = len.checked_add(1);
+                return;
+            }
+            if index < len {
+                return;
+            }
+            *self = Self::sparse_full(len);
+        }
         let word = index / u64::BITS as usize;
         if word >= self.words.len() {
             self.words.resize(word.saturating_add(1), 0);
@@ -3343,6 +3984,9 @@ impl LiveRows {
 
     fn remove(&mut self, row_id: RowId) {
         let index = row_id.index();
+        if let Some(len) = self.all_live_len {
+            *self = Self::sparse_full(len);
+        }
         let word = index / u64::BITS as usize;
         if let Some(value) = self.words.get_mut(word) {
             *value &= !(1_u64 << (index % u64::BITS as usize));
@@ -3351,10 +3995,17 @@ impl LiveRows {
 
     fn contains(&self, row_id: RowId) -> bool {
         let index = row_id.index();
+        if let Some(len) = self.all_live_len {
+            return index < len;
+        }
         let word = index / u64::BITS as usize;
         self.words
             .get(word)
             .is_some_and(|value| value & (1_u64 << (index % u64::BITS as usize)) != 0)
+    }
+
+    fn is_all_live(&self) -> bool {
+        self.all_live_len.is_some()
     }
 }
 

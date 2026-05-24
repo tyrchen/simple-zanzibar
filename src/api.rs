@@ -9,6 +9,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender},
     },
     thread::{self, JoinHandle},
@@ -34,7 +35,7 @@ use crate::{
     revision::{Consistency, ConsistencyError, ConsistencyToken, default_retained_snapshots},
     runtime::{EngineState, SharedEngineState},
     schema::{SchemaError, SchemaSource},
-    snapshot::{SnapshotIoError, SnapshotLoadOptions, SnapshotSaveOptions},
+    snapshot::{IndexProfile, SnapshotIoError, SnapshotLoadOptions, SnapshotSaveOptions},
 };
 
 const DEFAULT_WRITER_QUEUE_CAPACITY: usize = 1024;
@@ -76,15 +77,16 @@ impl ZanzibarEngine {
         let (snapshot, limits) = self.snapshot_for_consistency(request.consistency)?;
         let object_type = ObjectType::try_from(request.object.namespace.as_str())?;
         let relation_name = RelationName::try_from(request.relation.0.as_str())?;
-        snapshot
+        let relation_definition = snapshot
             .schema()
             .resolver()
             .relation(&object_type, &relation_name)?;
-        let allowed = eval::check_with_snapshot(
+        let allowed = eval::check_prepared_with_snapshot(
             &snapshot,
             &request.object,
             &request.relation,
             &request.user,
+            relation_definition,
             limits,
         )?
         .is_allowed();
@@ -212,6 +214,7 @@ impl ZanzibarEngine {
     ) -> Result<LookupResources, EngineError> {
         enter_api_span!("lookup_resources");
         let (snapshot, limits) = self.snapshot_for_consistency(consistency)?;
+        Self::ensure_subject_reverse_lookup_supported(&snapshot, "lookup_resources")?;
         let request = request.borrow();
         Ok(eval::lookup_resources_with_snapshot(
             &snapshot, request, limits,
@@ -594,17 +597,20 @@ impl ZanzibarEngine {
         let request = request.borrow();
         let (snapshot, limits) = self.snapshot_for_consistency(request.consistency.clone())?;
         let object_type = ObjectType::try_from(request.resource.namespace.as_str())?;
-        let namespace = snapshot.schema().resolver().namespace(&object_type)?;
+        snapshot.schema().resolver().namespace(&object_type)?;
         let mut permissions = Vec::new();
-        let mut relations = namespace.relations().iter().collect::<Vec<_>>();
-        relations.sort_by(|left, right| left.name().cmp(right.name()));
-        for relation_definition in relations {
+        for relation_definition in snapshot
+            .schema()
+            .resolver()
+            .sorted_relations(&object_type)?
+        {
             let relation = Relation(relation_definition.name().as_str().to_string());
-            if eval::check_with_snapshot(
+            if eval::check_prepared_with_snapshot(
                 &snapshot,
                 &request.resource,
                 &relation,
                 &request.subject,
+                relation_definition,
                 limits,
             )?
             .is_allowed()
@@ -628,7 +634,7 @@ impl ZanzibarEngine {
         let request = request.borrow();
         let (snapshot, limits) = self.snapshot_for_consistency(request.consistency.clone())?;
         let object_type = ObjectType::try_from(request.resource.namespace.as_str())?;
-        let namespace = snapshot.schema().resolver().namespace(&object_type)?;
+        snapshot.schema().resolver().namespace(&object_type)?;
         let subject_type = crate::domain::SubjectType::try_from(request.subject_type.as_str())?;
         if subject_type.as_str() != "user" {
             let subject_object_type = ObjectType::try_from(subject_type.as_str())?;
@@ -639,9 +645,11 @@ impl ZanzibarEngine {
         }
 
         let mut permissions = Vec::new();
-        let mut relations = namespace.relations().iter().collect::<Vec<_>>();
-        relations.sort_by(|left, right| left.name().cmp(right.name()));
-        for relation_definition in relations {
+        for relation_definition in snapshot
+            .schema()
+            .resolver()
+            .sorted_relations(&object_type)?
+        {
             let permission = Relation(relation_definition.name().as_str().to_string());
             let subjects = eval::lookup_subjects_with_snapshot(
                 &snapshot,
@@ -734,6 +742,17 @@ impl ZanzibarEngine {
         let limits = state.evaluation_limits();
         let snapshot = state.snapshot_for_consistency(consistency)?;
         Ok((snapshot, limits))
+    }
+
+    fn ensure_subject_reverse_lookup_supported(
+        snapshot: &crate::revision::PublishedSnapshot,
+        operation: &'static str,
+    ) -> Result<(), EngineError> {
+        let profile = snapshot.relationships().index_profile();
+        if profile.supports_subject_reverse_lookup() {
+            return Ok(());
+        }
+        Err(EngineError::UnsupportedIndexProfile { operation, profile })
     }
 }
 
@@ -999,6 +1018,15 @@ pub enum EngineError {
         /// Operation that attempted to use the writer actor.
         operation: &'static str,
     },
+
+    /// The loaded index profile cannot support a requested operation.
+    #[error("index profile {profile:?} does not support {operation}")]
+    UnsupportedIndexProfile {
+        /// Operation that requires an omitted index family.
+        operation: &'static str,
+        /// Loaded profile.
+        profile: IndexProfile,
+    },
 }
 
 impl From<ZanzibarError> for EngineError {
@@ -1040,6 +1068,9 @@ impl From<EngineError> for ZanzibarError {
             EngineError::WriterUnavailable { operation } => Self::StorageError(format!(
                 "engine writer actor unavailable during {operation}",
             )),
+            EngineError::UnsupportedIndexProfile { operation, profile } => Self::StorageError(
+                format!("index profile {profile:?} does not support {operation}"),
+            ),
         }
     }
 }
@@ -1111,8 +1142,9 @@ enum WriterCommand {
 }
 
 struct WriterActor {
-    sender: Mutex<Option<SyncSender<WriterCommand>>>,
+    sender: SyncSender<WriterCommand>,
     handle: Mutex<Option<JoinHandle<()>>>,
+    shutdown: AtomicBool,
 }
 
 impl WriterActor {
@@ -1161,20 +1193,17 @@ impl WriterActor {
             }
         });
         Self {
-            sender: Mutex::new(Some(sender)),
+            sender,
             handle: Mutex::new(Some(handle)),
+            shutdown: AtomicBool::new(false),
         }
     }
 
     fn send(&self, command: WriterCommand, operation: &'static str) -> Result<(), EngineError> {
-        let guard = self
-            .sender
-            .lock()
-            .map_err(|_| EngineError::WriterUnavailable { operation })?;
-        let sender = guard
-            .as_ref()
-            .ok_or(EngineError::WriterUnavailable { operation })?;
-        sender
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(EngineError::WriterUnavailable { operation });
+        }
+        self.sender
             .send(command)
             .map_err(|_| EngineError::WriterUnavailable { operation })
     }
@@ -1192,10 +1221,8 @@ impl fmt::Debug for WriterActor {
 
 impl Drop for WriterActor {
     fn drop(&mut self) {
-        if let Ok(mut sender) = self.sender.lock()
-            && let Some(sender) = sender.take()
-        {
-            drop(sender.try_send(WriterCommand::Shutdown));
+        if !self.shutdown.swap(true, Ordering::AcqRel) {
+            drop(self.sender.try_send(WriterCommand::Shutdown));
         }
         if let Ok(mut handle) = self.handle.lock()
             && let Some(handle) = handle.take()
