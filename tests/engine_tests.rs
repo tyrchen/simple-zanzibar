@@ -154,6 +154,20 @@ fn test_should_use_public_engine_request_response_api() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn test_should_validate_public_requests_before_snapshot_access() {
+    let engine = ZanzibarEngine::builder().build();
+
+    let result = engine.check(CheckRequest::new(
+        Object::new("doc", "bad id"),
+        viewer(),
+        User::user_id("alice"),
+        Consistency::Latest,
+    ));
+
+    assert!(matches!(result, Err(EngineError::Domain(_))));
+}
+
+#[test]
 fn test_should_persist_direct_non_user_subject_relationships()
 -> Result<(), Box<dyn std::error::Error>> {
     let engine = ZanzibarEngine::builder().build();
@@ -313,6 +327,41 @@ fn test_should_serialize_public_request_dtos_with_camel_case()
 #[test]
 fn test_should_validate_domain_values_during_deserialization() {
     let result: Result<Relationship, _> = serde_json::from_str(r#""doc:bad id#viewer@user:alice""#);
+    let invalid_check: Result<CheckRequest, _> = serde_json::from_value(serde_json::json!({
+        "object": {
+            "namespace": "doc",
+            "id": "bad id",
+        },
+        "relation": "viewer",
+        "user": {
+            "type": "userId",
+            "value": "alice",
+        },
+        "consistency": {
+            "kind": "latest",
+        },
+    }));
+    let invalid_lookup_resources: Result<LookupResourcesRequest, _> =
+        serde_json::from_value(serde_json::json!({
+            "subject": {
+                "type": "userId",
+                "value": "alice",
+            },
+            "permission": "viewer",
+            "resourceType": "bad-type",
+        }));
+    let invalid_lookup_subjects: Result<LookupSubjectsRequest, _> =
+        serde_json::from_value(serde_json::json!({
+            "resource": {
+                "namespace": "doc",
+                "id": "readme",
+            },
+            "permission": "viewer",
+            "subjectType": "bad type",
+        }));
 
     assert!(result.is_err());
+    assert!(invalid_check.is_err());
+    assert!(invalid_lookup_resources.is_err());
+    assert!(invalid_lookup_subjects.is_err());
 }

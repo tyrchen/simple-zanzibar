@@ -1,7 +1,7 @@
 # Specs Index
 
 Status: draft v1
-Last updated: 2026-05-24
+Last updated: 2026-05-25
 
 This directory now has two generations of design material:
 
@@ -46,6 +46,7 @@ Read the v2 specs in numeric order. The order is also the implementation depende
 | [90-local-engine-roadmap.md](./90-local-engine-roadmap.md) | Roadmap | Stakeholder-facing milestones and observable exit criteria. |
 | [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md) | Implementation plan | Engineer-facing, dependency-ordered phases with task gates. |
 | [93-improvements-review.md](./93-improvements-review.md) | Review backlog | Deferred review findings and out-of-phase follow-up implementation items. |
+| [94-production-readiness-review.md](./94-production-readiness-review.md) | Review | Production-readiness findings, fix contract, and verification gate for tests, docs, public API, and safety. |
 | [99-key-decisions.md](./99-key-decisions.md) | Decisions | Load-bearing design choices, alternatives, and rationale. |
 
 ## Build-Order Graph
@@ -161,7 +162,21 @@ Read the v2 specs in numeric order. The order is also the implementation depende
                   +-------------------------+          +----------------------+
                   | 90 Roadmap              | <------> | 91 Impl Plan         |
                   | stakeholder milestones  |          | engineering phases   |
-                  +-------------------------+          +----------------------+
+                  +------------+------------+          +----------+-----------+
+                               |                                  |
+                               +----------------+-----------------+
+                                                |
+                                                v
+                                    +----------------------+
+                                    | 93/94 Reviews        |
+                                    | backlog + prod gate  |
+                                    +----------+-----------+
+                                               |
+                                               v
+                                    +----------------------+
+                                    | 99 Key Decisions     |
+                                    | rationale ledger     |
+                                    +----------------------+
 ```
 
 ## Required Prior Art

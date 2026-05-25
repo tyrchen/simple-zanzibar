@@ -74,6 +74,7 @@ impl ZanzibarEngine {
     /// fails.
     pub fn check(&self, request: CheckRequest) -> Result<CheckResponse, EngineError> {
         enter_api_span!("check");
+        request.validate()?;
         let (snapshot, limits) = self.snapshot_for_consistency(request.consistency)?;
         let object_type = ObjectType::try_from(request.object.namespace.as_str())?;
         let relation_name = RelationName::try_from(request.relation.0.as_str())?;
@@ -157,6 +158,7 @@ impl ZanzibarEngine {
     /// fails.
     pub fn expand(&self, request: ExpandRequest) -> Result<ExpandResponse, EngineError> {
         enter_api_span!("expand");
+        request.validate()?;
         let (snapshot, limits) = self.snapshot_for_consistency(request.consistency)?;
         let object_type = ObjectType::try_from(request.object.namespace.as_str())?;
         let relation_name = RelationName::try_from(request.relation.0.as_str())?;
@@ -213,6 +215,7 @@ impl ZanzibarEngine {
         consistency: Consistency,
     ) -> Result<LookupResources, EngineError> {
         enter_api_span!("lookup_resources");
+        request.borrow().validate()?;
         let (snapshot, limits) = self.snapshot_for_consistency(consistency)?;
         Self::ensure_subject_reverse_lookup_supported(&snapshot, "lookup_resources")?;
         let request = request.borrow();
@@ -245,6 +248,7 @@ impl ZanzibarEngine {
         consistency: Consistency,
     ) -> Result<LookupSubjects, EngineError> {
         enter_api_span!("lookup_subjects");
+        request.borrow().validate()?;
         let (snapshot, limits) = self.snapshot_for_consistency(consistency)?;
         let request = request.borrow();
         Ok(eval::lookup_subjects_with_snapshot(
@@ -623,6 +627,7 @@ impl ZanzibarEngine {
     ) -> Result<LookupPermissions, EngineError> {
         enter_api_span!("lookup_permissions");
         let request = request.borrow();
+        request.validate()?;
         let (snapshot, limits) = self.snapshot_for_consistency(request.consistency.clone())?;
         let object_type = ObjectType::try_from(request.resource.namespace.as_str())?;
         snapshot.schema().resolver().namespace(&object_type)?;
@@ -661,6 +666,7 @@ impl ZanzibarEngine {
     ) -> Result<LookupObjectPermissions, EngineError> {
         enter_api_span!("lookup_object_permissions");
         let request = request.borrow();
+        request.validate()?;
         let (snapshot, limits) = self.snapshot_for_consistency(request.consistency.clone())?;
         let object_type = ObjectType::try_from(request.resource.namespace.as_str())?;
         snapshot.schema().resolver().namespace(&object_type)?;
