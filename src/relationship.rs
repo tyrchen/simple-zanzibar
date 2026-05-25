@@ -55,20 +55,196 @@ const SNAPSHOT_INDEX_KIND_COUNT_U64: u64 = SNAPSHOT_INDEX_KIND_COUNT as u64;
 static DELTA_SEGMENTS_INSPECTED: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
 static TOMBSTONE_CHECKS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static STORE_VIEW_QUERY_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Benchmark-only read counters for segmented relationship views.
 #[cfg(feature = "bench-internals")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StoreViewReadCounters {
+    /// Number of store-view query calls sampled by read benchmarks.
+    pub query_calls: u64,
     /// Number of delta overlays inspected by read queries.
     pub delta_segments_inspected: u64,
     /// Number of checkpoint rows tested against the delta tombstone set.
     pub tombstone_checks: u64,
 }
 
+/// Benchmark-only delta shape for one published relationship-store view.
+#[cfg(feature = "bench-internals")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StoreViewDeltaStats {
+    /// Number of rows in the checkpoint store.
+    pub checkpoint_rows: usize,
+    /// Number of delta overlays retained by the view.
+    pub delta_segments: usize,
+    /// Number of inserted rows in the current delta overlay.
+    pub delta_inserted_rows: usize,
+    /// Number of checkpoint rows masked by delta tombstones.
+    pub delta_deleted_rows: usize,
+    /// Number of mutations represented by the current delta overlay.
+    pub delta_mutations: usize,
+    /// Deleted-row ratio in basis points over checkpoint plus inserted rows.
+    pub tombstone_ratio_bps: u16,
+}
+
+/// Benchmark-only posting length histogram for one index group.
+#[cfg(feature = "bench-internals")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StorePostingHistogram {
+    /// Number of distinct index keys.
+    pub keys: u64,
+    /// Number of row ids across all postings.
+    pub total_postings: u64,
+    /// Longest posting list length.
+    pub max_posting_len: u64,
+    /// Number of singleton posting lists.
+    pub singleton_keys: u64,
+    /// Number of posting lists with 2 to 4 row ids.
+    pub keys_2_to_4: u64,
+    /// Number of posting lists with 5 to 16 row ids.
+    pub keys_5_to_16: u64,
+    /// Number of posting lists with 17 to 64 row ids.
+    pub keys_17_to_64: u64,
+    /// Number of posting lists with 65 to 256 row ids.
+    pub keys_65_to_256: u64,
+    /// Number of posting lists with 257 to 1024 row ids.
+    pub keys_257_to_1024: u64,
+    /// Number of posting lists with 1025 to 4096 row ids.
+    pub keys_1025_to_4096: u64,
+    /// Number of posting lists with more than 4096 row ids.
+    pub keys_over_4096: u64,
+    /// Estimated bytes for the current row-id array representation.
+    pub estimated_row_id_bytes: u64,
+}
+
+/// Benchmark-only posting histograms for all runtime index groups.
+#[cfg(feature = "bench-internals")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StorePostingHistograms {
+    /// Exact resource index.
+    pub resource: StorePostingHistogram,
+    /// Resource object index.
+    pub resource_object: StorePostingHistogram,
+    /// Resource type and relation index.
+    pub resource_type_relation: StorePostingHistogram,
+    /// Resource type index.
+    pub resource_type: StorePostingHistogram,
+    /// Exact subject index.
+    pub subject: StorePostingHistogram,
+    /// Subject type and relation index.
+    pub subject_type_relation: StorePostingHistogram,
+    /// Subject type index.
+    pub subject_type: StorePostingHistogram,
+}
+
+#[cfg(feature = "bench-internals")]
+impl StorePostingHistogram {
+    fn record_posting_len(&mut self, len: usize) {
+        let len = u64_from_usize_saturating(len);
+        self.keys = self.keys.saturating_add(1);
+        self.total_postings = self.total_postings.saturating_add(len);
+        self.max_posting_len = self.max_posting_len.max(len);
+        self.estimated_row_id_bytes = self.estimated_row_id_bytes.saturating_add(
+            len.saturating_mul(u64_from_usize_saturating(std::mem::size_of::<RowId>())),
+        );
+        match len {
+            0 => {}
+            1 => self.singleton_keys = self.singleton_keys.saturating_add(1),
+            2..=4 => self.keys_2_to_4 = self.keys_2_to_4.saturating_add(1),
+            5..=16 => self.keys_5_to_16 = self.keys_5_to_16.saturating_add(1),
+            17..=64 => self.keys_17_to_64 = self.keys_17_to_64.saturating_add(1),
+            65..=256 => self.keys_65_to_256 = self.keys_65_to_256.saturating_add(1),
+            257..=1024 => self.keys_257_to_1024 = self.keys_257_to_1024.saturating_add(1),
+            1025..=4096 => {
+                self.keys_1025_to_4096 = self.keys_1025_to_4096.saturating_add(1);
+            }
+            _ => self.keys_over_4096 = self.keys_over_4096.saturating_add(1),
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[derive(Debug, Default)]
+struct ActivePostingHistogramBuilder {
+    resource: HashMap<ResourceIndexKey, usize>,
+    resource_object: HashMap<ResourceObjectIndexKey, usize>,
+    resource_type_relation: HashMap<ResourceTypeRelationIndexKey, usize>,
+    resource_type: HashMap<ObjectTypeId, usize>,
+    subject: HashMap<SubjectIndexKey, usize>,
+    subject_type_relation: HashMap<SubjectTypeRelationIndexKey, usize>,
+    subject_type: HashMap<SubjectTypeId, usize>,
+}
+
+#[cfg(feature = "bench-internals")]
+impl ActivePostingHistogramBuilder {
+    fn record_row(&mut self, row: &RelationshipRow) {
+        increment_posting(&mut self.resource, ResourceIndexKey::from(row));
+        increment_posting(&mut self.resource_object, ResourceObjectIndexKey::from(row));
+        increment_posting(
+            &mut self.resource_type_relation,
+            ResourceTypeRelationIndexKey::from(row),
+        );
+        increment_posting(&mut self.resource_type, row.resource_type);
+        for key in SubjectIndexKey::from_row(row) {
+            increment_posting(&mut self.subject, key);
+        }
+        if let Some(key) = SubjectTypeRelationIndexKey::from_row(row) {
+            increment_posting(&mut self.subject_type_relation, key);
+        }
+        increment_posting(&mut self.subject_type, row.subject_type);
+    }
+
+    fn finish(self) -> StorePostingHistograms {
+        StorePostingHistograms {
+            resource: histogram_from_posting_lengths(self.resource.into_values()),
+            resource_object: histogram_from_posting_lengths(self.resource_object.into_values()),
+            resource_type_relation: histogram_from_posting_lengths(
+                self.resource_type_relation.into_values(),
+            ),
+            resource_type: histogram_from_posting_lengths(self.resource_type.into_values()),
+            subject: histogram_from_posting_lengths(self.subject.into_values()),
+            subject_type_relation: histogram_from_posting_lengths(
+                self.subject_type_relation.into_values(),
+            ),
+            subject_type: histogram_from_posting_lengths(self.subject_type.into_values()),
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn increment_posting<K>(postings: &mut HashMap<K, usize>, key: K)
+where
+    K: Eq + Hash,
+{
+    let count = postings.entry(key).or_default();
+    *count = count.saturating_add(1);
+}
+
+#[cfg(feature = "bench-internals")]
+fn histogram_from_posting_lengths(
+    lengths: impl IntoIterator<Item = usize>,
+) -> StorePostingHistogram {
+    let mut histogram = StorePostingHistogram::default();
+    for len in lengths {
+        histogram.record_posting_len(len);
+    }
+    histogram
+}
+
+#[cfg(feature = "bench-internals")]
+fn u64_from_usize_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
 /// Resets benchmark-only segmented-store read counters.
 #[cfg(feature = "bench-internals")]
 pub fn reset_store_view_read_counters() {
+    STORE_VIEW_QUERY_CALLS.store(0, Ordering::Relaxed);
     DELTA_SEGMENTS_INSPECTED.store(0, Ordering::Relaxed);
     TOMBSTONE_CHECKS.store(0, Ordering::Relaxed);
 }
@@ -78,10 +254,19 @@ pub fn reset_store_view_read_counters() {
 #[must_use]
 pub fn store_view_read_counters() -> StoreViewReadCounters {
     StoreViewReadCounters {
+        query_calls: STORE_VIEW_QUERY_CALLS.load(Ordering::Relaxed),
         delta_segments_inspected: DELTA_SEGMENTS_INSPECTED.load(Ordering::Relaxed),
         tombstone_checks: TOMBSTONE_CHECKS.load(Ordering::Relaxed),
     }
 }
+
+#[cfg(feature = "bench-internals")]
+fn record_store_view_query_call() {
+    STORE_VIEW_QUERY_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_store_view_query_call() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_delta_segment_inspected() {
@@ -676,6 +861,7 @@ impl RelationshipStoreView {
         &self,
         filter: &RelationshipFilter,
     ) -> StoreViewCompactIter<'_> {
+        record_store_view_query_call();
         let inserted = self
             .delta
             .as_ref()
@@ -695,6 +881,7 @@ impl RelationshipStoreView {
         &self,
         filter: &SubjectFilter,
     ) -> StoreViewCompactIter<'_> {
+        record_store_view_query_call();
         let inserted = self
             .delta
             .as_ref()
@@ -716,6 +903,7 @@ impl RelationshipStoreView {
         relation: &RelationName,
         limit: QueryLimit,
     ) -> StoreViewCompactIter<'_> {
+        record_store_view_query_call();
         let inserted = self
             .delta
             .as_ref()
@@ -748,6 +936,7 @@ impl RelationshipStoreView {
         relation: &RelationName,
         subject: &SubjectFilter,
     ) -> StoreViewCompactIter<'_> {
+        record_store_view_query_call();
         let inserted = self.delta.as_ref().map(|delta| {
             delta
                 .inserted
@@ -768,6 +957,45 @@ impl RelationshipStoreView {
 
     pub(crate) fn index_profile(&self) -> IndexProfile {
         self.checkpoint.index_profile()
+    }
+
+    /// Returns benchmark-only delta stats for this view.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn delta_stats(&self) -> StoreViewDeltaStats {
+        let checkpoint_rows = self.checkpoint.live_row_count();
+        let Some(delta) = &self.delta else {
+            return StoreViewDeltaStats {
+                checkpoint_rows,
+                ..StoreViewDeltaStats::default()
+            };
+        };
+        let delta_inserted_rows = delta.inserted.live_row_count();
+        let delta_deleted_rows = delta.deleted_rows.len();
+        let denominator = checkpoint_rows.saturating_add(delta_inserted_rows).max(1);
+        let ratio = delta_deleted_rows.saturating_mul(10_000) / denominator;
+        StoreViewDeltaStats {
+            checkpoint_rows,
+            delta_segments: 1,
+            delta_inserted_rows,
+            delta_deleted_rows,
+            delta_mutations: delta.mutation_count.get(),
+            tombstone_ratio_bps: u16::try_from(ratio).unwrap_or(u16::MAX),
+        }
+    }
+
+    /// Returns benchmark-only logical posting histograms for the active view.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn posting_histograms(&self) -> StorePostingHistograms {
+        let mut builder = ActivePostingHistogramBuilder::default();
+        let deleted = self.delta.as_ref().map(|delta| delta.deleted_rows.as_ref());
+        self.checkpoint
+            .record_active_postings(&mut builder, deleted);
+        if let Some(delta) = &self.delta {
+            delta.inserted.record_active_postings(&mut builder, None);
+        }
+        builder.finish()
     }
 
     pub(crate) fn store_check_key(
@@ -1199,6 +1427,29 @@ impl IndexedRelationshipStore {
             .filter(|row| self.live_rows.contains(row.row_id))
             .filter_map(|row| self.relationship_from_row(row).ok())
             .collect()
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn live_row_count(&self) -> usize {
+        self.rows.len().saturating_sub(self.dead_row_count)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn record_active_postings(
+        &self,
+        builder: &mut ActivePostingHistogramBuilder,
+        deleted: Option<&HashSet<RelationshipRow>>,
+    ) {
+        for row in self
+            .rows
+            .iter()
+            .filter(|row| self.live_rows.contains(row.row_id))
+        {
+            if deleted.is_some_and(|deleted| deleted.contains(row)) {
+                continue;
+            }
+            builder.record_row(row);
+        }
     }
 
     pub(crate) fn encode_snapshot_sections(

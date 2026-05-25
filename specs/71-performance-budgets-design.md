@@ -509,6 +509,46 @@ into compiled schema IR.
 | `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | `[11.540 us, 11.599 us, 11.646 us]` | `[11.211 us, 11.341 us, 11.559 us]` | upper `-0.75%`; no regression |
 | `realworld_authorization/1m_rules/mixed_read_workload` | `[41.599 us, 42.085 us, 42.690 us]` | `[40.921 us, 41.317 us, 41.808 us]` | upper `-2.07%`; no regression |
 
+## 3.15 M14 Measurement Baseline Counters
+
+Phase 15.0 adds benchmark-only measurement foundations for
+[32](./32-read-optimization-follow-up-plan.md). The production read path is unchanged; the new
+counters and fixture helpers are compiled only with `bench-internals`.
+
+Phase 14 follow-up remains the comparison point for later M14 optimization slices:
+
+| Benchmark | Phase 14 follow-up upper estimate | Later-slice gate |
+| --- | ---: | --- |
+| `perf_optimization/check_prepared_1m` | `4.3065 us` | no > 2% regression for memoization; no > 5% regression for other read-path slices |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | `11.559 us` | no > 5% regression and stay <= `13.5 us` stretch |
+| `realworld_authorization/1m_rules/mixed_read_workload` | `41.808 us` | no > 5% regression and stay <= `55 us` hard gate |
+| `perf_optimization/lookup_resources_streaming_1m` | `2.3551 ms` | planner slice must improve by >= 25% or stop with counter/profile evidence |
+| `perf_optimization/lookup_subjects_streaming_1m` | `4.7426 us` | allocation slice must cut allocations materially with no > 5% latency regression |
+| `perf_optimization/read_heavy_heavy_write_batched_1m` | `12.712 us` | delta/bitmap slices must show no > 5% regression unless a hard compaction cap triggers |
+
+New Phase 15.0 fixture filters:
+
+| Filter | Counter evidence | Follow-up decision gate |
+| --- | --- | --- |
+| `perf_optimization/phase15_memo_shared_parent` + `read_followup_allocations/phase15_memo_shared_parent` | completed-check repeat opportunities across shared parent/group proofs plus allocation count/bytes | Proceed with 15.1 only if hit opportunities are non-zero and the repeated-subcheck fixture can target >= 10% improvement. |
+| `perf_optimization/phase15_lookup_subjects_allocation` + `read_followup_allocations/phase15_lookup_subjects_allocation` | allocation count/bytes plus lookup-subject candidate/full-root counts | Proceed with 15.2 streaming only if transient allocation is visible and public `expand` remains separately measured. |
+| `perf_optimization/phase15_delete_heavy_delta` | view delta stats, query calls, delta inspections, and tombstone checks | Proceed with 15.3 once delete-heavy latest reads show tombstone overhead above the Phase 14 delta sample. |
+| `perf_optimization/phase15_high_fanout_posting` + `read_followup_allocations/phase15_high_fanout_posting` | posting length histograms by index group and allocation count/bytes | Proceed with 15.6 dense/tombstone representation only for groups with histogram-backed dense or high-cardinality postings. |
+| `perf_optimization/phase15_lookup_planner_pruning` | lookup candidate count and full-root check count for exclusion-only producer noise | Proceed with 15.5 producer pruning only if counters show candidate/full-check reduction potential. |
+
+Local Phase 15.0 baseline snapshot from `make bench-read-followup-baseline`:
+allocation samples run in the dedicated `read_followup_allocations` bench binary so
+the `perf_optimization` latency filters stay on the normal allocator. Allocation
+sample inputs are cloned before the measured allocator region.
+
+| Filter | Local timing | Counter snapshot |
+| --- | ---: | --- |
+| `perf_optimization/phase15_memo_shared_parent` | `3.3874..3.5147 ms` | `5000` checks, `2997` memo-hit opportunities, `1000` lookup candidates/full-root checks; allocation companion: `1072865` allocations, `38573712` bytes |
+| `perf_optimization/phase15_lookup_subjects_allocation` | `604.03..608.86 ms` | `502500` checks, `1000` subject candidates/usersets/full-root checks; allocation companion: `193219344` allocations, `6881911104` bytes |
+| `perf_optimization/phase15_delete_heavy_delta` | `7.1309..7.5606 us` | `1` query, `1` inspected delta segment, `4096` deleted rows, `9997` tombstone ratio bps |
+| `perf_optimization/phase15_high_fanout_posting` | `2.4394..2.5346 ms` | resource indexes have one `16384`-row posting; exact-subject index has `16384` singleton postings; allocation companion: `646752` allocations, `41070704` bytes |
+| `perf_optimization/phase15_lookup_planner_pruning` | `95.482..99.013 ms` | `100000` checks, `50000` lookup candidates, `50000` full-root checks |
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.

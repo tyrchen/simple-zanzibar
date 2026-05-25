@@ -43,6 +43,10 @@ bench-realworld:
 bench-perf-optimization:
 	@cargo bench --features bench-internals --bench perf_optimization -- --sample-size 10
 
+bench-read-followup-baseline:
+	@cargo bench --features bench-internals --bench perf_optimization -- phase15 --sample-size 10
+	@cargo bench --features bench-internals --bench read_followup_allocations
+
 bench-snapshot-section-size:
 	@cargo bench --bench snapshot_section_size -- --sample-size 10
 
@@ -109,4 +113,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-snapshot-section-size perf-impact-chart bench-snapshot-memory bench-snapshot-zstd-memory bench-all fmt fmt-check clippy lint release update-submodule
+.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-read-followup-baseline bench-snapshot-section-size perf-impact-chart bench-snapshot-memory bench-snapshot-zstd-memory bench-all fmt fmt-check clippy lint release update-submodule

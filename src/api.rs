@@ -252,6 +252,34 @@ impl ZanzibarEngine {
         )?)
     }
 
+    /// Returns benchmark-only delta stats for the selected snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when the requested consistency cannot be resolved.
+    #[cfg(feature = "bench-internals")]
+    pub fn bench_relationship_delta_stats(
+        &self,
+        consistency: Consistency,
+    ) -> Result<crate::relationship::StoreViewDeltaStats, EngineError> {
+        let (snapshot, _) = self.snapshot_for_consistency(consistency)?;
+        Ok(snapshot.relationships().delta_stats())
+    }
+
+    /// Returns benchmark-only posting histograms for the selected snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when the requested consistency cannot be resolved.
+    #[cfg(feature = "bench-internals")]
+    pub fn bench_relationship_posting_histograms(
+        &self,
+        consistency: Consistency,
+    ) -> Result<crate::relationship::StorePostingHistograms, EngineError> {
+        let (snapshot, _) = self.snapshot_for_consistency(consistency)?;
+        Ok(snapshot.relationships().posting_histograms())
+    }
+
     /// Applies relationship mutations and publishes a new revision.
     ///
     /// # Errors

@@ -1,6 +1,12 @@
+#[cfg(feature = "bench-internals")]
+use std::sync::Mutex;
 use std::{collections::HashSet, fs, num::NonZeroU64, ops::Range, path::PathBuf, process};
 
 use proptest::prelude::*;
+#[cfg(feature = "bench-internals")]
+use simple_zanzibar::eval::{evaluation_read_counters, reset_evaluation_read_counters};
+#[cfg(feature = "bench-internals")]
+use simple_zanzibar::relationship::{reset_store_view_read_counters, store_view_read_counters};
 use simple_zanzibar::{
     EngineError, IndexProfile, SnapshotIntegrityMode, SnapshotLoadOptions, SnapshotLoadProfile,
     SnapshotSaveOptions, SnapshotValidationMode, ZanzibarEngine,
@@ -16,6 +22,8 @@ const HEADER_LEN: usize = 76;
 const DIRECTORY_ENTRY_LEN: usize = 28;
 const RELATIONSHIP_COUNT_OFFSET: usize = 60;
 const RELATIONSHIP_ROWS_SECTION: u16 = 4;
+#[cfg(feature = "bench-internals")]
+static BENCH_COUNTER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn test_should_build_lazy_uniqueness_after_full_snapshot_load()
@@ -317,6 +325,113 @@ fn test_should_preserve_cycle_denial_with_compiled_relation_ids()
         &relation("first"),
         &User::user_id("alice"),
     )?);
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn test_should_record_lookup_and_memo_opportunity_counters()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = BENCH_COUNTER_TEST_LOCK
+        .lock()
+        .map_err(|_| "bench counter test lock poisoned")?;
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace group {
+            relation member {}
+        }
+
+        namespace folder {
+            relation viewer {}
+            relation inherited_viewer {
+                rewrite computed_userset(relation: "viewer")
+            }
+        }
+
+        namespace doc {
+            relation parent {}
+            relation can_view {
+                rewrite tuple_to_userset(tupleset: "parent", computed_userset: "inherited_viewer")
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("group:shared#member@user:alice")?,
+        RelationshipMutation::touch("folder:shared#viewer@group:shared#member")?,
+        RelationshipMutation::touch("doc:one#parent@folder:shared#viewer")?,
+        RelationshipMutation::touch("doc:two#parent@folder:shared#viewer")?,
+    ])?;
+
+    reset_evaluation_read_counters();
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("can_view"),
+        "doc",
+    ))?;
+    let counters = evaluation_read_counters();
+
+    assert_eq!(resources.resources.len(), 2);
+    assert!(counters.lookup_resources_candidate_resources >= 2);
+    assert!(counters.lookup_resources_full_root_checks >= 2);
+    assert!(counters.check_memo_hit_opportunities > 0);
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn test_should_report_delta_stats_and_read_counters() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = BENCH_COUNTER_TEST_LOCK
+        .lock()
+        .map_err(|_| "bench counter test lock poisoned")?;
+    let engine = seeded_engine()?;
+    let path = unique_snapshot_path("bench-delta-stats");
+    engine.save_snapshot(&path, SnapshotSaveOptions::default())?;
+    let loaded = ZanzibarEngine::load_snapshot(&path, SnapshotLoadOptions::default())?;
+    fs::remove_file(path)?;
+    loaded.write_relationships([RelationshipMutation::delete("doc:one#viewer@user:alice")?])?;
+
+    reset_store_view_read_counters();
+    assert!(loaded.check_relation(
+        &object("doc", "two"),
+        &relation("viewer"),
+        &User::user_id("alice"),
+    )?);
+    let counters = store_view_read_counters();
+    let stats = loaded.bench_relationship_delta_stats(Consistency::Latest)?;
+
+    assert!(counters.query_calls > 0);
+    assert!(counters.delta_segments_inspected > 0);
+    assert!(counters.tombstone_checks > 0);
+    assert_eq!(stats.delta_segments, 1);
+    assert_eq!(stats.delta_deleted_rows, 1);
+    assert_eq!(stats.delta_mutations, 1);
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn test_should_report_posting_histograms() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = BENCH_COUNTER_TEST_LOCK
+        .lock()
+        .map_err(|_| "bench counter test lock poisoned")?;
+    let engine = seeded_engine()?;
+    let path = unique_snapshot_path("bench-posting-histograms");
+    engine.save_snapshot(&path, SnapshotSaveOptions::default())?;
+    let loaded = ZanzibarEngine::load_snapshot(&path, SnapshotLoadOptions::default())?;
+    fs::remove_file(path)?;
+    loaded.write_relationships([RelationshipMutation::touch("doc:one#viewer@user:bob")?])?;
+
+    let histograms = loaded.bench_relationship_posting_histograms(Consistency::Latest)?;
+
+    assert!(histograms.resource.keys > 0);
+    assert!(histograms.resource.total_postings > 0);
+    assert!(histograms.subject.total_postings >= histograms.resource.total_postings);
+    assert!(histograms.subject_type.max_posting_len > 0);
+    assert_eq!(histograms.resource.keys, 4);
+    assert_eq!(histograms.resource.total_postings, 5);
+    assert_eq!(histograms.resource.max_posting_len, 2);
     Ok(())
 }
 
