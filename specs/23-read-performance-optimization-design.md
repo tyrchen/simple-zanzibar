@@ -46,6 +46,21 @@ the mixed-read workload under budget and improved guardrails:
 | `perf_optimization/lookup_resources_streaming_1m` | `[3.0446 ms, 3.1188 ms, 3.1883 ms]` | `[2.6849 ms, 2.7143 ms, 2.7544 ms]` | improved |
 | `perf_optimization/lookup_subjects_streaming_1m` | `[6.2956 us, 6.3200 us, 6.3451 us]` | `[5.4088 us, 5.4472 us, 5.4722 us]` | improved |
 
+M14 completion update on 2026-05-24: schema rewrites now retain same-namespace compiled relation
+ids, plain computed-userset edges use a conservative exact shortcut, lookup verification resets a
+request-local reusable context between candidates, and segmented delta views mask checkpoint
+tombstones with checkpoint-native row identities instead of materializing public relationships.
+
+| Benchmark | First pass | Completion pass | Status |
+| --- | ---: | ---: | --- |
+| `realworld_authorization/1m_rules/mixed_read_workload` | `[52.474 us, 52.895 us, 53.489 us]` | `[41.599 us, 42.085 us, 42.690 us]` | passes <= 55 us |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | `[14.473 us, 14.655 us, 14.833 us]` | `[11.540 us, 11.599 us, 11.646 us]` | passes <= 13.5 us stretch |
+| `perf_optimization/check_prepared_1m` | `[5.2677 us, 5.3115 us, 5.3424 us]` | `[4.3107 us, 4.3867 us, 4.4450 us]` | improved |
+| `perf_optimization/lookup_resources_streaming_1m` | `[2.6849 ms, 2.7143 ms, 2.7544 ms]` | `[2.2853 ms, 2.3241 ms, 2.3551 ms]` | improved |
+| `perf_optimization/lookup_subjects_streaming_1m` | `[5.4088 us, 5.4472 us, 5.4722 us]` | `[4.6735 us, 4.7194 us, 4.7426 us]` | improved |
+| `perf_optimization/read_heavy_heavy_write_batched_1m` | `[10.810 us, 11.567 us, 12.365 us]` | `[10.820 us, 11.773 us, 12.712 us]` | no detected regression |
+| `perf_optimization/read_heavy_delta_counters_1m` | not present | `[4.4792 us, 4.5157 us, 4.5475 us]`; `delta_segments_inspected=1400`, `tombstone_checks=300` over 100 checks | counters recorded |
+
 ## 3. Goals
 
 | # | Goal | Measure |

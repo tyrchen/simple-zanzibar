@@ -742,7 +742,7 @@ fn load_snapshot_file_inner(
         &reader,
         options.profile,
         options.validation,
-        timings.as_deref_mut(),
+        &mut timings,
     )?;
     let phase_start = Instant::now();
     let configs = configs_vec
@@ -892,10 +892,12 @@ fn decode_relationships_with_optional_timings(
     reader: &SnapshotReader<'_>,
     profile: SnapshotLoadProfile,
     validation: SnapshotValidationMode,
-    timings: Option<&mut SnapshotLoadPhaseTimings>,
+    timings: &mut Option<&mut SnapshotLoadPhaseTimings>,
 ) -> Result<Arc<RelationshipStoreView>, SnapshotIoError> {
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = timings;
     #[cfg(feature = "bench-internals")]
-    if let Some(timings) = timings {
+    if let Some(timings) = timings.as_deref_mut() {
         let store = Arc::new(
             IndexedRelationshipStore::decode_snapshot_sections_with_timings(
                 reader, profile, validation, timings,
@@ -903,7 +905,6 @@ fn decode_relationships_with_optional_timings(
         );
         return Ok(Arc::new(RelationshipStoreView::from_checkpoint(store)));
     }
-    let _ = timings;
     let store = Arc::new(IndexedRelationshipStore::decode_snapshot_sections(
         reader, profile, validation,
     )?);

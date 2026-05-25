@@ -12,6 +12,8 @@ use std::{
 use criterion::{BatchSize, Criterion};
 #[cfg(feature = "bench-internals")]
 use simple_zanzibar::SnapshotLoadOptions;
+#[cfg(feature = "bench-internals")]
+use simple_zanzibar::relationship::{reset_store_view_read_counters, store_view_read_counters};
 use simple_zanzibar::{
     IndexProfile, SnapshotSaveOptions, ZanzibarEngine,
     domain::Relationship,
@@ -43,6 +45,7 @@ fn main() {
     bench_streaming_lookup(&mut criterion, &filters);
     bench_write_latency(&mut criterion, &filters);
     bench_read_write_mix(&mut criterion, &filters);
+    bench_delta_read_counters(&mut criterion, &filters);
     bench_snapshot_profile_and_timers(&mut criterion, &filters);
     criterion.final_summary();
 }
@@ -181,6 +184,66 @@ fn bench_read_write_mix(criterion: &mut Criterion, filters: &[String]) {
                 started.elapsed()
             });
         });
+    }
+}
+
+fn bench_delta_read_counters(criterion: &mut Criterion, filters: &[String]) {
+    #[cfg(feature = "bench-internals")]
+    {
+        let name = "perf_optimization/read_heavy_delta_counters_1m";
+        if !should_benchmark(name, filters) {
+            return;
+        }
+        let engine = build_engine(RULES_1M);
+        must(
+            engine.write_relationships([
+                must(
+                    RelationshipMutation::delete(
+                        "doc:bulk_doc_000000#viewer@group:target_team#member",
+                    ),
+                    "failed to build counter delete mutation",
+                ),
+                must(
+                    RelationshipMutation::touch("doc:counter_delta#viewer@user:counter_user"),
+                    "failed to build counter touch mutation",
+                ),
+            ]),
+            "failed to prepare delta counter view",
+        );
+        let object = object("doc", "inherited_doc");
+        let relation = relation("can_view");
+        let user = User::user_id(TARGET_USER_ID);
+        reset_store_view_read_counters();
+        for _ in 0..100 {
+            black_box(must(
+                engine.check_relation(&object, &relation, &user),
+                "delta counter check failed",
+            ));
+        }
+        let counters = store_view_read_counters();
+        eprintln!(
+            "{name}: delta_segments_inspected={} tombstone_checks={}",
+            counters.delta_segments_inspected, counters.tombstone_checks,
+        );
+        criterion.bench_function(name, |bencher| {
+            bencher.iter(|| {
+                reset_store_view_read_counters();
+                black_box(must(
+                    engine.check_relation(
+                        black_box(&object),
+                        black_box(&relation),
+                        black_box(&user),
+                    ),
+                    "delta counter check failed",
+                ));
+                black_box(store_view_read_counters())
+            });
+        });
+    }
+    #[cfg(not(feature = "bench-internals"))]
+    {
+        let _ = criterion;
+        let _ = filters;
     }
 }
 

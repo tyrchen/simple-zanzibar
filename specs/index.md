@@ -30,6 +30,7 @@ Read the v2 specs in numeric order. The order is also the implementation depende
 | [22-snapshot-file-size-optimization-design.md](./22-snapshot-file-size-optimization-design.md) | Design | Snapshot v3 section-size plan for smaller raw/zstd artifacts without weakening safe load semantics. |
 | [23-read-performance-optimization-design.md](./23-read-performance-optimization-design.md) | Design | Next read-path optimization plan for ID-native schema IR, segment-native keys, reusable contexts, and exact-proof shortcuts. |
 | [24-zstd-aware-snapshot-load-design.md](./24-zstd-aware-snapshot-load-design.md) | Design | Zstd-aware snapshot inner layout, row-chunk decode, and low-risk read/load hot-path optimization evidence. |
+| [25-compiled-computed-userset-shortcut-design.md](./25-compiled-computed-userset-shortcut-design.md) | Design | Follow-up read optimization that moves computed-userset plain-target proofs into compiled schema IR. |
 | [60-crates-features-design.md](./60-crates-features-design.md) | Design | Crate layout, feature flags, dependency policy, current crate-version survey. |
 | [70-security-design.md](./70-security-design.md) | Design | Threat model, validation limits, panic policy, unsafe policy, logging/data exposure. |
 | [71-performance-budgets-design.md](./71-performance-budgets-design.md) | Design | Performance targets, benchmark matrix, profiling rules, CI gates. |
@@ -120,6 +121,12 @@ Read the v2 specs in numeric order. The order is also the implementation depende
               | 22 Snapshot File     |                  | 23 Read Performance |  | 24 Zstd-Aware      |
               | Size Optimization    |                  | Optimization        |  | Load                |
               +----------+-----------+                  +----------+-----------+  +----------+-----------+
+                         |                                           |                     |
+                         |                                           v                     |
+                         |                                +----------------------+          |
+                         |                                | 25 Compiled          |          |
+                         |                                | Computed Shortcut    |          |
+                         |                                +----------+-----------+          |
                          |                                           |                     |
                 +--------+---------------------+---------------------+---------------------+--------+
                 |                              |                                                    |

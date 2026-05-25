@@ -1,5 +1,7 @@
 //! Indexed in-memory relationship store and mutation semantics.
 
+#[cfg(feature = "bench-internals")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{
         BTreeMap, HashMap, HashSet,
@@ -49,6 +51,53 @@ const INDEX_DIRECTORY_KEY_WIDTH_SHIFT: u16 = 1;
 const INDEX_DIRECTORY_KEY_WIDTH_MASK: u16 = 0b110;
 const SNAPSHOT_INDEX_KIND_COUNT: usize = 7;
 const SNAPSHOT_INDEX_KIND_COUNT_U64: u64 = SNAPSHOT_INDEX_KIND_COUNT as u64;
+#[cfg(feature = "bench-internals")]
+static DELTA_SEGMENTS_INSPECTED: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static TOMBSTONE_CHECKS: AtomicU64 = AtomicU64::new(0);
+
+/// Benchmark-only read counters for segmented relationship views.
+#[cfg(feature = "bench-internals")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoreViewReadCounters {
+    /// Number of delta overlays inspected by read queries.
+    pub delta_segments_inspected: u64,
+    /// Number of checkpoint rows tested against the delta tombstone set.
+    pub tombstone_checks: u64,
+}
+
+/// Resets benchmark-only segmented-store read counters.
+#[cfg(feature = "bench-internals")]
+pub fn reset_store_view_read_counters() {
+    DELTA_SEGMENTS_INSPECTED.store(0, Ordering::Relaxed);
+    TOMBSTONE_CHECKS.store(0, Ordering::Relaxed);
+}
+
+/// Returns benchmark-only segmented-store read counters.
+#[cfg(feature = "bench-internals")]
+#[must_use]
+pub fn store_view_read_counters() -> StoreViewReadCounters {
+    StoreViewReadCounters {
+        delta_segments_inspected: DELTA_SEGMENTS_INSPECTED.load(Ordering::Relaxed),
+        tombstone_checks: TOMBSTONE_CHECKS.load(Ordering::Relaxed),
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn record_delta_segment_inspected() {
+    DELTA_SEGMENTS_INSPECTED.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_delta_segment_inspected() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_tombstone_check() {
+    TOMBSTONE_CHECKS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_tombstone_check() {}
 
 /// Errors produced by the indexed relationship store.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -580,6 +629,7 @@ impl RelationshipStoreView {
             checkpoint: Arc::clone(&base.checkpoint),
             delta: Some(StoreDelta {
                 inserted: Arc::new(inserted),
+                deleted_rows: Arc::new(base.deleted_relationship_rows(&deleted)),
                 deleted: Arc::new(deleted),
                 mutation_count,
             }),
@@ -626,13 +676,17 @@ impl RelationshipStoreView {
         &self,
         filter: &RelationshipFilter,
     ) -> StoreViewCompactIter<'_> {
+        let inserted = self
+            .delta
+            .as_ref()
+            .map(|delta| delta.inserted.query_compact_relationships(filter));
+        if inserted.is_some() {
+            record_delta_segment_inspected();
+        }
         StoreViewCompactIter {
-            inserted: self
-                .delta
-                .as_ref()
-                .map(|delta| delta.inserted.query_compact_relationships(filter)),
+            inserted,
             checkpoint: self.checkpoint.query_compact_relationships(filter),
-            deleted: self.delta.as_ref().map(|delta| delta.deleted.as_ref()),
+            deleted: self.delta.as_ref().map(|delta| delta.deleted_rows.as_ref()),
             phase: StoreViewIterPhase::Inserted,
         }
     }
@@ -641,13 +695,73 @@ impl RelationshipStoreView {
         &self,
         filter: &SubjectFilter,
     ) -> StoreViewCompactIter<'_> {
+        let inserted = self
+            .delta
+            .as_ref()
+            .map(|delta| delta.inserted.reverse_query_compact_relationships(filter));
+        if inserted.is_some() {
+            record_delta_segment_inspected();
+        }
         StoreViewCompactIter {
-            inserted: self
-                .delta
-                .as_ref()
-                .map(|delta| delta.inserted.reverse_query_compact_relationships(filter)),
+            inserted,
             checkpoint: self.checkpoint.reverse_query_compact_relationships(filter),
-            deleted: self.delta.as_ref().map(|delta| delta.deleted.as_ref()),
+            deleted: self.delta.as_ref().map(|delta| delta.deleted_rows.as_ref()),
+            phase: StoreViewIterPhase::Inserted,
+        }
+    }
+
+    pub(crate) fn resource_relation(
+        &self,
+        resource: &ObjectRef,
+        relation: &RelationName,
+        limit: QueryLimit,
+    ) -> StoreViewCompactIter<'_> {
+        let inserted = self
+            .delta
+            .as_ref()
+            .map(|delta| delta.inserted.resource_relation(resource, relation, limit));
+        if inserted.is_some() {
+            record_delta_segment_inspected();
+        }
+        StoreViewCompactIter {
+            inserted,
+            checkpoint: self.checkpoint.resource_relation(resource, relation, limit),
+            deleted: self.delta.as_ref().map(|delta| delta.deleted_rows.as_ref()),
+            phase: StoreViewIterPhase::Inserted,
+        }
+    }
+
+    pub(crate) fn any_resource_relation_subject(
+        &self,
+        resource: &ObjectRef,
+        relation: &RelationName,
+        subject: &SubjectFilter,
+    ) -> bool {
+        self.resource_relation_subject(resource, relation, subject)
+            .next()
+            .is_some()
+    }
+
+    fn resource_relation_subject(
+        &self,
+        resource: &ObjectRef,
+        relation: &RelationName,
+        subject: &SubjectFilter,
+    ) -> StoreViewCompactIter<'_> {
+        let inserted = self.delta.as_ref().map(|delta| {
+            delta
+                .inserted
+                .resource_relation_subject(resource, relation, subject)
+        });
+        if inserted.is_some() {
+            record_delta_segment_inspected();
+        }
+        StoreViewCompactIter {
+            inserted,
+            checkpoint: self
+                .checkpoint
+                .resource_relation_subject(resource, relation, subject),
+            deleted: self.delta.as_ref().map(|delta| delta.deleted_rows.as_ref()),
             phase: StoreViewIterPhase::Inserted,
         }
     }
@@ -821,11 +935,24 @@ impl RelationshipStoreView {
         }
         Ok(store)
     }
+
+    fn deleted_relationship_rows(
+        &self,
+        deleted: &HashSet<Relationship>,
+    ) -> HashSet<RelationshipRow> {
+        deleted
+            .iter()
+            .filter_map(|relationship| {
+                RelationshipRow::from_existing_relationship(relationship, &self.checkpoint.interner)
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
 struct StoreDelta {
     inserted: Arc<IndexedRelationshipStore>,
+    deleted_rows: Arc<HashSet<RelationshipRow>>,
     deleted: Arc<HashSet<Relationship>>,
     mutation_count: NonZeroUsize,
 }
@@ -842,7 +969,7 @@ enum RelationshipLocation {
 pub(crate) struct StoreViewCompactIter<'a> {
     inserted: Option<CompactRelationshipIter<'a>>,
     checkpoint: CompactRelationshipIter<'a>,
-    deleted: Option<&'a HashSet<Relationship>>,
+    deleted: Option<&'a HashSet<RelationshipRow>>,
     phase: StoreViewIterPhase,
 }
 
@@ -862,11 +989,14 @@ impl<'a> Iterator for StoreViewCompactIter<'a> {
                 }
                 StoreViewIterPhase::Checkpoint => {
                     let relationship = self.checkpoint.next()?;
-                    if self
-                        .deleted
-                        .is_none_or(|deleted| !relationship.is_deleted_by(deleted))
-                    {
-                        return Some(relationship);
+                    match self.deleted {
+                        Some(deleted) => {
+                            record_tombstone_check();
+                            if !relationship.is_deleted_by(deleted) {
+                                return Some(relationship);
+                            }
+                        }
+                        None => return Some(relationship),
                     }
                 }
             }
@@ -1272,6 +1402,42 @@ impl IndexedRelationshipStore {
         }
     }
 
+    pub(crate) fn resource_relation(
+        &self,
+        resource: &ObjectRef,
+        relation: &RelationName,
+        limit: QueryLimit,
+    ) -> CompactRelationshipIter<'_> {
+        let matcher = self.resource_relation_matcher(resource, relation, limit);
+        let candidates = matcher.as_ref().map_or(CandidateRowIds::Empty, |matcher| {
+            self.resource_candidate_row_ids(matcher)
+        });
+        CompactRelationshipIter {
+            store: self,
+            all_rows_live: self.live_rows.is_all_live(),
+            candidates,
+            matcher: matcher.map(CompactRelationshipMatcher::Resource),
+        }
+    }
+
+    fn resource_relation_subject(
+        &self,
+        resource: &ObjectRef,
+        relation: &RelationName,
+        subject: &SubjectFilter,
+    ) -> CompactRelationshipIter<'_> {
+        let matcher = self.resource_relation_subject_matcher(resource, relation, subject);
+        let candidates = matcher.as_ref().map_or(CandidateRowIds::Empty, |matcher| {
+            self.resource_candidate_row_ids(matcher)
+        });
+        CompactRelationshipIter {
+            store: self,
+            all_rows_live: self.live_rows.is_all_live(),
+            candidates,
+            matcher: matcher.map(CompactRelationshipMatcher::Resource),
+        }
+    }
+
     pub(crate) const fn index_profile(&self) -> IndexProfile {
         self.index_profile
     }
@@ -1477,6 +1643,35 @@ impl IndexedRelationshipStore {
             optional_subject,
             remaining: filter.limit.get(),
         })
+    }
+
+    fn resource_relation_matcher(
+        &self,
+        resource: &ObjectRef,
+        relation: &RelationName,
+        limit: QueryLimit,
+    ) -> Option<ResourceMatcher> {
+        Some(ResourceMatcher {
+            resource_type: ObjectTypeId(self.interner.lookup(resource.object_type().as_str())?),
+            optional_resource_id: Some(ObjectIdId(
+                self.interner.lookup(resource.object_id().as_str())?,
+            )),
+            optional_relation: Some(RelationId(self.interner.lookup(relation.as_str())?)),
+            optional_subject: None,
+            remaining: limit.get(),
+        })
+    }
+
+    fn resource_relation_subject_matcher(
+        &self,
+        resource: &ObjectRef,
+        relation: &RelationName,
+        subject: &SubjectFilter,
+    ) -> Option<ResourceMatcher> {
+        let mut matcher =
+            self.resource_relation_matcher(resource, relation, QueryLimit::new(NonZeroUsize::MIN))?;
+        matcher.optional_subject = Some(self.subject_matcher(subject)?);
+        Some(matcher)
     }
 
     fn subject_matcher(&self, filter: &SubjectFilter) -> Option<SubjectMatcher> {
@@ -1791,10 +1986,8 @@ pub(crate) struct RelationshipRef<'a> {
 }
 
 impl RelationshipRef<'_> {
-    fn is_deleted_by(&self, deleted: &HashSet<Relationship>) -> bool {
-        self.store
-            .relationship_from_row(self.row)
-            .is_ok_and(|relationship| deleted.contains(&relationship))
+    fn is_deleted_by(&self, deleted: &HashSet<RelationshipRow>) -> bool {
+        deleted.contains(self.row)
     }
 
     pub(crate) fn resource_object_legacy(&self) -> crate::model::Object {

@@ -459,6 +459,56 @@ Representative phase timer:
 | `indexes` | `135.971417 ms` |
 | `publish` | `1.75 us` |
 
+## 3.13 M13 Read-Path Completion Measurements
+
+Measured 2026-05-24 after the remaining read-path refinement work in
+[23](./23-read-performance-optimization-design.md): compiled relation-id schema rewrites,
+conservative exact computed-userset shortcuts, reusable lookup verification contexts, and
+checkpoint-native delta tombstone masking.
+
+| Benchmark | Previous M13 evidence | Completion evidence | Target status |
+| --- | ---: | ---: | --- |
+| `realworld_authorization/1m_rules/mixed_read_workload` | `[52.474 us, 52.895 us, 53.489 us]` | `[41.599 us, 42.085 us, 42.690 us]` | passes <= 55 us |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | `[14.473 us, 14.655 us, 14.833 us]` | `[11.540 us, 11.599 us, 11.646 us]` | passes <= 13.5 us stretch |
+| `perf_optimization/check_prepared_1m` | `[5.2677 us, 5.3115 us, 5.3424 us]` | `[4.3107 us, 4.3867 us, 4.4450 us]` | improved |
+| `perf_optimization/lookup_resources_streaming_1m` | `[2.6849 ms, 2.7143 ms, 2.7544 ms]` | `[2.2853 ms, 2.3241 ms, 2.3551 ms]` | improved |
+| `perf_optimization/lookup_subjects_streaming_1m` | `[5.4088 us, 5.4472 us, 5.4722 us]` | `[4.6735 us, 4.7194 us, 4.7426 us]` | improved |
+| `perf_optimization/read_heavy_heavy_write_batched_1m` | `[10.810 us, 11.567 us, 12.365 us]` | `[10.820 us, 11.773 us, 12.712 us]` | no detected regression |
+| `perf_optimization/read_heavy_delta_counters_1m` | not present | `[4.4792 us, 4.5157 us, 4.5475 us]`; `delta_segments_inspected=1400`, `tombstone_checks=300` over 100 checks | counters recorded |
+| `snapshot_file_size/1m` | `77,573,646 bytes` | `77,573,646 bytes` | raw artifact unchanged |
+| `snapshot_file_size_zstd/1m` | `21,512,241 bytes` | `21,512,241 bytes` | zstd artifact unchanged |
+| `snapshot_load_compact/1m` | `[547.67 ms, 550.62 ms, 553.98 ms]` | `[571.24 ms, 572.58 ms, 573.95 ms]` | still under 700 ms; no read-path dependency |
+| `snapshot_load_trusted_fast/1m` | `[171.85 ms, 172.70 ms, 173.52 ms]` | `[174.79 ms, 176.08 ms, 177.49 ms]` | passes <= 200 ms |
+| `snapshot_load_zstd/1m` | `[610.46 ms, 614.59 ms, 618.59 ms]` | `[639.00 ms, 643.41 ms, 650.15 ms]` | distribution-load baseline recorded |
+
+Representative completion-phase timer:
+
+| Phase | Duration |
+| --- | ---: |
+| `file_read` | `7.828875 ms` |
+| `decompression` | `42 ns` |
+| `header_and_sections` | `3.833 us` |
+| `checksum` | `32.892083 ms` |
+| `schema_parse_compile` | `51.083 us` |
+| `symbols` | `87.499833 ms` |
+| `rows` | `292.607208 ms` |
+| `indexes` | `145.074458 ms` |
+| `publish` | `1.834 us` |
+
+## 3.14 Compiled Computed-Userset Shortcut Follow-Up
+
+Measured 2026-05-24 after the deep follow-up review in
+[25](./25-compiled-computed-userset-shortcut-design.md). The parser migration idea was deferred
+because schema parse/compile is ~51 us inside the ~572 ms full snapshot-load path and is absent from
+steady-state reads. The implemented follow-up instead moves computed-userset plain-target knowledge
+into compiled schema IR.
+
+| Benchmark | Phase 14 completion | Follow-up | Result |
+| --- | ---: | ---: | --- |
+| `perf_optimization/check_prepared_1m` | `[4.3107 us, 4.3867 us, 4.4450 us]` | `[4.2240 us, 4.2590 us, 4.3065 us]` | upper `-3.12%`; no regression |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | `[11.540 us, 11.599 us, 11.646 us]` | `[11.211 us, 11.341 us, 11.559 us]` | upper `-0.75%`; no regression |
+| `realworld_authorization/1m_rules/mixed_read_workload` | `[41.599 us, 42.085 us, 42.690 us]` | `[40.921 us, 41.317 us, 41.808 us]` | upper `-2.07%`; no regression |
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.
