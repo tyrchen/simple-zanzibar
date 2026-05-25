@@ -59,12 +59,11 @@ class Series:
 
 
 READ_SERIES = [
-    Series("prepared check", (6.0009, 5.3424, 4.3065, 4.4088), "us", BLUE),
-    Series("lookup resources", (3.1883, 2.7544, 2.3551, 2.3713), "ms", RED),
-    Series("lookup subjects", (6.3451, 5.4722, 4.7426, 3.9911), "us", GREEN),
-    Series("realworld inherited", (15.110, 14.833, 11.559, 11.754), "us", TEAL),
-    Series("realworld mixed", (58.164, 53.489, 41.808, 41.537), "us", PURPLE),
-    Series("heavy-write read", (17.844, 12.365, 12.712, 13.003), "us", AMBER),
+    Series("prepared check", (6.0009, 5.3424, 4.3065, 4.3037), "us", BLUE),
+    Series("lookup resources", (3.1883, 2.7544, 2.3551, 2.3383), "ms", RED),
+    Series("lookup subjects", (6.3451, 5.4722, 4.7426, 3.9218), "us", GREEN),
+    Series("realworld inherited", (15.110, 14.833, 11.559, 11.578), "us", TEAL),
+    Series("heavy-write read", (17.844, 12.365, 12.712, 11.581), "us", AMBER),
 ]
 
 SNAPSHOT_SERIES = [
@@ -246,10 +245,9 @@ def draw_trend_panel(
 def draw_takeaways(svg: Svg, x: float, y: float, width: float, height: float) -> None:
     panel(svg, x, y, width, height, "Phase 15 reading", "Lower is better; comparisons use upper estimates")
     notes = [
-        ("Best continuation", "lookup_subjects is 15.8% faster than P14 and 37.1% faster than P12.", GREEN),
-        ("Realistic reads", "inherited and mixed real-world reads are within 1.7% of P14 and >22% faster than P12.", TEAL),
-        ("Regression fixed", "lookup_resources_streaming is within 0.7% of P14 and 25.6% faster than P12.", RED),
-        ("Micro path fixed", "prepared check is within 2.4% of P14 and 26.5% faster than P12.", AMBER),
+        ("Comparable reads", "core read microbenchmarks are inside gate; lookup_subjects is 38.2% faster than P12.", TEAL),
+        ("Correctness cost", "real-world lookup_resources now covers tuple-to-userset reverse traversal; see report table.", RED),
+        ("Micro path fixed", "prepared check is flat vs P14 and 28.3% faster than P12.", AMBER),
         ("Snapshot", "full load is 1.6% faster than P14; compact zstd size holds the P14 result.", BLUE),
     ]
     for index, (title, body, color) in enumerate(notes):

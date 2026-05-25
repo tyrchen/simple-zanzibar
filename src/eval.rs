@@ -10,7 +10,7 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    domain::{ObjectRef as DomainObjectRef, ObjectType, RelationName, SubjectType},
+    domain::{ObjectRef as DomainObjectRef, ObjectType, RelationName, SubjectId, SubjectType},
     error::ZanzibarError,
     model::{
         ExpandedUserset, LookupResources, LookupResourcesRequest, LookupSubjects,
@@ -723,6 +723,28 @@ impl LookupProducerRuntime {
             self.enabled = false;
         }
     }
+}
+
+#[derive(Debug)]
+struct SameObjectRelationExpansion {
+    object_type: ObjectType,
+    source_relation: RelationName,
+    target_relations: Vec<RelationName>,
+}
+
+#[derive(Debug)]
+struct TupleToUsersetRelationExpansion {
+    object_type: ObjectType,
+    source_relation: RelationName,
+    targets: Vec<TupleToUsersetExpansionTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TupleToUsersetExpansionTarget {
+    resource_type: ObjectType,
+    tupleset_relation: RelationName,
+    computed_relation: RelationName,
+    target_relation: RelationName,
 }
 
 /// Evaluation context over one immutable snapshot.
@@ -1805,6 +1827,8 @@ pub fn lookup_resources_with_snapshot(
     let mut producer_runtime = LookupProducerRuntime::new(producer_plan.is_some());
     let resource_subject_type = SubjectType::try_from(resource_type.as_str())?;
     let mut pruned_relation_has_downstream = Vec::new();
+    let mut relation_expansions = Vec::new();
+    let mut tuple_relation_expansions = Vec::new();
 
     let mut frontier = VecDeque::from([request.subject.clone()]);
     let mut visited_subjects = HashSet::from([request.subject.clone()]);
@@ -1814,69 +1838,609 @@ pub fn lookup_resources_with_snapshot(
 
     while let Some(subject) = frontier.pop_front() {
         record_lookup_resources_frontier_subject();
+        enqueue_same_object_relation_expansions(
+            snapshot,
+            &subject,
+            &mut frontier,
+            &mut visited_subjects,
+            &mut relation_expansions,
+        )?;
         let subject_filter = SubjectFilter::try_from(&subject)?;
         for relationship in snapshot
             .relationships()
             .reverse_query_compact_relationships(&subject_filter)
         {
             record_lookup_resources_frontier_relationship();
-            let resource_type_matches = relationship.resource_type_eq(&resource_type);
-            let should_prune = if resource_type_matches {
-                producer_plan
-                    .as_ref()
-                    .is_some_and(|plan| producer_runtime.should_prune(plan, relationship))
-            } else {
-                false
-            };
-            if should_prune {
-                record_lookup_resources_schema_pruned();
-                if !pruned_relation_may_have_downstream(
-                    snapshot,
-                    &resource_subject_type,
-                    relationship.relation_name_str(),
-                    &mut pruned_relation_has_downstream,
-                )? {
-                    continue;
-                }
+            if process_lookup_resources_relationship(
+                snapshot,
+                relationship,
+                request,
+                limits,
+                &resource_type,
+                &resource_subject_type,
+                producer_plan.as_ref(),
+                &mut producer_runtime,
+                &mut pruned_relation_has_downstream,
+                &mut frontier,
+                &mut visited_subjects,
+                &mut seen,
+                &mut resources,
+                &mut check_context,
+            )? {
+                return Ok(LookupResources { resources });
             }
-
-            let object = relationship.resource_object_legacy();
-            if resource_type_matches && !should_prune && seen.insert(object.clone()) {
-                record_lookup_resources_candidate_resource();
-                check_context.reset_for_reuse();
-                record_lookup_resources_full_root_check();
-                if check_context
-                    .check(&object, &request.permission, &request.subject)?
-                    .is_allowed()
-                {
-                    resources.push(object.clone());
-                    record_lookup_resources_returned();
-                    if lookup_result_limit_reached(resources.len(), limits) {
-                        record_lookup_resources_result_limit_exit();
-                        return Ok(LookupResources { resources });
-                    }
-                }
-            }
-
-            let userset_subject = User::Userset(
-                object,
-                Relation(relationship.relation_name_str().to_string()),
-            );
-            let should_follow_userset = if should_prune {
-                let userset_filter = SubjectFilter::try_from(&userset_subject)?;
-                snapshot
-                    .relationships()
-                    .has_reverse_subject_candidates(&userset_filter)
-            } else {
-                true
-            };
-            if should_follow_userset && visited_subjects.insert(userset_subject.clone()) {
-                frontier.push_back(userset_subject);
-            }
+        }
+        if process_tuple_to_userset_ignored_relation_edges(
+            snapshot,
+            &subject,
+            request,
+            limits,
+            &resource_type,
+            &mut frontier,
+            &mut visited_subjects,
+            &mut seen,
+            &mut resources,
+            &mut check_context,
+            &mut tuple_relation_expansions,
+        )? {
+            return Ok(LookupResources { resources });
         }
     }
 
     Ok(LookupResources { resources })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "relationship traversal updates shared lookup_resources scratch without heap boxing"
+)]
+fn process_lookup_resources_relationship(
+    snapshot: &PublishedSnapshot,
+    relationship: crate::relationship::RelationshipRef<'_>,
+    request: &LookupResourcesRequest,
+    limits: EvaluationLimits,
+    resource_type: &ObjectType,
+    resource_subject_type: &SubjectType,
+    producer_plan: Option<&LookupProducerPlan>,
+    producer_runtime: &mut LookupProducerRuntime,
+    pruned_relation_has_downstream: &mut Vec<(RelationName, bool)>,
+    frontier: &mut VecDeque<User>,
+    visited_subjects: &mut HashSet<User>,
+    seen: &mut HashSet<Object>,
+    resources: &mut Vec<Object>,
+    check_context: &mut EvaluationContext<'_>,
+) -> Result<bool, ZanzibarError> {
+    let resource_type_matches = relationship.resource_type_eq(resource_type);
+    let should_prune = if resource_type_matches {
+        producer_plan.is_some_and(|plan| producer_runtime.should_prune(plan, relationship))
+    } else {
+        false
+    };
+    if should_prune {
+        record_lookup_resources_schema_pruned();
+        if !pruned_relation_may_have_downstream(
+            snapshot,
+            resource_subject_type,
+            relationship.relation_name_str(),
+            pruned_relation_has_downstream,
+        )? {
+            return Ok(false);
+        }
+    }
+
+    let object = relationship.resource_object_legacy();
+    if resource_type_matches && !should_prune && seen.insert(object.clone()) {
+        record_lookup_resources_candidate_resource();
+        check_context.reset_for_reuse();
+        record_lookup_resources_full_root_check();
+        if check_context
+            .check(&object, &request.permission, &request.subject)?
+            .is_allowed()
+        {
+            resources.push(object.clone());
+            record_lookup_resources_returned();
+            if lookup_result_limit_reached(resources.len(), limits) {
+                record_lookup_resources_result_limit_exit();
+                return Ok(true);
+            }
+        }
+    }
+
+    let userset_subject = User::Userset(
+        object,
+        Relation(relationship.relation_name_str().to_string()),
+    );
+    let should_follow_userset = if should_prune {
+        let userset_filter = SubjectFilter::try_from(&userset_subject)?;
+        snapshot
+            .relationships()
+            .has_reverse_subject_candidates(&userset_filter)
+    } else {
+        true
+    };
+    if should_follow_userset && visited_subjects.insert(userset_subject.clone()) {
+        frontier.push_back(userset_subject);
+    }
+    Ok(false)
+}
+
+fn enqueue_same_object_relation_expansions(
+    snapshot: &PublishedSnapshot,
+    subject: &User,
+    frontier: &mut VecDeque<User>,
+    visited_subjects: &mut HashSet<User>,
+    relation_expansions: &mut Vec<SameObjectRelationExpansion>,
+) -> Result<(), ZanzibarError> {
+    let User::Userset(object, relation) = subject else {
+        return Ok(());
+    };
+    let object_type = ObjectType::try_from(object.namespace.as_str())?;
+    let source_relation = RelationName::try_from(relation.0.as_str())?;
+    let target_relations = same_object_relation_expansions(
+        snapshot,
+        &object_type,
+        &source_relation,
+        relation_expansions,
+    )?;
+    for target_relation in target_relations {
+        let expanded_subject = User::Userset(
+            object.clone(),
+            Relation(target_relation.as_str().to_string()),
+        );
+        let subject_filter = SubjectFilter::try_from(&expanded_subject)?;
+        if snapshot
+            .relationships()
+            .has_reverse_subject_candidates(&subject_filter)
+            && visited_subjects.insert(expanded_subject.clone())
+        {
+            frontier.push_back(expanded_subject);
+        }
+    }
+    Ok(())
+}
+
+fn same_object_relation_expansions<'a>(
+    snapshot: &PublishedSnapshot,
+    object_type: &ObjectType,
+    source_relation: &RelationName,
+    relation_expansions: &'a mut Vec<SameObjectRelationExpansion>,
+) -> Result<&'a [RelationName], ZanzibarError> {
+    if let Some(index) = relation_expansions.iter().position(|expansion| {
+        &expansion.object_type == object_type && &expansion.source_relation == source_relation
+    }) {
+        return Ok(&relation_expansions[index].target_relations);
+    }
+
+    let target_relations =
+        compute_same_object_relation_expansions(snapshot, object_type, source_relation)?;
+    relation_expansions.push(SameObjectRelationExpansion {
+        object_type: object_type.clone(),
+        source_relation: source_relation.clone(),
+        target_relations,
+    });
+    let index = relation_expansions.len().saturating_sub(1);
+    Ok(&relation_expansions[index].target_relations)
+}
+
+fn compute_same_object_relation_expansions(
+    snapshot: &PublishedSnapshot,
+    object_type: &ObjectType,
+    source_relation: &RelationName,
+) -> Result<Vec<RelationName>, ZanzibarError> {
+    let resolver = snapshot.schema().resolver();
+    let mut expansions = Vec::new();
+    for relation_definition in resolver.sorted_relations(object_type)? {
+        if relation_definition.name() == source_relation {
+            continue;
+        }
+        let relation_id = resolver.relation_id(object_type, relation_definition.name())?;
+        let mut visiting = HashSet::new();
+        if relation_id_can_include_same_object_relation(
+            snapshot,
+            relation_id,
+            source_relation,
+            &mut visiting,
+        )? {
+            expansions.push(relation_definition.name().clone());
+        }
+    }
+    Ok(expansions)
+}
+
+fn relation_id_can_include_same_object_relation(
+    snapshot: &PublishedSnapshot,
+    relation_id: SchemaRelationId,
+    source_relation: &RelationName,
+    visiting: &mut HashSet<SchemaRelationId>,
+) -> Result<bool, ZanzibarError> {
+    if !visiting.insert(relation_id) {
+        return Ok(false);
+    }
+    let relation_definition = snapshot
+        .schema()
+        .resolver()
+        .relation_by_id(relation_id)
+        .ok_or_else(compiled_schema_invariant_error)?;
+    let includes = relation_definition_can_include_same_object_relation(
+        snapshot,
+        relation_definition,
+        source_relation,
+        visiting,
+    )?;
+    visiting.remove(&relation_id);
+    Ok(includes)
+}
+
+fn relation_definition_can_include_same_object_relation(
+    snapshot: &PublishedSnapshot,
+    relation_definition: &SchemaRelationDefinition,
+    source_relation: &RelationName,
+    visiting: &mut HashSet<SchemaRelationId>,
+) -> Result<bool, ZanzibarError> {
+    let Some(expression) = relation_definition.compiled_userset_rewrite() else {
+        return Ok(false);
+    };
+    expression_can_include_same_object_relation(
+        snapshot,
+        relation_definition.name(),
+        expression,
+        source_relation,
+        visiting,
+    )
+}
+
+fn expression_can_include_same_object_relation(
+    snapshot: &PublishedSnapshot,
+    current_relation: &RelationName,
+    expression: &CompiledUsersetExpression,
+    source_relation: &RelationName,
+    visiting: &mut HashSet<SchemaRelationId>,
+) -> Result<bool, ZanzibarError> {
+    match expression {
+        CompiledUsersetExpression::This => Ok(current_relation == source_relation),
+        CompiledUsersetExpression::ComputedUserset {
+            relation,
+            relation_id,
+            target_has_rewrite,
+        } => {
+            if relation == source_relation {
+                return Ok(true);
+            }
+            if !target_has_rewrite {
+                return Ok(false);
+            }
+            relation_id_can_include_same_object_relation(
+                snapshot,
+                *relation_id,
+                source_relation,
+                visiting,
+            )
+        }
+        CompiledUsersetExpression::Union(expressions)
+        | CompiledUsersetExpression::Intersection(expressions) => {
+            for expression in expressions {
+                if expression_can_include_same_object_relation(
+                    snapshot,
+                    current_relation,
+                    expression,
+                    source_relation,
+                    visiting,
+                )? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        CompiledUsersetExpression::Exclusion { base, .. } => {
+            expression_can_include_same_object_relation(
+                snapshot,
+                current_relation,
+                base,
+                source_relation,
+                visiting,
+            )
+        }
+        CompiledUsersetExpression::TupleToUserset { .. } => Ok(false),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "lookup_resources keeps traversal-owned scratch in locals to avoid per-request heap \
+              indirection"
+)]
+fn process_tuple_to_userset_ignored_relation_edges(
+    snapshot: &PublishedSnapshot,
+    subject: &User,
+    request: &LookupResourcesRequest,
+    limits: EvaluationLimits,
+    resource_type: &ObjectType,
+    frontier: &mut VecDeque<User>,
+    visited_subjects: &mut HashSet<User>,
+    seen: &mut HashSet<Object>,
+    resources: &mut Vec<Object>,
+    check_context: &mut EvaluationContext<'_>,
+    tuple_relation_expansions: &mut Vec<TupleToUsersetRelationExpansion>,
+) -> Result<bool, ZanzibarError> {
+    let User::Userset(object, relation) = subject else {
+        return Ok(false);
+    };
+    let object_type = ObjectType::try_from(object.namespace.as_str())?;
+    let source_relation = RelationName::try_from(relation.0.as_str())?;
+    let targets = tuple_to_userset_relation_expansions(
+        snapshot,
+        &object_type,
+        &source_relation,
+        tuple_relation_expansions,
+    )?;
+    let subject_type = SubjectType::try_from(object.namespace.as_str())?;
+    let subject_id = SubjectId::try_from(object.id.as_str())?;
+    let broad_targets =
+        tuple_to_userset_broad_targets(snapshot, &subject_type, &subject_id, targets);
+    if broad_targets.is_empty() {
+        return Ok(false);
+    }
+
+    let subject_filter = SubjectFilter::exact(subject_type, subject_id, None);
+    for relationship in snapshot
+        .relationships()
+        .reverse_query_compact_relationships(&subject_filter)
+    {
+        record_lookup_resources_frontier_relationship();
+        for target in broad_targets.iter().copied().filter(|target| {
+            relationship.resource_type_eq(&target.resource_type)
+                && relationship.relation_name_eq(&target.tupleset_relation)
+        }) {
+            let candidate = relationship.resource_object_legacy();
+            if relationship.resource_type_eq(resource_type) && seen.insert(candidate.clone()) {
+                record_lookup_resources_candidate_resource();
+                check_context.reset_for_reuse();
+                record_lookup_resources_full_root_check();
+                if check_context
+                    .check(&candidate, &request.permission, &request.subject)?
+                    .is_allowed()
+                {
+                    resources.push(candidate.clone());
+                    record_lookup_resources_returned();
+                    if lookup_result_limit_reached(resources.len(), limits) {
+                        record_lookup_resources_result_limit_exit();
+                        return Ok(true);
+                    }
+                }
+            }
+
+            let target_subject = User::Userset(
+                candidate,
+                Relation(target.target_relation.as_str().to_string()),
+            );
+            let target_filter = SubjectFilter::try_from(&target_subject)?;
+            if snapshot
+                .relationships()
+                .has_reverse_subject_candidates(&target_filter)
+                && visited_subjects.insert(target_subject.clone())
+            {
+                frontier.push_back(target_subject);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn tuple_to_userset_broad_targets<'a>(
+    snapshot: &PublishedSnapshot,
+    subject_type: &SubjectType,
+    subject_id: &SubjectId,
+    targets: &'a [TupleToUsersetExpansionTarget],
+) -> Vec<&'a TupleToUsersetExpansionTarget> {
+    let mut broad_targets = Vec::new();
+    for target in targets {
+        let exact_filter = SubjectFilter::exact(
+            subject_type.clone(),
+            subject_id.clone(),
+            Some(target.computed_relation.clone()),
+        );
+        if !snapshot
+            .relationships()
+            .has_reverse_subject_candidates(&exact_filter)
+        {
+            broad_targets.push(target);
+        }
+    }
+    broad_targets
+}
+
+fn tuple_to_userset_relation_expansions<'a>(
+    snapshot: &PublishedSnapshot,
+    object_type: &ObjectType,
+    source_relation: &RelationName,
+    tuple_relation_expansions: &'a mut Vec<TupleToUsersetRelationExpansion>,
+) -> Result<&'a [TupleToUsersetExpansionTarget], ZanzibarError> {
+    if let Some(index) = tuple_relation_expansions.iter().position(|expansion| {
+        &expansion.object_type == object_type && &expansion.source_relation == source_relation
+    }) {
+        return Ok(&tuple_relation_expansions[index].targets);
+    }
+
+    let targets =
+        compute_tuple_to_userset_relation_expansions(snapshot, object_type, source_relation)?;
+    tuple_relation_expansions.push(TupleToUsersetRelationExpansion {
+        object_type: object_type.clone(),
+        source_relation: source_relation.clone(),
+        targets,
+    });
+    let index = tuple_relation_expansions.len().saturating_sub(1);
+    Ok(&tuple_relation_expansions[index].targets)
+}
+
+fn compute_tuple_to_userset_relation_expansions(
+    snapshot: &PublishedSnapshot,
+    object_type: &ObjectType,
+    source_relation: &RelationName,
+) -> Result<Vec<TupleToUsersetExpansionTarget>, ZanzibarError> {
+    let mut targets = Vec::new();
+    for namespace in snapshot.schema().definitions() {
+        for relation_definition in namespace.relations() {
+            let mut visiting = HashSet::new();
+            collect_tuple_to_userset_relation_expansions(
+                snapshot,
+                namespace.name(),
+                relation_definition.name(),
+                relation_definition,
+                object_type,
+                source_relation,
+                &mut visiting,
+                &mut targets,
+            )?;
+        }
+    }
+    Ok(targets)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "schema tuple expansion needs both owner and intermediate relation context"
+)]
+fn collect_tuple_to_userset_relation_expansions(
+    snapshot: &PublishedSnapshot,
+    owner_object_type: &ObjectType,
+    owner_relation: &RelationName,
+    relation_definition: &SchemaRelationDefinition,
+    intermediate_type: &ObjectType,
+    source_relation: &RelationName,
+    visiting: &mut HashSet<SchemaRelationId>,
+    targets: &mut Vec<TupleToUsersetExpansionTarget>,
+) -> Result<(), ZanzibarError> {
+    let Some(expression) = relation_definition.compiled_userset_rewrite() else {
+        return Ok(());
+    };
+    collect_tuple_to_userset_expression_expansions(
+        snapshot,
+        owner_object_type,
+        owner_relation,
+        expression,
+        intermediate_type,
+        source_relation,
+        visiting,
+        targets,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "schema tuple expansion needs both owner and intermediate expression context"
+)]
+fn collect_tuple_to_userset_expression_expansions(
+    snapshot: &PublishedSnapshot,
+    owner_object_type: &ObjectType,
+    owner_relation: &RelationName,
+    expression: &CompiledUsersetExpression,
+    intermediate_type: &ObjectType,
+    source_relation: &RelationName,
+    visiting: &mut HashSet<SchemaRelationId>,
+    targets: &mut Vec<TupleToUsersetExpansionTarget>,
+) -> Result<(), ZanzibarError> {
+    match expression {
+        CompiledUsersetExpression::This => Ok(()),
+        CompiledUsersetExpression::ComputedUserset {
+            relation_id,
+            target_has_rewrite,
+            ..
+        } => {
+            if !target_has_rewrite || !visiting.insert(*relation_id) {
+                return Ok(());
+            }
+            let relation_definition = snapshot
+                .schema()
+                .resolver()
+                .relation_by_id(*relation_id)
+                .ok_or_else(compiled_schema_invariant_error)?;
+            collect_tuple_to_userset_relation_expansions(
+                snapshot,
+                owner_object_type,
+                owner_relation,
+                relation_definition,
+                intermediate_type,
+                source_relation,
+                visiting,
+                targets,
+            )?;
+            visiting.remove(relation_id);
+            Ok(())
+        }
+        CompiledUsersetExpression::TupleToUserset {
+            tupleset_relation,
+            computed_userset_relation,
+            ..
+        } => {
+            if relation_name_can_include_same_object_relation(
+                snapshot,
+                intermediate_type,
+                computed_userset_relation,
+                source_relation,
+            )? {
+                targets.push(TupleToUsersetExpansionTarget {
+                    resource_type: owner_object_type.clone(),
+                    tupleset_relation: tupleset_relation.clone(),
+                    computed_relation: computed_userset_relation.clone(),
+                    target_relation: owner_relation.clone(),
+                });
+            }
+            Ok(())
+        }
+        CompiledUsersetExpression::Union(expressions)
+        | CompiledUsersetExpression::Intersection(expressions) => {
+            for expression in expressions {
+                collect_tuple_to_userset_expression_expansions(
+                    snapshot,
+                    owner_object_type,
+                    owner_relation,
+                    expression,
+                    intermediate_type,
+                    source_relation,
+                    visiting,
+                    targets,
+                )?;
+            }
+            Ok(())
+        }
+        CompiledUsersetExpression::Exclusion { base, .. } => {
+            collect_tuple_to_userset_expression_expansions(
+                snapshot,
+                owner_object_type,
+                owner_relation,
+                base,
+                intermediate_type,
+                source_relation,
+                visiting,
+                targets,
+            )
+        }
+    }
+}
+
+fn relation_name_can_include_same_object_relation(
+    snapshot: &PublishedSnapshot,
+    object_type: &ObjectType,
+    relation: &RelationName,
+    source_relation: &RelationName,
+) -> Result<bool, ZanzibarError> {
+    if relation == source_relation {
+        return Ok(true);
+    }
+    let Ok(relation_id) = snapshot
+        .schema()
+        .resolver()
+        .relation_id(object_type, relation)
+    else {
+        return Ok(false);
+    };
+    let mut visiting = HashSet::new();
+    relation_id_can_include_same_object_relation(
+        snapshot,
+        relation_id,
+        source_relation,
+        &mut visiting,
+    )
 }
 
 fn pruned_relation_may_have_downstream(
@@ -2060,8 +2624,13 @@ fn collect_expression_producers(
         CompiledUsersetExpression::Exclusion { base, .. } => {
             collect_expression_producers(snapshot, current_relation, base, visiting, producers)
         }
-        CompiledUsersetExpression::TupleToUserset { .. }
-        | CompiledUsersetExpression::Intersection(_) => Ok(false),
+        CompiledUsersetExpression::TupleToUserset {
+            tupleset_relation, ..
+        } => {
+            producers.insert(tupleset_relation.clone());
+            Ok(true)
+        }
+        CompiledUsersetExpression::Intersection(_) => Ok(false),
     }
 }
 

@@ -381,6 +381,142 @@ fn test_should_record_lookup_and_memo_opportunity_counters()
     Ok(())
 }
 
+#[test]
+fn test_should_lookup_resources_through_tuple_to_userset_computed_subject_relation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace group {
+            relation member {}
+        }
+
+        namespace folder {
+            relation viewer {}
+            relation inherited_viewer {
+                rewrite computed_userset(relation: "viewer")
+            }
+        }
+
+        namespace doc {
+            relation parent {}
+            relation can_view {
+                rewrite tuple_to_userset(tupleset: "parent", computed_userset: "inherited_viewer")
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("group:shared#member@user:alice")?,
+        RelationshipMutation::touch("folder:shared#viewer@group:shared#member")?,
+        RelationshipMutation::touch("doc:inherited#parent@folder:shared#inherited_viewer")?,
+    ])?;
+
+    assert!(engine.check_relation(
+        &object("doc", "inherited"),
+        &relation("can_view"),
+        &User::user_id("alice"),
+    )?);
+
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("can_view"),
+        "doc",
+    ))?;
+
+    assert_eq!(resources.resources, vec![object("doc", "inherited")]);
+    Ok(())
+}
+
+#[test]
+fn test_should_lookup_resources_when_tuple_to_userset_ignores_tuple_subject_relation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace group {
+            relation member {}
+        }
+
+        namespace folder {
+            relation owner {}
+            relation viewer {}
+        }
+
+        namespace doc {
+            relation parent {}
+            relation can_view {
+                rewrite tuple_to_userset(tupleset: "parent", computed_userset: "viewer")
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("group:shared#member@user:alice")?,
+        RelationshipMutation::touch("folder:shared#viewer@group:shared#member")?,
+        RelationshipMutation::touch("doc:inherited#parent@folder:shared#owner")?,
+    ])?;
+
+    assert!(engine.check_relation(
+        &object("doc", "inherited"),
+        &relation("can_view"),
+        &User::user_id("alice"),
+    )?);
+
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("can_view"),
+        "doc",
+    ))?;
+
+    assert_eq!(resources.resources, vec![object("doc", "inherited")]);
+    Ok(())
+}
+
+#[test]
+fn test_should_lookup_resources_with_object_specific_tuple_subject_relation_fallback()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace group {
+            relation member {}
+        }
+
+        namespace folder {
+            relation owner {}
+            relation viewer {}
+        }
+
+        namespace doc {
+            relation parent {}
+            relation can_view {
+                rewrite tuple_to_userset(tupleset: "parent", computed_userset: "viewer")
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("group:shared#member@user:alice")?,
+        RelationshipMutation::touch("folder:exact#viewer@group:shared#member")?,
+        RelationshipMutation::touch("folder:fallback#viewer@group:shared#member")?,
+        RelationshipMutation::touch("doc:exact#parent@folder:exact#viewer")?,
+        RelationshipMutation::touch("doc:fallback#parent@folder:fallback#owner")?,
+    ])?;
+
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("can_view"),
+        "doc",
+    ))?;
+
+    assert_eq!(
+        resources.resources,
+        vec![object("doc", "exact"), object("doc", "fallback")]
+    );
+    Ok(())
+}
+
 #[cfg(feature = "bench-internals")]
 #[test]
 fn test_should_not_cache_active_cycle_denials_in_request_memo()
@@ -570,6 +706,57 @@ fn test_should_prune_lookup_resources_candidates_from_exclusion_only_relations()
 
     assert!(resources.resources.is_empty());
     assert!(counters.lookup_resources_schema_pruned >= 2);
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn test_should_plan_tuple_to_userset_root_relation_without_fallback()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = BENCH_COUNTER_TEST_LOCK
+        .lock()
+        .map_err(|_| "bench counter test lock poisoned")?;
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace folder {
+            relation viewer {}
+            relation inherited_viewer {
+                rewrite computed_userset(relation: "viewer")
+            }
+        }
+
+        namespace doc {
+            relation parent {}
+            relation viewer {}
+            relation banned {}
+            relation can_view {
+                rewrite exclusion(
+                    union(
+                        computed_userset(relation: "viewer"),
+                        tuple_to_userset(tupleset: "parent", computed_userset: "inherited_viewer")
+                    ),
+                    computed_userset(relation: "banned")
+                )
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([RelationshipMutation::touch(
+        "doc:blocked#banned@user:alice",
+    )?])?;
+
+    reset_evaluation_read_counters();
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("can_view"),
+        "doc",
+    ))?;
+    let counters = evaluation_read_counters();
+
+    assert!(resources.resources.is_empty());
+    assert_eq!(counters.lookup_resources_planner_fallbacks, 0);
+    assert!(counters.lookup_resources_schema_pruned >= 1);
     Ok(())
 }
 
