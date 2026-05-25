@@ -501,8 +501,8 @@ fn bench_phase15_lookup_planner_pruning(criterion: &mut Criterion, filters: &[St
 }
 
 #[cfg(feature = "bench-internals")]
-fn print_phase15_eval_counter_sample(name: &str, mut operation: impl FnMut()) {
-    let (_, counters) = capture_phase15_eval_counters(|| operation());
+fn print_phase15_eval_counter_sample(name: &str, operation: impl FnOnce()) {
+    let (_, counters) = capture_phase15_eval_counters(operation);
     eprintln!(
         "{name}: check_evaluations={} memo_hit_opportunities={} memo_hits={} memo_misses={} \
          memo_inserts={} memo_depth_skips={} completed_results={} lookup_resources_candidates={} \
