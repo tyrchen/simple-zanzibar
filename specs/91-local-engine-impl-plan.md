@@ -344,7 +344,40 @@ Exit criteria:
   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo audit`, and
   `cargo deny check` pass.
 
-## 17. Cross-References
+## 17. Phase 15 - Read Optimization Follow-Up
+
+Closes M14.
+
+| # | Task | Spec | Effort |
+| --- | --- | --- | --- |
+| 15.0 | Add benchmark-only measurement foundations: memo hit opportunities, allocation counters, lookup candidate/full-check counts, delta/tombstone stats, and posting histograms. | [26](./26-request-local-memoization-design.md), [28](./28-read-path-allocation-reduction-design.md), [29](./29-adaptive-bitmap-index-design.md), [30](./30-adaptive-delta-compaction-design.md), [31](./31-schema-aware-lookup-planner-design.md), [32](./32-read-optimization-follow-up-plan.md), [71](./71-performance-budgets-design.md) | 2 days |
+| 15.1 | Implement request-local completed-check memoization for lookup and permission-enumeration contexts only, with active-cycle-before-hit ordering and `depth_required` guards. | [26](./26-request-local-memoization-design.md), [14](./14-evaluation-engine-design.md), [72](./72-testing-verification-plan.md) | 3 days |
+| 15.2 | Reduce read-path allocation by streaming internal lookup-subject collection and adding request-local scratch collections where counters justify them. | [28](./28-read-path-allocation-reduction-design.md), [14](./14-evaluation-engine-design.md), [71](./71-performance-budgets-design.md) | 3 days |
+| 15.3 | Add adaptive delta-compaction stats, soft/hard policy thresholds, and a background latest-snapshot compaction path that preserves exact-token semantics. | [30](./30-adaptive-delta-compaction-design.md), [16](./16-compact-relationship-store-design.md), [20](./20-concurrent-engine-runtime-design.md), [71](./71-performance-budgets-design.md) | 4 days |
+| 15.4 | Prototype flat compiled evaluation plans beside the current compiled expression tree and prove check equivalence before any hot-path switch. | [27](./27-compiled-evaluation-plan-design.md), [25](./25-compiled-computed-userset-shortcut-design.md), [72](./72-testing-verification-plan.md) | 4 days |
+| 15.5 | Add schema-aware lookup planner producer pruning with full-check verification first, then residual verification only for exact proof shapes. | [31](./31-schema-aware-lookup-planner-design.md), [14](./14-evaluation-engine-design.md), [16](./16-compact-relationship-store-design.md), [72](./72-testing-verification-plan.md) | 5 days |
+| 15.6 | Add adaptive row-id tombstone-mask abstraction and dense-posting histograms; defer `roaring` and snapshot v4 until runtime evidence justifies them. | [29](./29-adaptive-bitmap-index-design.md), [16](./16-compact-relationship-store-design.md), [22](./22-snapshot-file-size-optimization-design.md), [71](./71-performance-budgets-design.md) | 3 days |
+| 15.7 | Run realworld, perf-optimization, concurrent write/read, snapshot load/size, allocation, and full correctness gates; post Phase 14 comparison tables to the PR. | [32](./32-read-optimization-follow-up-plan.md), [71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md) | 1 day |
+
+Exit criteria:
+
+- M14 roadmap criteria pass.
+- Direct `check`, inherited check, mixed read, lookup resources, lookup subjects, post-write reads,
+  snapshot load, and raw/zstd file-size baselines are all compared against Phase 14 follow-up.
+- Request-local memoization improves repeated-subcheck fixtures without enabling global or
+  cross-revision caching.
+- Allocation reductions do not change public `expand` output shape.
+- Delta compaction preserves exact-token logical results before, during, and after compaction.
+- Compiled evaluation plan and lookup planner changes are shadow/equivalence tested before any
+  final-check shortcut is trusted.
+- Bitmap/index work does not add a dependency or snapshot v4 format without histogram-backed
+  evidence.
+- `cargo build --workspace --all-targets`, `cargo test --workspace --all-features`,
+  `cargo +nightly fmt --check`, strict clippy including boundary lints,
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo audit`, and
+  `cargo deny check` pass.
+
+## 18. Cross-References
 
 - Stakeholder roadmap: [90-local-engine-roadmap.md](./90-local-engine-roadmap.md)
 - Key decisions: [99-key-decisions.md](./99-key-decisions.md)
@@ -356,3 +389,4 @@ Exit criteria:
 - Performance optimization design: [21-performance-optimization-design.md](./21-performance-optimization-design.md)
 - Snapshot file-size optimization design: [22-snapshot-file-size-optimization-design.md](./22-snapshot-file-size-optimization-design.md)
 - Read performance optimization design: [23-read-performance-optimization-design.md](./23-read-performance-optimization-design.md)
+- Read optimization follow-up plan: [32-read-optimization-follow-up-plan.md](./32-read-optimization-follow-up-plan.md)

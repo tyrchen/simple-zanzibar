@@ -31,6 +31,13 @@ Read the v2 specs in numeric order. The order is also the implementation depende
 | [23-read-performance-optimization-design.md](./23-read-performance-optimization-design.md) | Design | Next read-path optimization plan for ID-native schema IR, segment-native keys, reusable contexts, and exact-proof shortcuts. |
 | [24-zstd-aware-snapshot-load-design.md](./24-zstd-aware-snapshot-load-design.md) | Design | Zstd-aware snapshot inner layout, row-chunk decode, and low-risk read/load hot-path optimization evidence. |
 | [25-compiled-computed-userset-shortcut-design.md](./25-compiled-computed-userset-shortcut-design.md) | Design | Follow-up read optimization that moves computed-userset plain-target proofs into compiled schema IR. |
+| [26-request-local-memoization-design.md](./26-request-local-memoization-design.md) | Design | Request-local completed-check memoization for repeated subchecks inside one immutable read request. |
+| [27-compiled-evaluation-plan-design.md](./27-compiled-evaluation-plan-design.md) | Design | Flat compiled evaluation plan for schema expression execution without a full bytecode VM. |
+| [28-read-path-allocation-reduction-design.md](./28-read-path-allocation-reduction-design.md) | Design | Allocation measurement and targeted read-path allocation reduction, especially lookup-subject collection. |
+| [29-adaptive-bitmap-index-design.md](./29-adaptive-bitmap-index-design.md) | Design | Adaptive row-id set and tombstone-mask representations for dense/high-cardinality store paths. |
+| [30-adaptive-delta-compaction-design.md](./30-adaptive-delta-compaction-design.md) | Design | Background delta compaction policy that protects post-write read latency while preserving exact revisions. |
+| [31-schema-aware-lookup-planner-design.md](./31-schema-aware-lookup-planner-design.md) | Design | Schema-aware lookup producer and residual-verification planner for reducing candidate re-checks. |
+| [32-read-optimization-follow-up-plan.md](./32-read-optimization-follow-up-plan.md) | Implementation plan | Consolidated priority order and phase plan for specs 26-31. |
 | [60-crates-features-design.md](./60-crates-features-design.md) | Design | Crate layout, feature flags, dependency policy, current crate-version survey. |
 | [70-security-design.md](./70-security-design.md) | Design | Threat model, validation limits, panic policy, unsafe policy, logging/data exposure. |
 | [71-performance-budgets-design.md](./71-performance-budgets-design.md) | Design | Performance targets, benchmark matrix, profiling rules, CI gates. |
@@ -126,6 +133,12 @@ Read the v2 specs in numeric order. The order is also the implementation depende
                          |                                +----------------------+          |
                          |                                | 25 Compiled          |          |
                          |                                | Computed Shortcut    |          |
+                         |                                +----------+-----------+          |
+                         |                                           |                     |
+                         |                                           v                     |
+                         |                                +----------------------+          |
+                         |                                | 26-32 Read           |          |
+                         |                                | Follow-Up Plan       |          |
                          |                                +----------+-----------+          |
                          |                                           |                     |
                 +--------+---------------------+---------------------+---------------------+--------+
