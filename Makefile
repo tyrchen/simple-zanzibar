@@ -53,6 +53,9 @@ bench-snapshot-section-size:
 perf-impact-chart:
 	@uv run --script tools/render_perf_impact_chart.py
 
+phase-benchmark-trends:
+	@uv run --script tools/render_phase_benchmark_trends.py
+
 bench-snapshot-memory:
 	@cargo bench --bench snapshot --no-run
 	@set -e; \
@@ -113,4 +116,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-read-followup-baseline bench-snapshot-section-size perf-impact-chart bench-snapshot-memory bench-snapshot-zstd-memory bench-all fmt fmt-check clippy lint release update-submodule
+.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-read-followup-baseline bench-snapshot-section-size perf-impact-chart phase-benchmark-trends bench-snapshot-memory bench-snapshot-zstd-memory bench-all fmt fmt-check clippy lint release update-submodule
