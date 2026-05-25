@@ -549,6 +549,30 @@ sample inputs are cloned before the measured allocator region.
 | `perf_optimization/phase15_high_fanout_posting` | `2.4394..2.5346 ms` | resource indexes have one `16384`-row posting; exact-subject index has `16384` singleton postings; allocation companion: `646752` allocations, `41070704` bytes |
 | `perf_optimization/phase15_lookup_planner_pruning` | `95.482..99.013 ms` | `100000` checks, `50000` lookup candidates, `50000` full-root checks |
 
+Local Phase 15.1, 15.2, and 15.5 follow-up snapshot from
+`cargo bench --features bench-internals --bench perf_optimization -- phase15 --sample-size 10`
+and `cargo bench --features bench-internals --bench read_followup_allocations`:
+
+| Filter | Follow-up timing | Counter snapshot |
+| --- | ---: | --- |
+| `perf_optimization/phase15_memo_shared_parent` | `2.7524..2.9980 ms` | `3002` evaluated checks, `999` memo hits, `2003` memo misses/inserts, `1000` lookup candidates/full-root checks; allocation companion: `929633` allocations, `57763312` bytes |
+| `perf_optimization/phase15_lookup_subjects_allocation` | `683.77..707.74 us` | positive-only proof shortcut removed full-root verification: `0` checks, `1000` subject candidates, `1000` userset candidates, `0` full-root checks; allocation companion: `272672` allocations, `13003712` bytes |
+| `perf_optimization/phase15_delete_heavy_delta` | `7.1991..7.8377 us` | unchanged non-target fixture: `1` query, `1` inspected delta segment, `4096` deleted rows, `9997` tombstone ratio bps |
+| `perf_optimization/phase15_high_fanout_posting` | `224.27..259.58 us` | positive-only `This` lookup-subject proof skips full-root verification; allocation companion: `32400` allocations, `6350288` bytes |
+| `perf_optimization/phase15_lookup_planner_pruning` | `1.0150..1.0501 ms` | schema producer pruning removed `50000` exclusion-only candidates: `0` checks, `0` lookup candidates, `50000` schema-pruned relationships, `0` full-root checks |
+
+Gate outcome:
+
+- 15.1 memoization is kept for `lookup_resources` and permission enumeration, where shared
+  subchecks exist. It is intentionally not enabled for `lookup_subjects`; the first measured pass
+  had `0` memo hits and a `~21%` latency regression on the allocation fixture.
+- 15.2 streaming plus the 15.5 exact positive-proof shortcut materially reduces
+  `lookup_subjects` allocation and latency while leaving public `expand` unchanged.
+- 15.5 producer pruning keeps full-root verification for returned resources and prunes only
+  positive-producer-safe root candidates. Lookup-subject full-check skipping is limited to exact
+  positive proof shapes and is recomputed for nested userset relations; exclusion, intersection,
+  tuple-to-userset, and recursive fallbacks still use full verification.
+
 ## 4. Design Constraints
 
 - No full relationship-store scans in direct `check`.

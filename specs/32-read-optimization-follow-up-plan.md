@@ -121,6 +121,10 @@ Exit:
 - `check_prepared_1m` regresses by no more than 2%.
 - Existing cycle, depth, fanout, deny, exact-token, and lookup tests pass.
 
+Implementation note: 15.1 kept memoization out of `lookup_subjects` after measurement showed
+`0` hits and a `~21%` regression on the allocation fixture. `lookup_resources` and permission
+enumeration remain memo-enabled.
+
 ### M15.2 - Allocation Reduction
 
 Specs: [28](./28-read-path-allocation-reduction-design.md), [14](./14-evaluation-engine-design.md), [71](./71-performance-budgets-design.md)
@@ -139,6 +143,11 @@ Exit:
   than 5%.
 - Public `expand` output shape and lookup semantics remain unchanged.
 - No new dependency unless a measured `SmallVec` experiment beats local scratch storage.
+
+Implementation note: the large `lookup_subjects` allocation win landed with streaming plus the
+15.5 exact positive-proof shortcut. Exclusion, intersection, tuple-to-userset, and recursive
+fallbacks still run full root verification, and nested userset relations recompute their own
+verification requirement.
 
 ### M15.3 - Adaptive Delta Compaction
 

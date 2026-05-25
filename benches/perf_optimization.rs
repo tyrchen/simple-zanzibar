@@ -500,14 +500,21 @@ fn print_phase15_eval_counter_sample(name: &str, mut operation: impl FnMut()) {
     operation();
     let counters = evaluation_read_counters();
     eprintln!(
-        "{name}: check_evaluations={} memo_hit_opportunities={} completed_results={} \
-         lookup_resources_candidates={} lookup_resources_full_root_checks={} \
-         lookup_subjects_candidates={} lookup_subjects_usersets={} \
-         lookup_subjects_full_root_checks={}",
+        "{name}: check_evaluations={} memo_hit_opportunities={} memo_hits={} memo_misses={} \
+         memo_inserts={} memo_depth_skips={} completed_results={} lookup_resources_candidates={} \
+         lookup_resources_schema_pruned={} lookup_resources_planner_fallbacks={} \
+         lookup_resources_full_root_checks={} lookup_subjects_candidates={} \
+         lookup_subjects_usersets={} lookup_subjects_full_root_checks={}",
         counters.check_evaluations,
         counters.check_memo_hit_opportunities,
+        counters.check_memo_hits,
+        counters.check_memo_misses,
+        counters.check_memo_inserts,
+        counters.check_memo_depth_insufficient_skips,
         counters.check_completed_results,
         counters.lookup_resources_candidate_resources,
+        counters.lookup_resources_schema_pruned,
+        counters.lookup_resources_planner_fallbacks,
         counters.lookup_resources_full_root_checks,
         counters.lookup_subjects_candidate_subjects,
         counters.lookup_subjects_candidate_usersets,

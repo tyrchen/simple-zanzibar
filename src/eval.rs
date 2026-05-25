@@ -32,6 +32,18 @@ static CHECK_EVALUATIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
 static CHECK_MEMO_HIT_OPPORTUNITIES: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
+static CHECK_MEMO_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static CHECK_MEMO_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static CHECK_MEMO_INSERTS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static CHECK_MEMO_CAPACITY_SKIPS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static CHECK_MEMO_ACTIVE_CYCLE_SKIPS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static CHECK_MEMO_DEPTH_INSUFFICIENT_SKIPS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
 static CHECK_COMPLETED_RESULTS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
 static CHECK_ACTIVE_CYCLE_DENIALS: AtomicU64 = AtomicU64::new(0);
@@ -41,6 +53,10 @@ static LOOKUP_RESOURCES_FRONTIER_SUBJECTS: AtomicU64 = AtomicU64::new(0);
 static LOOKUP_RESOURCES_FRONTIER_RELATIONSHIPS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
 static LOOKUP_RESOURCES_CANDIDATE_RESOURCES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static LOOKUP_RESOURCES_SCHEMA_PRUNED: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static LOOKUP_RESOURCES_PLANNER_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
 static LOOKUP_RESOURCES_FULL_ROOT_CHECKS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
@@ -67,6 +83,18 @@ pub struct EvaluationReadCounters {
     pub check_evaluations: u64,
     /// Number of completed check keys observed again inside the same request context.
     pub check_memo_hit_opportunities: u64,
+    /// Number of request-local memo hits returned without re-evaluation.
+    pub check_memo_hits: u64,
+    /// Number of request-local memo misses that proceeded to evaluation.
+    pub check_memo_misses: u64,
+    /// Number of completed check results inserted into the request-local memo.
+    pub check_memo_inserts: u64,
+    /// Number of completed check results skipped because the request-local memo was full.
+    pub check_memo_capacity_skips: u64,
+    /// Number of active-cycle denials that intentionally bypassed request-local memo lookup.
+    pub check_memo_active_cycle_skips: u64,
+    /// Number of memo entries skipped because the caller had insufficient remaining depth.
+    pub check_memo_depth_insufficient_skips: u64,
     /// Number of successful check results that would be cacheable by request-local memoization.
     pub check_completed_results: u64,
     /// Number of active-recursion cycle denials.
@@ -77,6 +105,10 @@ pub struct EvaluationReadCounters {
     pub lookup_resources_frontier_relationships: u64,
     /// Number of resource candidates sent to root verification.
     pub lookup_resources_candidate_resources: u64,
+    /// Number of root-resource reverse relationships pruned by schema producer analysis.
+    pub lookup_resources_schema_pruned: u64,
+    /// Number of lookup-resource requests that fell back to the broad producer planner.
+    pub lookup_resources_planner_fallbacks: u64,
     /// Number of full-root checks run by `lookup_resources`.
     pub lookup_resources_full_root_checks: u64,
     /// Number of resources returned by `lookup_resources`.
@@ -100,11 +132,19 @@ pub struct EvaluationReadCounters {
 pub fn reset_evaluation_read_counters() {
     CHECK_EVALUATIONS.store(0, Ordering::Relaxed);
     CHECK_MEMO_HIT_OPPORTUNITIES.store(0, Ordering::Relaxed);
+    CHECK_MEMO_HITS.store(0, Ordering::Relaxed);
+    CHECK_MEMO_MISSES.store(0, Ordering::Relaxed);
+    CHECK_MEMO_INSERTS.store(0, Ordering::Relaxed);
+    CHECK_MEMO_CAPACITY_SKIPS.store(0, Ordering::Relaxed);
+    CHECK_MEMO_ACTIVE_CYCLE_SKIPS.store(0, Ordering::Relaxed);
+    CHECK_MEMO_DEPTH_INSUFFICIENT_SKIPS.store(0, Ordering::Relaxed);
     CHECK_COMPLETED_RESULTS.store(0, Ordering::Relaxed);
     CHECK_ACTIVE_CYCLE_DENIALS.store(0, Ordering::Relaxed);
     LOOKUP_RESOURCES_FRONTIER_SUBJECTS.store(0, Ordering::Relaxed);
     LOOKUP_RESOURCES_FRONTIER_RELATIONSHIPS.store(0, Ordering::Relaxed);
     LOOKUP_RESOURCES_CANDIDATE_RESOURCES.store(0, Ordering::Relaxed);
+    LOOKUP_RESOURCES_SCHEMA_PRUNED.store(0, Ordering::Relaxed);
+    LOOKUP_RESOURCES_PLANNER_FALLBACKS.store(0, Ordering::Relaxed);
     LOOKUP_RESOURCES_FULL_ROOT_CHECKS.store(0, Ordering::Relaxed);
     LOOKUP_RESOURCES_RETURNED.store(0, Ordering::Relaxed);
     LOOKUP_RESOURCES_RESULT_LIMIT_EXITS.store(0, Ordering::Relaxed);
@@ -122,6 +162,13 @@ pub fn evaluation_read_counters() -> EvaluationReadCounters {
     EvaluationReadCounters {
         check_evaluations: CHECK_EVALUATIONS.load(Ordering::Relaxed),
         check_memo_hit_opportunities: CHECK_MEMO_HIT_OPPORTUNITIES.load(Ordering::Relaxed),
+        check_memo_hits: CHECK_MEMO_HITS.load(Ordering::Relaxed),
+        check_memo_misses: CHECK_MEMO_MISSES.load(Ordering::Relaxed),
+        check_memo_inserts: CHECK_MEMO_INSERTS.load(Ordering::Relaxed),
+        check_memo_capacity_skips: CHECK_MEMO_CAPACITY_SKIPS.load(Ordering::Relaxed),
+        check_memo_active_cycle_skips: CHECK_MEMO_ACTIVE_CYCLE_SKIPS.load(Ordering::Relaxed),
+        check_memo_depth_insufficient_skips: CHECK_MEMO_DEPTH_INSUFFICIENT_SKIPS
+            .load(Ordering::Relaxed),
         check_completed_results: CHECK_COMPLETED_RESULTS.load(Ordering::Relaxed),
         check_active_cycle_denials: CHECK_ACTIVE_CYCLE_DENIALS.load(Ordering::Relaxed),
         lookup_resources_frontier_subjects: LOOKUP_RESOURCES_FRONTIER_SUBJECTS
@@ -129,6 +176,9 @@ pub fn evaluation_read_counters() -> EvaluationReadCounters {
         lookup_resources_frontier_relationships: LOOKUP_RESOURCES_FRONTIER_RELATIONSHIPS
             .load(Ordering::Relaxed),
         lookup_resources_candidate_resources: LOOKUP_RESOURCES_CANDIDATE_RESOURCES
+            .load(Ordering::Relaxed),
+        lookup_resources_schema_pruned: LOOKUP_RESOURCES_SCHEMA_PRUNED.load(Ordering::Relaxed),
+        lookup_resources_planner_fallbacks: LOOKUP_RESOURCES_PLANNER_FALLBACKS
             .load(Ordering::Relaxed),
         lookup_resources_full_root_checks: LOOKUP_RESOURCES_FULL_ROOT_CHECKS
             .load(Ordering::Relaxed),
@@ -155,6 +205,54 @@ fn record_active_cycle_denial() {
 fn record_active_cycle_denial() {}
 
 #[cfg(feature = "bench-internals")]
+fn record_check_memo_hit() {
+    CHECK_MEMO_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_check_memo_hit() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_check_memo_miss() {
+    CHECK_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_check_memo_miss() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_check_memo_insert() {
+    CHECK_MEMO_INSERTS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_check_memo_insert() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_check_memo_capacity_skip() {
+    CHECK_MEMO_CAPACITY_SKIPS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_check_memo_capacity_skip() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_check_memo_active_cycle_skip() {
+    CHECK_MEMO_ACTIVE_CYCLE_SKIPS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_check_memo_active_cycle_skip() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_check_memo_depth_insufficient_skip() {
+    CHECK_MEMO_DEPTH_INSUFFICIENT_SKIPS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_check_memo_depth_insufficient_skip() {}
+
+#[cfg(feature = "bench-internals")]
 fn record_lookup_resources_frontier_subject() {
     LOOKUP_RESOURCES_FRONTIER_SUBJECTS.fetch_add(1, Ordering::Relaxed);
 }
@@ -177,6 +275,22 @@ fn record_lookup_resources_candidate_resource() {
 
 #[cfg(not(feature = "bench-internals"))]
 fn record_lookup_resources_candidate_resource() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_lookup_resources_schema_pruned() {
+    LOOKUP_RESOURCES_SCHEMA_PRUNED.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_lookup_resources_schema_pruned() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_lookup_resources_planner_fallback() {
+    LOOKUP_RESOURCES_PLANNER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_lookup_resources_planner_fallback() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_resources_full_root_check() {
@@ -419,6 +533,127 @@ impl Membership {
             (Self::Allowed, Self::Denied) => Self::Allowed,
         }
     }
+
+    const fn is_memo_cacheable(self) -> bool {
+        matches!(self, Self::Allowed | Self::Denied)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CheckMemoKey {
+    Store(StoreCheckKey),
+    Public {
+        object: Object,
+        relation: RelationName,
+        user: User,
+    },
+}
+
+impl CheckMemoKey {
+    fn from_check_key(key: &CheckKey) -> Result<Self, ZanzibarError> {
+        match key {
+            CheckKey::Store(key) => Ok(Self::Store(*key)),
+            CheckKey::PublicName {
+                object,
+                relation,
+                user,
+            } => Ok(Self::Public {
+                object: object.clone(),
+                relation: relation.clone(),
+                user: user.clone(),
+            }),
+            CheckKey::Public {
+                object,
+                relation,
+                user,
+            } => Ok(Self::Public {
+                object: object.clone(),
+                relation: RelationName::try_from(relation)?,
+                user: user.clone(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CheckMemoEntry {
+    membership: Membership,
+    depth_required: NonZeroU32,
+}
+
+#[derive(Debug)]
+struct RequestCheckMemo {
+    entries: HashMap<CheckMemoKey, CheckMemoEntry>,
+    capacity: usize,
+}
+
+impl RequestCheckMemo {
+    fn new(limits: EvaluationLimits) -> Self {
+        Self {
+            entries: HashMap::new(),
+            capacity: memo_capacity(limits),
+        }
+    }
+
+    fn get(&self, key: &CheckMemoKey, remaining_depth: u32) -> MemoLookup {
+        match self.entries.get(key) {
+            Some(entry) if entry.depth_required.get() <= remaining_depth => {
+                MemoLookup::Hit(entry.membership)
+            }
+            Some(_) => MemoLookup::DepthInsufficient,
+            None => MemoLookup::Miss,
+        }
+    }
+
+    fn insert(&mut self, key: CheckMemoKey, membership: Membership, depth_required: NonZeroU32) {
+        if let Some(entry) = self.entries.get_mut(&key) {
+            if depth_required.get() <= entry.depth_required.get() {
+                *entry = CheckMemoEntry {
+                    membership,
+                    depth_required,
+                };
+            }
+            return;
+        }
+        if self.entries.len() >= self.capacity {
+            record_check_memo_capacity_skip();
+            return;
+        }
+        self.entries.insert(
+            key,
+            CheckMemoEntry {
+                membership,
+                depth_required,
+            },
+        );
+        record_check_memo_insert();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoLookup {
+    Hit(Membership),
+    Miss,
+    DepthInsufficient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CheckFrame {
+    entry_remaining_depth: u32,
+    minimum_remaining_depth: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LookupProducerPlan {
+    relations: HashSet<RelationName>,
+}
+
+impl LookupProducerPlan {
+    fn allows_relationship(&self, relationship: crate::relationship::RelationshipRef<'_>) -> bool {
+        self.relations
+            .iter()
+            .any(|relation| relationship.relation_name_eq(relation))
+    }
 }
 
 /// Evaluation context over one immutable snapshot.
@@ -433,6 +668,8 @@ pub struct EvaluationContext<'a> {
     active_expands: HashMap<ExpandKey, VisitMark>,
     check_stack: Vec<CheckKey>,
     expand_stack: Vec<ExpandKey>,
+    check_frames: Vec<CheckFrame>,
+    check_memo: Option<RequestCheckMemo>,
     #[cfg(feature = "bench-internals")]
     completed_check_keys: HashSet<CheckKey>,
 }
@@ -457,16 +694,29 @@ impl<'a> EvaluationContext<'a> {
             active_expands: HashMap::new(),
             check_stack: Vec::new(),
             expand_stack: Vec::new(),
+            check_frames: Vec::new(),
+            check_memo: None,
             #[cfg(feature = "bench-internals")]
             completed_check_keys: HashSet::new(),
         }
     }
 
-    fn reset_for_reuse(&mut self) {
+    #[must_use]
+    pub(crate) fn new_with_request_memo(
+        snapshot: &'a PublishedSnapshot,
+        limits: EvaluationLimits,
+    ) -> Self {
+        let mut context = Self::new(snapshot, limits);
+        context.check_memo = Some(RequestCheckMemo::new(limits));
+        context
+    }
+
+    pub(crate) fn reset_for_reuse(&mut self) {
         self.remaining_depth = self.limits.max_depth.get();
         self.use_active_indexes = true;
         self.check_stack.clear();
         self.expand_stack.clear();
+        self.check_frames.clear();
         if let Some(generation) = self
             .generation
             .get()
@@ -500,6 +750,75 @@ impl<'a> EvaluationContext<'a> {
         }
     }
 
+    fn evaluate_check_key(
+        &mut self,
+        key: &CheckKey,
+        evaluate: impl FnOnce(&mut Self) -> Result<Membership, ZanzibarError>,
+    ) -> Result<Membership, ZanzibarError> {
+        if self.is_check_active(key) {
+            record_active_cycle_denial();
+            if self.check_memo.is_some() {
+                record_check_memo_active_cycle_skip();
+            }
+            return Ok(Membership::Denied);
+        }
+        #[cfg(feature = "bench-internals")]
+        self.record_check_started(key);
+        if let Some(membership) = self.memo_lookup(key)? {
+            return Ok(membership);
+        }
+        #[cfg(feature = "bench-internals")]
+        let completed_key = key.clone();
+
+        let entry_remaining_depth = self.remaining_depth;
+        self.enter(EvaluationKey::Check(key.clone()))?;
+        self.push_check_frame(entry_remaining_depth);
+        self.push_check_key(key.clone());
+
+        let result = evaluate(self);
+        self.pop_check_key();
+        let depth_required = self.pop_check_frame_depth_required();
+        self.leave();
+        if let Ok(membership) = &result
+            && membership.is_memo_cacheable()
+        {
+            self.memo_insert(key, *membership, depth_required);
+        }
+        #[cfg(feature = "bench-internals")]
+        self.record_check_completed(&completed_key, &result);
+        result
+    }
+
+    fn memo_lookup(&self, key: &CheckKey) -> Result<Option<Membership>, ZanzibarError> {
+        let Some(memo) = &self.check_memo else {
+            return Ok(None);
+        };
+        let memo_key = CheckMemoKey::from_check_key(key)?;
+        match memo.get(&memo_key, self.remaining_depth) {
+            MemoLookup::Hit(membership) => {
+                record_check_memo_hit();
+                Ok(Some(membership))
+            }
+            MemoLookup::Miss => {
+                record_check_memo_miss();
+                Ok(None)
+            }
+            MemoLookup::DepthInsufficient => {
+                record_check_memo_depth_insufficient_skip();
+                Ok(None)
+            }
+        }
+    }
+
+    fn memo_insert(&mut self, key: &CheckKey, membership: Membership, depth_required: NonZeroU32) {
+        let Some(memo) = &mut self.check_memo else {
+            return;
+        };
+        if let Ok(memo_key) = CheckMemoKey::from_check_key(key) {
+            memo.insert(memo_key, membership, depth_required);
+        }
+    }
+
     /// Evaluates a check request and returns membership algebra.
     ///
     /// # Errors
@@ -512,23 +831,9 @@ impl<'a> EvaluationContext<'a> {
         user: &User,
     ) -> Result<Membership, ZanzibarError> {
         let key = CheckKey::new(self.snapshot, object, relation, user);
-        if self.is_check_active(&key) {
-            record_active_cycle_denial();
-            return Ok(Membership::Denied);
-        }
-        #[cfg(feature = "bench-internals")]
-        self.record_check_started(&key);
-        #[cfg(feature = "bench-internals")]
-        let completed_key = key.clone();
-        self.enter(EvaluationKey::Check(key.clone()))?;
-        self.push_check_key(key);
-
-        let result = self.check_entered(object, relation, user);
-        self.pop_check_key();
-        self.leave();
-        #[cfg(feature = "bench-internals")]
-        self.record_check_completed(&completed_key, &result);
-        result
+        self.evaluate_check_key(&key, |context| {
+            context.check_entered(object, relation, user)
+        })
     }
 
     pub(crate) fn check_prepared(
@@ -539,31 +844,17 @@ impl<'a> EvaluationContext<'a> {
         relation_definition: &SchemaRelationDefinition,
     ) -> Result<Membership, ZanzibarError> {
         let key = CheckKey::new(self.snapshot, object, relation, user);
-        if self.is_check_active(&key) {
-            record_active_cycle_denial();
-            return Ok(Membership::Denied);
-        }
-        #[cfg(feature = "bench-internals")]
-        self.record_check_started(&key);
-        #[cfg(feature = "bench-internals")]
-        let completed_key = key.clone();
-        self.enter(EvaluationKey::Check(key.clone()))?;
-        self.push_check_key(key);
-
-        let result = match relation_definition.compiled_userset_rewrite() {
-            Some(expression) => self.eval_compiled_schema_expression(
-                object,
-                relation_definition.name(),
-                user,
-                expression,
-            ),
-            None => self.eval_this(object, relation_definition.name(), user),
-        };
-        self.pop_check_key();
-        self.leave();
-        #[cfg(feature = "bench-internals")]
-        self.record_check_completed(&completed_key, &result);
-        result
+        self.evaluate_check_key(&key, |context| {
+            match relation_definition.compiled_userset_rewrite() {
+                Some(expression) => context.eval_compiled_schema_expression(
+                    object,
+                    relation_definition.name(),
+                    user,
+                    expression,
+                ),
+                None => context.eval_this(object, relation_definition.name(), user),
+            }
+        })
     }
 
     fn check_relation_name(
@@ -573,23 +864,9 @@ impl<'a> EvaluationContext<'a> {
         user: &User,
     ) -> Result<Membership, ZanzibarError> {
         let key = CheckKey::from_relation_name(self.snapshot, object, relation_name, user);
-        if self.is_check_active(&key) {
-            record_active_cycle_denial();
-            return Ok(Membership::Denied);
-        }
-        #[cfg(feature = "bench-internals")]
-        self.record_check_started(&key);
-        #[cfg(feature = "bench-internals")]
-        let completed_key = key.clone();
-        self.enter(EvaluationKey::Check(key.clone()))?;
-        self.push_check_key(key);
-
-        let result = self.check_relation_name_entered(object, relation_name, user);
-        self.pop_check_key();
-        self.leave();
-        #[cfg(feature = "bench-internals")]
-        self.record_check_completed(&completed_key, &result);
-        result
+        self.evaluate_check_key(&key, |context| {
+            context.check_relation_name_entered(object, relation_name, user)
+        })
     }
 
     fn check_relation_id(
@@ -600,23 +877,9 @@ impl<'a> EvaluationContext<'a> {
         user: &User,
     ) -> Result<Membership, ZanzibarError> {
         let key = CheckKey::from_relation_name(self.snapshot, object, relation_name, user);
-        if self.is_check_active(&key) {
-            record_active_cycle_denial();
-            return Ok(Membership::Denied);
-        }
-        #[cfg(feature = "bench-internals")]
-        self.record_check_started(&key);
-        #[cfg(feature = "bench-internals")]
-        let completed_key = key.clone();
-        self.enter(EvaluationKey::Check(key.clone()))?;
-        self.push_check_key(key);
-
-        let result = self.check_relation_id_entered(object, relation_name, relation_id, user);
-        self.pop_check_key();
-        self.leave();
-        #[cfg(feature = "bench-internals")]
-        self.record_check_completed(&completed_key, &result);
-        result
+        self.evaluate_check_key(&key, |context| {
+            context.check_relation_id_entered(object, relation_name, relation_id, user)
+        })
     }
 
     /// Expands a userset using the same snapshot and recursion limits.
@@ -790,23 +1053,9 @@ impl<'a> EvaluationContext<'a> {
         user: &User,
     ) -> Result<Membership, ZanzibarError> {
         let key = CheckKey::from_relation_name(self.snapshot, object, relation_name, user);
-        if self.is_check_active(&key) {
-            record_active_cycle_denial();
-            return Ok(Membership::Denied);
-        }
-        #[cfg(feature = "bench-internals")]
-        self.record_check_started(&key);
-        #[cfg(feature = "bench-internals")]
-        let completed_key = key.clone();
-        self.enter(EvaluationKey::Check(key.clone()))?;
-        self.push_check_key(key);
-
-        let result = self.eval_this(object, relation_name, user);
-        self.pop_check_key();
-        self.leave();
-        #[cfg(feature = "bench-internals")]
-        self.record_check_completed(&completed_key, &result);
-        result
+        self.evaluate_check_key(&key, |context| {
+            context.eval_this(object, relation_name, user)
+        })
     }
 
     fn eval_this(
@@ -1055,11 +1304,202 @@ impl<'a> EvaluationContext<'a> {
         Ok(ExpandedUserset::Union(users))
     }
 
+    fn stream_lookup_subjects_relation(
+        &mut self,
+        collector: &mut LookupSubjectCollector<'_, '_>,
+        object: &Object,
+        relation_name: &RelationName,
+        inherited_verify_candidates: bool,
+    ) -> Result<(), ZanzibarError> {
+        if collector.result_limit_reached() {
+            record_lookup_subjects_result_limit_exit();
+            return Ok(());
+        }
+        let key = ExpandKey::new(object, relation_name);
+        if self.is_expand_active(&key) {
+            return Ok(());
+        }
+        self.enter(EvaluationKey::Expand(key.clone()))?;
+        self.push_expand_key(key);
+
+        let result = self.stream_lookup_subjects_relation_entered(
+            collector,
+            object,
+            relation_name,
+            inherited_verify_candidates,
+        );
+        self.pop_expand_key();
+        self.leave();
+        result
+    }
+
+    fn stream_lookup_subjects_relation_entered(
+        &mut self,
+        collector: &mut LookupSubjectCollector<'_, '_>,
+        object: &Object,
+        relation_name: &RelationName,
+        inherited_verify_candidates: bool,
+    ) -> Result<(), ZanzibarError> {
+        let object_type = ObjectType::try_from(object.namespace.as_str())?;
+        let relation_definition = self
+            .snapshot
+            .schema()
+            .resolver()
+            .relation(&object_type, relation_name)?;
+        let verify_candidates = inherited_verify_candidates
+            || relation_definition_requires_lookup_subject_verification(
+                self.snapshot,
+                relation_definition,
+            )?;
+        match relation_definition.compiled_userset_rewrite() {
+            Some(expression) => self.stream_lookup_subjects_expression(
+                collector,
+                object,
+                relation_name,
+                expression,
+                verify_candidates,
+            ),
+            None => self.stream_lookup_subjects_this(
+                collector,
+                object,
+                relation_name,
+                verify_candidates,
+            ),
+        }
+    }
+
+    fn stream_lookup_subjects_expression(
+        &mut self,
+        collector: &mut LookupSubjectCollector<'_, '_>,
+        object: &Object,
+        relation_name: &RelationName,
+        expression: &CompiledUsersetExpression,
+        verify_candidates: bool,
+    ) -> Result<(), ZanzibarError> {
+        if collector.result_limit_reached() {
+            record_lookup_subjects_result_limit_exit();
+            return Ok(());
+        }
+        match expression {
+            CompiledUsersetExpression::This => self.stream_lookup_subjects_this(
+                collector,
+                object,
+                relation_name,
+                verify_candidates,
+            ),
+            CompiledUsersetExpression::ComputedUserset { relation, .. } => {
+                self.stream_lookup_subjects_relation(collector, object, relation, verify_candidates)
+            }
+            CompiledUsersetExpression::TupleToUserset {
+                tupleset_relation: _,
+                tupleset_relation_id,
+                computed_userset_relation,
+            } => {
+                let mut fanout = 0_u32;
+                let resource = DomainObjectRef::try_from(object)?;
+                let tupleset_relation = self
+                    .snapshot
+                    .schema()
+                    .resolver()
+                    .relation_by_id(*tupleset_relation_id)
+                    .ok_or_else(compiled_schema_invariant_error)?
+                    .name()
+                    .clone();
+                for relationship in self.snapshot.relationships().resource_relation(
+                    &resource,
+                    &tupleset_relation,
+                    unbounded_query_limit(),
+                ) {
+                    if collector.result_limit_reached() {
+                        record_lookup_subjects_result_limit_exit();
+                        return Ok(());
+                    }
+                    if let Some((intermediate_object, _)) =
+                        relationship.subject_userset_relation_name()?
+                    {
+                        self.increment_fanout(&mut fanout)?;
+                        self.stream_lookup_subjects_relation(
+                            collector,
+                            &intermediate_object,
+                            computed_userset_relation,
+                            true,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            CompiledUsersetExpression::Union(expressions)
+            | CompiledUsersetExpression::Intersection(expressions) => {
+                for expression in expressions {
+                    self.stream_lookup_subjects_expression(
+                        collector,
+                        object,
+                        relation_name,
+                        expression,
+                        verify_candidates,
+                    )?;
+                    if collector.result_limit_reached() {
+                        record_lookup_subjects_result_limit_exit();
+                        return Ok(());
+                    }
+                }
+                Ok(())
+            }
+            CompiledUsersetExpression::Exclusion { base, .. } => {
+                self.stream_lookup_subjects_expression(collector, object, relation_name, base, true)
+            }
+        }
+    }
+
+    fn stream_lookup_subjects_this(
+        &mut self,
+        collector: &mut LookupSubjectCollector<'_, '_>,
+        object: &Object,
+        relation_name: &RelationName,
+        verify_candidates: bool,
+    ) -> Result<(), ZanzibarError> {
+        let mut fanout = 0_u32;
+        let resource = DomainObjectRef::try_from(object)?;
+        for relationship in self.snapshot.relationships().resource_relation(
+            &resource,
+            relation_name,
+            self.fanout_query_limit(),
+        ) {
+            if collector.result_limit_reached() {
+                record_lookup_subjects_result_limit_exit();
+                return Ok(());
+            }
+            self.increment_fanout(&mut fanout)?;
+            if let Some((nested_object, nested_relation)) =
+                relationship.subject_userset_relation_name()?
+            {
+                if collector.collect_userset_candidate(
+                    &nested_object,
+                    &nested_relation,
+                    verify_candidates,
+                )? {
+                    self.stream_lookup_subjects_relation(
+                        collector,
+                        &nested_object,
+                        &nested_relation,
+                        verify_candidates,
+                    )?;
+                }
+            } else if let Some(user_id) = relationship.direct_user_subject_id() {
+                collector.collect_user_candidate(user_id, verify_candidates)?;
+            } else {
+                let _ = relationship.expanded_subject()?;
+            }
+        }
+        Ok(())
+    }
+
     fn enter(&mut self, key: EvaluationKey) -> Result<(), ZanzibarError> {
         if self.remaining_depth == 0 {
             return Err(EvaluationError::DepthExceeded { key: Box::new(key) }.into());
         }
         self.remaining_depth = self.remaining_depth.saturating_sub(1);
+        self.record_check_frame_depth(self.remaining_depth);
         Ok(())
     }
 
@@ -1085,6 +1525,31 @@ impl<'a> EvaluationContext<'a> {
             None => NonZeroUsize::MAX,
         };
         QueryLimit::new(limit)
+    }
+
+    fn push_check_frame(&mut self, entry_remaining_depth: u32) {
+        self.check_frames.push(CheckFrame {
+            entry_remaining_depth,
+            minimum_remaining_depth: self.remaining_depth,
+        });
+    }
+
+    fn pop_check_frame_depth_required(&mut self) -> NonZeroU32 {
+        let Some(frame) = self.check_frames.pop() else {
+            return NonZeroU32::MIN;
+        };
+        self.record_check_frame_depth(frame.minimum_remaining_depth);
+        non_zero_u32(
+            frame
+                .entry_remaining_depth
+                .saturating_sub(frame.minimum_remaining_depth),
+        )
+    }
+
+    fn record_check_frame_depth(&mut self, remaining_depth: u32) {
+        if let Some(frame) = self.check_frames.last_mut() {
+            frame.minimum_remaining_depth = frame.minimum_remaining_depth.min(remaining_depth);
+        }
     }
 
     fn is_check_active(&self, key: &CheckKey) -> bool {
@@ -1251,12 +1716,16 @@ pub fn lookup_resources_with_snapshot(
         .schema()
         .resolver()
         .relation(&resource_type, &permission)?;
+    let producer_plan = lookup_producer_plan(snapshot, &resource_type, &permission)?;
+    if producer_plan.is_none() {
+        record_lookup_resources_planner_fallback();
+    }
 
     let mut frontier = VecDeque::from([request.subject.clone()]);
     let mut visited_subjects = HashSet::from([request.subject.clone()]);
     let mut seen = HashSet::new();
     let mut resources = Vec::new();
-    let mut check_context = EvaluationContext::new(snapshot, limits);
+    let mut check_context = EvaluationContext::new_with_request_memo(snapshot, limits);
 
     while let Some(subject) = frontier.pop_front() {
         record_lookup_resources_frontier_subject();
@@ -1266,8 +1735,18 @@ pub fn lookup_resources_with_snapshot(
             .reverse_query_compact_relationships(&subject_filter)
         {
             record_lookup_resources_frontier_relationship();
+            let resource_type_matches = relationship.resource_type_eq(&resource_type);
+            if resource_type_matches
+                && producer_plan
+                    .as_ref()
+                    .is_some_and(|plan| !plan.allows_relationship(relationship))
+            {
+                record_lookup_resources_schema_pruned();
+                continue;
+            }
+
             let object = relationship.resource_object_legacy();
-            if relationship.resource_type_eq(&resource_type) && seen.insert(object.clone()) {
+            if resource_type_matches && seen.insert(object.clone()) {
                 record_lookup_resources_candidate_resource();
                 check_context.reset_for_reuse();
                 record_lookup_resources_full_root_check();
@@ -1317,8 +1796,6 @@ pub fn lookup_subjects_with_snapshot(
         snapshot.schema().resolver().namespace(&object_type)?;
     }
 
-    let expanded =
-        EvaluationContext::new(snapshot, limits).expand(&request.resource, &request.permission)?;
     let mut seen = HashSet::new();
     let mut seen_usersets = HashSet::new();
     let mut subjects = Vec::new();
@@ -1332,10 +1809,14 @@ pub fn lookup_subjects_with_snapshot(
         seen_subjects: &mut seen,
         seen_usersets: &mut seen_usersets,
         subjects: &mut subjects,
-        expand_context: &mut expand_context,
         check_context: &mut check_context,
     };
-    collector.collect(&expanded)?;
+    expand_context.stream_lookup_subjects_relation(
+        &mut collector,
+        &request.resource,
+        &permission,
+        false,
+    )?;
 
     Ok(LookupSubjects { subjects })
 }
@@ -1344,100 +1825,254 @@ fn compiled_schema_invariant_error() -> ZanzibarError {
     ZanzibarError::StorageError("compiled schema relation id is out of bounds".to_string())
 }
 
+fn lookup_producer_plan(
+    snapshot: &PublishedSnapshot,
+    resource_type: &ObjectType,
+    permission: &RelationName,
+) -> Result<Option<LookupProducerPlan>, ZanzibarError> {
+    let resolver = snapshot.schema().resolver();
+    let relation_id = resolver.relation_id(resource_type, permission)?;
+    let relation_definition = resolver
+        .relation_by_id(relation_id)
+        .ok_or_else(compiled_schema_invariant_error)?;
+    let mut relations = HashSet::new();
+    let mut visiting = HashSet::new();
+    if collect_relation_producers(
+        snapshot,
+        relation_id,
+        relation_definition,
+        &mut visiting,
+        &mut relations,
+    )? {
+        Ok(Some(LookupProducerPlan { relations }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn collect_relation_producers(
+    snapshot: &PublishedSnapshot,
+    relation_id: SchemaRelationId,
+    relation_definition: &SchemaRelationDefinition,
+    visiting: &mut HashSet<SchemaRelationId>,
+    producers: &mut HashSet<RelationName>,
+) -> Result<bool, ZanzibarError> {
+    if !visiting.insert(relation_id) {
+        return Ok(false);
+    }
+    let supported = if let Some(expression) = relation_definition.compiled_userset_rewrite() {
+        collect_expression_producers(
+            snapshot,
+            relation_definition.name(),
+            expression,
+            visiting,
+            producers,
+        )?
+    } else {
+        producers.insert(relation_definition.name().clone());
+        true
+    };
+    visiting.remove(&relation_id);
+    Ok(supported)
+}
+
+fn collect_expression_producers(
+    snapshot: &PublishedSnapshot,
+    current_relation: &RelationName,
+    expression: &CompiledUsersetExpression,
+    visiting: &mut HashSet<SchemaRelationId>,
+    producers: &mut HashSet<RelationName>,
+) -> Result<bool, ZanzibarError> {
+    match expression {
+        CompiledUsersetExpression::This => {
+            producers.insert(current_relation.clone());
+            Ok(true)
+        }
+        CompiledUsersetExpression::ComputedUserset {
+            relation,
+            relation_id,
+            target_has_rewrite,
+        } => {
+            if !target_has_rewrite {
+                producers.insert(relation.clone());
+                return Ok(true);
+            }
+            let relation_definition = snapshot
+                .schema()
+                .resolver()
+                .relation_by_id(*relation_id)
+                .ok_or_else(compiled_schema_invariant_error)?;
+            collect_relation_producers(
+                snapshot,
+                *relation_id,
+                relation_definition,
+                visiting,
+                producers,
+            )
+        }
+        CompiledUsersetExpression::Union(expressions) => {
+            for expression in expressions {
+                if !collect_expression_producers(
+                    snapshot,
+                    current_relation,
+                    expression,
+                    visiting,
+                    producers,
+                )? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        CompiledUsersetExpression::Exclusion { base, .. } => {
+            collect_expression_producers(snapshot, current_relation, base, visiting, producers)
+        }
+        CompiledUsersetExpression::TupleToUserset { .. }
+        | CompiledUsersetExpression::Intersection(_) => Ok(false),
+    }
+}
+
+fn relation_definition_requires_lookup_subject_verification(
+    snapshot: &PublishedSnapshot,
+    relation_definition: &SchemaRelationDefinition,
+) -> Result<bool, ZanzibarError> {
+    let Some(expression) = relation_definition.compiled_userset_rewrite() else {
+        return Ok(false);
+    };
+    let mut visiting = HashSet::new();
+    expression_requires_lookup_subject_verification(snapshot, expression, &mut visiting)
+}
+
+fn expression_requires_lookup_subject_verification(
+    snapshot: &PublishedSnapshot,
+    expression: &CompiledUsersetExpression,
+    visiting: &mut HashSet<SchemaRelationId>,
+) -> Result<bool, ZanzibarError> {
+    match expression {
+        CompiledUsersetExpression::This => Ok(false),
+        CompiledUsersetExpression::ComputedUserset {
+            relation_id,
+            target_has_rewrite,
+            ..
+        } => {
+            if !target_has_rewrite {
+                return Ok(false);
+            }
+            if !visiting.insert(*relation_id) {
+                return Ok(true);
+            }
+            let relation_definition = snapshot
+                .schema()
+                .resolver()
+                .relation_by_id(*relation_id)
+                .ok_or_else(compiled_schema_invariant_error)?;
+            let requires = match relation_definition.compiled_userset_rewrite() {
+                Some(expression) => {
+                    expression_requires_lookup_subject_verification(snapshot, expression, visiting)?
+                }
+                None => false,
+            };
+            visiting.remove(relation_id);
+            Ok(requires)
+        }
+        CompiledUsersetExpression::Union(expressions) => {
+            for expression in expressions {
+                if expression_requires_lookup_subject_verification(snapshot, expression, visiting)?
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        CompiledUsersetExpression::TupleToUserset { .. }
+        | CompiledUsersetExpression::Intersection(_)
+        | CompiledUsersetExpression::Exclusion { .. } => Ok(true),
+    }
+}
+
 struct LookupSubjectCollector<'a, 'ctx> {
     resource: &'a Object,
     permission: &'a Relation,
     subject_type: &'a SubjectType,
     limits: EvaluationLimits,
     seen_subjects: &'ctx mut HashSet<User>,
-    seen_usersets: &'ctx mut HashSet<(Object, Relation)>,
+    seen_usersets: &'ctx mut HashSet<(Object, RelationName)>,
     subjects: &'ctx mut Vec<User>,
-    expand_context: &'ctx mut EvaluationContext<'a>,
     check_context: &'ctx mut EvaluationContext<'a>,
 }
 
 impl LookupSubjectCollector<'_, '_> {
-    fn collect(&mut self, expanded: &ExpandedUserset) -> Result<(), ZanzibarError> {
-        if lookup_result_limit_reached(self.subjects.len(), self.limits) {
-            record_lookup_subjects_result_limit_exit();
+    fn result_limit_reached(&self) -> bool {
+        lookup_result_limit_reached(self.subjects.len(), self.limits)
+    }
+
+    fn collect_user_candidate(
+        &mut self,
+        id: &str,
+        verify_candidate: bool,
+    ) -> Result<(), ZanzibarError> {
+        if self.subject_type.as_str() != "user" {
             return Ok(());
         }
-        match expanded {
-            ExpandedUserset::User(id) if self.subject_type.as_str() == "user" => {
-                let subject = User::UserId(id.clone());
-                record_lookup_subjects_candidate_subject();
-                if self.seen_subjects.insert(subject.clone()) {
-                    self.check_context.reset_for_reuse();
-                    record_lookup_subjects_full_root_check();
-                    if self
-                        .check_context
-                        .check(self.resource, self.permission, &subject)?
-                        .is_allowed()
-                    {
-                        self.subjects.push(subject);
-                        record_lookup_subjects_returned();
-                    }
-                }
+        let subject = User::UserId(id.to_string());
+        record_lookup_subjects_candidate_subject();
+        if self.seen_subjects.insert(subject.clone()) {
+            if !verify_candidate {
+                self.push_verified_subject(subject);
+                return Ok(());
             }
-            ExpandedUserset::User(_) => {}
-            ExpandedUserset::Userset(object, relation) => {
-                self.collect_userset(object, relation)?;
-            }
-            ExpandedUserset::Union(children) | ExpandedUserset::Intersection(children) => {
-                for child in children {
-                    self.collect(child)?;
-                    if lookup_result_limit_reached(self.subjects.len(), self.limits) {
-                        record_lookup_subjects_result_limit_exit();
-                        return Ok(());
-                    }
-                }
-            }
-            ExpandedUserset::Exclusion { base, exclude } => {
-                self.collect(base)?;
-                if lookup_result_limit_reached(self.subjects.len(), self.limits) {
-                    record_lookup_subjects_result_limit_exit();
-                    return Ok(());
-                }
-                self.collect(exclude)?;
+            self.check_context.reset_for_reuse();
+            record_lookup_subjects_full_root_check();
+            if self
+                .check_context
+                .check(self.resource, self.permission, &subject)?
+                .is_allowed()
+            {
+                self.push_verified_subject(subject);
             }
         }
         Ok(())
     }
 
-    fn collect_userset(
+    fn collect_userset_candidate(
         &mut self,
         object: &Object,
-        relation: &Relation,
-    ) -> Result<(), ZanzibarError> {
-        let userset = User::Userset(object.clone(), relation.clone());
+        relation_name: &RelationName,
+        verify_candidate: bool,
+    ) -> Result<bool, ZanzibarError> {
         record_lookup_subjects_candidate_userset();
-        if object.namespace == self.subject_type.as_str()
-            && self.seen_subjects.insert(userset.clone())
-        {
-            self.check_context.reset_for_reuse();
-            record_lookup_subjects_full_root_check();
-            if self
-                .check_context
-                .check(self.resource, self.permission, &userset)?
-                .is_allowed()
-            {
-                self.subjects.push(userset);
-                record_lookup_subjects_returned();
-                if lookup_result_limit_reached(self.subjects.len(), self.limits) {
-                    record_lookup_subjects_result_limit_exit();
-                    return Ok(());
+        if object.namespace == self.subject_type.as_str() {
+            let relation = Relation(relation_name.as_str().to_string());
+            let userset = User::Userset(object.clone(), relation);
+            if self.seen_subjects.insert(userset.clone()) {
+                if !verify_candidate {
+                    return Ok(self.push_verified_subject(userset));
+                }
+                self.check_context.reset_for_reuse();
+                record_lookup_subjects_full_root_check();
+                if self
+                    .check_context
+                    .check(self.resource, self.permission, &userset)?
+                    .is_allowed()
+                    && !self.push_verified_subject(userset)
+                {
+                    return Ok(false);
                 }
             }
         }
-        if self
+        Ok(self
             .seen_usersets
-            .insert((object.clone(), relation.clone()))
-        {
-            self.expand_context.reset_for_reuse();
-            let nested = self.expand_context.expand(object, relation)?;
-            self.collect(&nested)?;
+            .insert((object.clone(), relation_name.clone())))
+    }
+
+    fn push_verified_subject(&mut self, subject: User) -> bool {
+        self.subjects.push(subject);
+        record_lookup_subjects_returned();
+        if lookup_result_limit_reached(self.subjects.len(), self.limits) {
+            record_lookup_subjects_result_limit_exit();
+            return false;
         }
-        Ok(())
+        true
     }
 }
 
@@ -1446,6 +2081,12 @@ fn non_zero_u32(value: u32) -> NonZeroU32 {
         Some(value) => value,
         None => NonZeroU32::MIN,
     }
+}
+
+fn memo_capacity(limits: EvaluationLimits) -> usize {
+    let scaled = limits.max_lookup_results.get().saturating_mul(4);
+    let clamped = scaled.clamp(128, 16_384);
+    usize::try_from(clamped).map_or(16_384, |value| value)
 }
 
 fn unbounded_query_limit() -> QueryLimit {
@@ -1458,4 +2099,26 @@ fn lookup_result_limit_reached(current_len: usize, limits: EvaluationLimits) -> 
         Err(_) => usize::MAX,
     };
     current_len >= limit
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_skip_request_memo_hit_when_depth_is_insufficient()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut memo = RequestCheckMemo::new(EvaluationLimits::default());
+        let key = CheckMemoKey::Public {
+            object: Object::new("doc", "one"),
+            relation: RelationName::try_from("viewer")?,
+            user: User::user_id("alice"),
+        };
+
+        memo.insert(key.clone(), Membership::Allowed, non_zero_u32(3));
+
+        assert_eq!(memo.get(&key, 2), MemoLookup::DepthInsufficient);
+        assert_eq!(memo.get(&key, 3), MemoLookup::Hit(Membership::Allowed));
+        Ok(())
+    }
 }

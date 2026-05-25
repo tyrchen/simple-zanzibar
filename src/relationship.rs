@@ -2252,8 +2252,22 @@ impl RelationshipRef<'_> {
         self.store.resolve(self.row.resource_type.0) == expected.as_str()
     }
 
+    pub(crate) fn relation_name_eq(&self, expected: &RelationName) -> bool {
+        self.store.resolve(self.row.relation.0) == expected.as_str()
+    }
+
     pub(crate) fn relation_legacy(&self) -> crate::model::Relation {
         crate::model::Relation(self.store.resolve(self.row.relation.0).to_string())
+    }
+
+    pub(crate) fn direct_user_subject_id(&self) -> Option<&str> {
+        if self.row.subject_relation.is_none()
+            && self.store.resolve(self.row.subject_type.0) == "user"
+        {
+            Some(self.store.resolve(self.row.subject_id.0))
+        } else {
+            None
+        }
     }
 
     pub(crate) fn subject_userset_relation_name(

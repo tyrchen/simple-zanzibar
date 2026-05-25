@@ -627,21 +627,22 @@ impl ZanzibarEngine {
         let object_type = ObjectType::try_from(request.resource.namespace.as_str())?;
         snapshot.schema().resolver().namespace(&object_type)?;
         let mut permissions = Vec::new();
+        let mut check_context = eval::EvaluationContext::new_with_request_memo(&snapshot, limits);
         for relation_definition in snapshot
             .schema()
             .resolver()
             .sorted_relations(&object_type)?
         {
             let relation = Relation(relation_definition.name().as_str().to_string());
-            if eval::check_prepared_with_snapshot(
-                &snapshot,
-                &request.resource,
-                &relation,
-                &request.subject,
-                relation_definition,
-                limits,
-            )?
-            .is_allowed()
+            check_context.reset_for_reuse();
+            if check_context
+                .check_prepared(
+                    &request.resource,
+                    &relation,
+                    &request.subject,
+                    relation_definition,
+                )?
+                .is_allowed()
             {
                 permissions.push(relation);
             }

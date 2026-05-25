@@ -376,6 +376,241 @@ fn test_should_record_lookup_and_memo_opportunity_counters()
     assert!(counters.lookup_resources_candidate_resources >= 2);
     assert!(counters.lookup_resources_full_root_checks >= 2);
     assert!(counters.check_memo_hit_opportunities > 0);
+    assert!(counters.check_memo_hits > 0);
+    assert!(counters.check_memo_inserts > 0);
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn test_should_not_cache_active_cycle_denials_in_request_memo()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = BENCH_COUNTER_TEST_LOCK
+        .lock()
+        .map_err(|_| "bench counter test lock poisoned")?;
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace doc {
+            relation seed {}
+            relation first {
+                rewrite computed_userset(relation: "second")
+            }
+            relation second {
+                rewrite computed_userset(relation: "first")
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([RelationshipMutation::touch("doc:loop#seed@user:alice")?])?;
+
+    reset_evaluation_read_counters();
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("first"),
+        "doc",
+    ))?;
+    let counters = evaluation_read_counters();
+
+    assert!(resources.resources.is_empty());
+    assert!(counters.check_active_cycle_denials > 0);
+    assert!(counters.check_memo_active_cycle_skips > 0);
+    Ok(())
+}
+
+#[test]
+fn test_should_stream_lookup_subjects_through_base_side_of_exclusion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace doc {
+            relation viewer {}
+            relation banned {}
+            relation can_view {
+                rewrite exclusion(
+                    computed_userset(relation: "viewer"),
+                    computed_userset(relation: "banned")
+                )
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("doc:one#viewer@user:alice")?,
+        RelationshipMutation::touch("doc:one#viewer@user:bob")?,
+        RelationshipMutation::touch("doc:one#banned@user:bob")?,
+        RelationshipMutation::touch("doc:one#banned@user:charlie")?,
+    ])?;
+
+    let subjects = engine.lookup_subjects(LookupSubjectsRequest::new(
+        object("doc", "one"),
+        relation("can_view"),
+        "user",
+    ))?;
+
+    assert_eq!(subjects.subjects, vec![User::user_id("alice")]);
+    Ok(())
+}
+
+#[test]
+fn test_should_verify_lookup_subjects_when_nested_userset_relation_has_exclusion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace group {
+            relation member_base {}
+            relation banned {}
+            relation member {
+                rewrite exclusion(
+                    computed_userset(relation: "member_base"),
+                    computed_userset(relation: "banned")
+                )
+            }
+        }
+
+        namespace doc {
+            relation viewer {}
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("doc:one#viewer@group:eng#member")?,
+        RelationshipMutation::touch("group:eng#member_base@user:alice")?,
+        RelationshipMutation::touch("group:eng#member_base@user:bob")?,
+        RelationshipMutation::touch("group:eng#banned@user:bob")?,
+    ])?;
+
+    let subjects = engine.lookup_subjects(LookupSubjectsRequest::new(
+        object("doc", "one"),
+        relation("viewer"),
+        "user",
+    ))?;
+
+    assert_eq!(subjects.subjects, vec![User::user_id("alice")]);
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn test_should_not_expand_exclusion_only_subjects_as_lookup_subject_candidates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = BENCH_COUNTER_TEST_LOCK
+        .lock()
+        .map_err(|_| "bench counter test lock poisoned")?;
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace doc {
+            relation viewer {}
+            relation banned {}
+            relation can_view {
+                rewrite exclusion(
+                    computed_userset(relation: "viewer"),
+                    computed_userset(relation: "banned")
+                )
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("doc:one#viewer@user:alice")?,
+        RelationshipMutation::touch("doc:one#banned@user:bob")?,
+    ])?;
+
+    reset_evaluation_read_counters();
+    let subjects = engine.lookup_subjects(LookupSubjectsRequest::new(
+        object("doc", "one"),
+        relation("can_view"),
+        "user",
+    ))?;
+    let counters = evaluation_read_counters();
+
+    assert_eq!(subjects.subjects, vec![User::user_id("alice")]);
+    assert!(counters.lookup_subjects_candidate_subjects >= 1);
+    assert!(counters.lookup_subjects_full_root_checks >= 1);
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn test_should_prune_lookup_resources_candidates_from_exclusion_only_relations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = BENCH_COUNTER_TEST_LOCK
+        .lock()
+        .map_err(|_| "bench counter test lock poisoned")?;
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace doc {
+            relation viewer {}
+            relation banned {}
+            relation can_view {
+                rewrite exclusion(
+                    computed_userset(relation: "viewer"),
+                    computed_userset(relation: "banned")
+                )
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("doc:blocked_one#banned@user:alice")?,
+        RelationshipMutation::touch("doc:blocked_two#banned@user:alice")?,
+    ])?;
+
+    reset_evaluation_read_counters();
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("can_view"),
+        "doc",
+    ))?;
+    let counters = evaluation_read_counters();
+
+    assert!(resources.resources.is_empty());
+    assert!(counters.lookup_resources_schema_pruned >= 2);
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn test_should_keep_lookup_planner_conservative_for_intersection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = BENCH_COUNTER_TEST_LOCK
+        .lock()
+        .map_err(|_| "bench counter test lock poisoned")?;
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace doc {
+            relation viewer {}
+            relation reviewer {}
+            relation can_view {
+                rewrite intersection(
+                    computed_userset(relation: "viewer"),
+                    computed_userset(relation: "reviewer")
+                )
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([RelationshipMutation::touch(
+        "doc:needs_review#viewer@user:alice",
+    )?])?;
+
+    reset_evaluation_read_counters();
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("can_view"),
+        "doc",
+    ))?;
+    let counters = evaluation_read_counters();
+
+    assert!(resources.resources.is_empty());
+    assert!(counters.lookup_resources_candidate_resources >= 1);
+    assert!(counters.lookup_resources_full_root_checks >= 1);
+    assert!(counters.lookup_resources_planner_fallbacks >= 1);
     Ok(())
 }
 
