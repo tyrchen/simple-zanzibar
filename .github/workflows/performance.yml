@@ -1,0 +1,69 @@
+name: performance
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
+  push:
+    branches:
+      - master
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - Makefile
+      - rust-toolchain.toml
+      - benches/**
+      - src/**
+      - tools/perfviz/**
+
+permissions:
+  contents: write
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  continuous-performance:
+    runs-on: ubuntu-latest
+    env:
+      PERF_PHASE: ci
+      PERF_SAMPLE_SIZE: "10"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.95.0 --component clippy --component rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Run continuous performance benchmarks
+        run: make bench-perf-continuous
+      - name: Update benchmark history
+        run: make perf-history-ingest
+      - name: Regenerate performance charts
+        run: make perf-charts
+      - name: Upload performance artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-history-and-charts
+          path: |
+            docs/perf/history.ndjson
+            docs/perf/*.svg
+      - name: Commit performance history
+        if: github.ref == 'refs/heads/master'
+        run: |
+          if git diff --quiet -- docs/perf/history.ndjson docs/perf/*.svg; then
+            echo "No performance history changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/perf/history.ndjson docs/perf/*.svg
+          git commit -m "Update continuous performance history"
+          git push

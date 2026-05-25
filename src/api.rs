@@ -252,6 +252,34 @@ impl ZanzibarEngine {
         )?)
     }
 
+    /// Returns benchmark-only delta stats for the selected snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when the requested consistency cannot be resolved.
+    #[cfg(feature = "bench-internals")]
+    pub fn bench_relationship_delta_stats(
+        &self,
+        consistency: Consistency,
+    ) -> Result<crate::relationship::StoreViewDeltaStats, EngineError> {
+        let (snapshot, _) = self.snapshot_for_consistency(consistency)?;
+        Ok(snapshot.relationships().delta_stats())
+    }
+
+    /// Returns benchmark-only posting histograms for the selected snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] when the requested consistency cannot be resolved.
+    #[cfg(feature = "bench-internals")]
+    pub fn bench_relationship_posting_histograms(
+        &self,
+        consistency: Consistency,
+    ) -> Result<crate::relationship::StorePostingHistograms, EngineError> {
+        let (snapshot, _) = self.snapshot_for_consistency(consistency)?;
+        Ok(snapshot.relationships().posting_histograms())
+    }
+
     /// Applies relationship mutations and publishes a new revision.
     ///
     /// # Errors
@@ -599,21 +627,22 @@ impl ZanzibarEngine {
         let object_type = ObjectType::try_from(request.resource.namespace.as_str())?;
         snapshot.schema().resolver().namespace(&object_type)?;
         let mut permissions = Vec::new();
+        let mut check_context = eval::EvaluationContext::new_with_request_memo(&snapshot, limits);
         for relation_definition in snapshot
             .schema()
             .resolver()
             .sorted_relations(&object_type)?
         {
             let relation = Relation(relation_definition.name().as_str().to_string());
-            if eval::check_prepared_with_snapshot(
-                &snapshot,
-                &request.resource,
-                &relation,
-                &request.subject,
-                relation_definition,
-                limits,
-            )?
-            .is_allowed()
+            check_context.reset_for_reuse();
+            if check_context
+                .check_prepared(
+                    &request.resource,
+                    &relation,
+                    &request.subject,
+                    relation_definition,
+                )?
+                .is_allowed()
             {
                 permissions.push(relation);
             }

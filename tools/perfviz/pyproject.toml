@@ -1,0 +1,20 @@
+[project]
+name = "simple-zanzibar-perfviz"
+version = "0.1.0"
+description = "Continuous performance history and SVG charting for Simple Zanzibar benchmarks."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+perfviz = "perfviz.cli:main"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/perfviz"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

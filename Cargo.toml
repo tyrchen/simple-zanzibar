@@ -44,6 +44,7 @@ criterion = { version = "0.8.2", default-features = false, features = ["cargo_be
 insta = "1"
 proptest = "1.11.0"
 serde_json = "1.0.150"
+stats_alloc = "0.1.10"
 
 [[bench]]
 name = "baseline"
@@ -77,6 +78,11 @@ test = false
 
 [[bench]]
 name = "perf_optimization"
+harness = false
+test = false
+
+[[bench]]
+name = "read_followup_allocations"
 harness = false
 test = false
 

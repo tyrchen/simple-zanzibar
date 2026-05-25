@@ -255,6 +255,37 @@ Exit criteria:
   [23](./23-read-performance-optimization-design.md)
 - full build, test, fmt, strict clippy, docs, audit, and deny gates pass
 
+### M14 - Read Optimization Follow-Up
+
+User-visible outcome: read-heavy applications keep Phase 14 latency gains under repeated lookup,
+permission enumeration, and post-write delta workloads, with larger lookup-planner work gated by
+explicit counters before implementation.
+
+Specs touched: [26](./26-request-local-memoization-design.md),
+[27](./27-compiled-evaluation-plan-design.md),
+[28](./28-read-path-allocation-reduction-design.md),
+[29](./29-adaptive-bitmap-index-design.md),
+[30](./30-adaptive-delta-compaction-design.md),
+[31](./31-schema-aware-lookup-planner-design.md),
+[32](./32-read-optimization-follow-up-plan.md),
+[71](./71-performance-budgets-design.md), [72](./72-testing-verification-plan.md).
+
+Exit criteria:
+
+- benchmark-only counters identify memo hit opportunities, allocation count/bytes, lookup
+  candidate/full-check count, delta/tombstone overhead, and posting-shape histograms
+- request-local memoization is enabled only where repeated checks exist and direct `check` does not
+  regress
+- internal lookup-subject collection reduces allocation without changing public `expand` shape
+- adaptive delta compaction protects latest post-write reads while exact tokens keep old logical
+  snapshots
+- compiled evaluation plan work is shadow-tested before any hot-path switch
+- schema-aware lookup planner improves `lookup_resources_streaming_1m` or is stopped with profile
+  evidence
+- bitmap/roaring work is limited to histogram and tombstone-mask evidence until set-aware query
+  paths prove the payoff
+- full build, test, fmt, strict clippy, docs, audit, and deny gates pass
+
 ## 3. Calendar Shape
 
 One experienced Rust developer:
@@ -273,6 +304,7 @@ One experienced Rust developer:
 - M11: 3 to 5 weeks
 - M12: 2 to 4 weeks
 - M13: 2 to 4 weeks
+- M14: 3 to 5 weeks
 
 Total through M5: 8.5 to 11 weeks, assuming no persistent backend and no caveats.
 
@@ -292,6 +324,8 @@ Total through M12: 21 to 30 weeks.
 
 Total through M13: 23 to 34 weeks.
 
+Total through M14: 26 to 39 weeks.
+
 ## 4. Cross-References
 
 - Paired engineer plan: [91-local-engine-impl-plan.md](./91-local-engine-impl-plan.md)
@@ -299,3 +333,4 @@ Total through M13: 23 to 34 weeks.
 - Performance optimization design: [21-performance-optimization-design.md](./21-performance-optimization-design.md)
 - Snapshot file-size optimization design: [22-snapshot-file-size-optimization-design.md](./22-snapshot-file-size-optimization-design.md)
 - Read performance optimization design: [23-read-performance-optimization-design.md](./23-read-performance-optimization-design.md)
+- Read optimization follow-up plan: [32-read-optimization-follow-up-plan.md](./32-read-optimization-follow-up-plan.md)

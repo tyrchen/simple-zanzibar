@@ -9,11 +9,30 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "bench-internals")]
+#[path = "common/phase15_fixtures.rs"]
+mod phase15_fixtures;
+
 use criterion::{BatchSize, Criterion};
+#[cfg(feature = "bench-internals")]
+use phase15_fixtures::{
+    PHASE15_HIGH_FANOUT, PHASE15_LOOKUP_SUBJECTS, PHASE15_TARGET_USER_ID, PHASE15_TARGETED_RULES,
+    build_phase15_high_fanout_engine, build_phase15_lookup_subjects_engine,
+    build_phase15_shared_parent_engine,
+};
 #[cfg(feature = "bench-internals")]
 use simple_zanzibar::SnapshotLoadOptions;
 #[cfg(feature = "bench-internals")]
-use simple_zanzibar::relationship::{reset_store_view_read_counters, store_view_read_counters};
+use simple_zanzibar::eval::{
+    EvaluationReadCounters, evaluation_read_counters, reset_evaluation_read_counters,
+    set_evaluation_read_counters_enabled,
+};
+#[cfg(feature = "bench-internals")]
+use simple_zanzibar::relationship::{
+    StorePostingHistograms, reset_store_view_read_counters, store_view_read_counters,
+};
+#[cfg(feature = "bench-internals")]
+use simple_zanzibar::revision::Consistency;
 use simple_zanzibar::{
     IndexProfile, SnapshotSaveOptions, ZanzibarEngine,
     domain::Relationship,
@@ -25,6 +44,10 @@ use simple_zanzibar::{
 const RULES_1M: usize = 1_000_000;
 const MUTATION_BATCH_LIMIT: usize = 10_000;
 const FIXED_RELATIONSHIP_COUNT: usize = 9;
+#[cfg(feature = "bench-internals")]
+const PHASE15_DELETE_TOMBSTONES: usize = 4_096;
+#[cfg(feature = "bench-internals")]
+const PHASE15_PRUNING_CANDIDATES: usize = 50_000;
 const TARGET_USER_ID: &str = "target_user";
 const EDITOR_USER_ID: &str = "editor_user";
 const OWNER_USER_ID: &str = "owner_user";
@@ -47,6 +70,7 @@ fn main() {
     bench_read_write_mix(&mut criterion, &filters);
     bench_delta_read_counters(&mut criterion, &filters);
     bench_snapshot_profile_and_timers(&mut criterion, &filters);
+    bench_phase15_measurement_baseline(&mut criterion, &filters);
     criterion.final_summary();
 }
 
@@ -313,6 +337,283 @@ fn bench_snapshot_profile_and_timers(criterion: &mut Criterion, filters: &[Strin
     }
 }
 
+fn bench_phase15_measurement_baseline(criterion: &mut Criterion, filters: &[String]) {
+    #[cfg(feature = "bench-internals")]
+    {
+        bench_phase15_memo_shared_parent(criterion, filters);
+        bench_phase15_lookup_subjects_allocation(criterion, filters);
+        bench_phase15_delete_heavy_delta(criterion, filters);
+        bench_phase15_high_fanout_posting(criterion, filters);
+        bench_phase15_lookup_planner_pruning(criterion, filters);
+    }
+    #[cfg(not(feature = "bench-internals"))]
+    {
+        let _ = criterion;
+        let _ = filters;
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn bench_phase15_memo_shared_parent(criterion: &mut Criterion, filters: &[String]) {
+    let name = "perf_optimization/phase15_memo_shared_parent";
+    if !should_benchmark(name, filters) {
+        return;
+    }
+    let engine = build_phase15_shared_parent_engine(PHASE15_TARGETED_RULES);
+    let request = LookupResourcesRequest::new(
+        User::user_id(PHASE15_TARGET_USER_ID),
+        relation("can_view"),
+        "doc",
+    );
+    print_phase15_eval_counter_sample(name, || {
+        black_box(must(
+            engine.lookup_resources(request.clone()),
+            "phase15 memo fixture lookup failed",
+        ));
+    });
+    criterion.bench_function(name, |bencher| {
+        bencher.iter(|| {
+            let (resources, counters) = capture_phase15_eval_counters(|| {
+                must(
+                    engine.lookup_resources(black_box(request.clone())),
+                    "phase15 memo fixture lookup failed",
+                )
+            });
+            black_box(counters);
+            black_box(resources)
+        });
+    });
+}
+
+#[cfg(feature = "bench-internals")]
+fn bench_phase15_lookup_subjects_allocation(criterion: &mut Criterion, filters: &[String]) {
+    let name = "perf_optimization/phase15_lookup_subjects_allocation";
+    if !should_benchmark(name, filters) {
+        return;
+    }
+    let engine = build_phase15_lookup_subjects_engine(PHASE15_LOOKUP_SUBJECTS);
+    let request =
+        LookupSubjectsRequest::new(object("doc", "allocation"), relation("can_view"), "user");
+    print_phase15_eval_counter_sample(name, || {
+        black_box(must(
+            engine.lookup_subjects(request.clone()),
+            "phase15 lookup-subjects fixture failed",
+        ));
+    });
+    criterion.bench_function(name, |bencher| {
+        bencher.iter(|| {
+            let (subjects, counters) = capture_phase15_eval_counters(|| {
+                must(
+                    engine.lookup_subjects(black_box(request.clone())),
+                    "phase15 lookup-subjects fixture failed",
+                )
+            });
+            black_box(counters);
+            black_box(subjects)
+        });
+    });
+}
+
+#[cfg(feature = "bench-internals")]
+fn bench_phase15_delete_heavy_delta(criterion: &mut Criterion, filters: &[String]) {
+    let name = "perf_optimization/phase15_delete_heavy_delta";
+    if !should_benchmark(name, filters) {
+        return;
+    }
+    let engine = build_phase15_delete_heavy_engine(PHASE15_DELETE_TOMBSTONES);
+    let object = object("doc", "delete_heavy");
+    let relation = relation("viewer");
+    let user = User::user_id(PHASE15_TARGET_USER_ID);
+    print_phase15_store_counter_sample(name, &engine, || {
+        black_box(must(
+            engine.check_relation(&object, &relation, &user),
+            "phase15 delete-heavy check failed",
+        ));
+    });
+    criterion.bench_function(name, |bencher| {
+        bencher.iter(|| {
+            reset_store_view_read_counters();
+            let allowed = must(
+                engine.check_relation(black_box(&object), black_box(&relation), black_box(&user)),
+                "phase15 delete-heavy check failed",
+            );
+            black_box(store_view_read_counters());
+            black_box(allowed)
+        });
+    });
+}
+
+#[cfg(feature = "bench-internals")]
+fn bench_phase15_high_fanout_posting(criterion: &mut Criterion, filters: &[String]) {
+    let name = "perf_optimization/phase15_high_fanout_posting";
+    if !should_benchmark(name, filters) {
+        return;
+    }
+    let engine = build_phase15_high_fanout_engine(PHASE15_HIGH_FANOUT);
+    let request =
+        LookupSubjectsRequest::new(object("doc", "high_fanout"), relation("viewer"), "user");
+    let histograms = must(
+        engine.bench_relationship_posting_histograms(Consistency::Latest),
+        "phase15 high-fanout histogram failed",
+    );
+    print_phase15_posting_histograms(name, &histograms);
+    criterion.bench_function(name, |bencher| {
+        bencher.iter(|| {
+            let subjects = must(
+                engine.lookup_subjects(black_box(request.clone())),
+                "phase15 high-fanout lookup failed",
+            );
+            black_box(subjects)
+        });
+    });
+}
+
+#[cfg(feature = "bench-internals")]
+fn bench_phase15_lookup_planner_pruning(criterion: &mut Criterion, filters: &[String]) {
+    let name = "perf_optimization/phase15_lookup_planner_pruning";
+    if !should_benchmark(name, filters) {
+        return;
+    }
+    let engine = build_phase15_lookup_pruning_engine(PHASE15_PRUNING_CANDIDATES);
+    let request = LookupResourcesRequest::new(
+        User::user_id(PHASE15_TARGET_USER_ID),
+        relation("can_view"),
+        "doc",
+    );
+    print_phase15_eval_counter_sample(name, || {
+        black_box(must(
+            engine.lookup_resources(request.clone()),
+            "phase15 planner-pruning lookup failed",
+        ));
+    });
+    criterion.bench_function(name, |bencher| {
+        bencher.iter(|| {
+            let (resources, counters) = capture_phase15_eval_counters(|| {
+                must(
+                    engine.lookup_resources(black_box(request.clone())),
+                    "phase15 planner-pruning lookup failed",
+                )
+            });
+            black_box(counters);
+            black_box(resources)
+        });
+    });
+}
+
+#[cfg(feature = "bench-internals")]
+fn print_phase15_eval_counter_sample(name: &str, operation: impl FnOnce()) {
+    let ((), counters) = capture_phase15_eval_counters(operation);
+    eprintln!(
+        "{name}: check_evaluations={} memo_hit_opportunities={} memo_hits={} memo_misses={} \
+         memo_inserts={} memo_depth_skips={} completed_results={} lookup_resources_candidates={} \
+         lookup_resources_schema_pruned={} lookup_resources_planner_fallbacks={} \
+         lookup_resources_full_root_checks={} lookup_resources_residual_checks={} \
+         lookup_resources_proven_without_check={} lookup_resources_tuple_fallbacks={} \
+         lookup_subjects_candidates={} lookup_subjects_usersets={} \
+         lookup_subjects_full_root_checks={}",
+        counters.check_evaluations,
+        counters.check_memo_hit_opportunities,
+        counters.check_memo_hits,
+        counters.check_memo_misses,
+        counters.check_memo_inserts,
+        counters.check_memo_depth_insufficient_skips,
+        counters.check_completed_results,
+        counters.lookup_resources_candidate_resources,
+        counters.lookup_resources_schema_pruned,
+        counters.lookup_resources_planner_fallbacks,
+        counters.lookup_resources_full_root_checks,
+        counters.lookup_resources_residual_checks,
+        counters.lookup_resources_proven_without_check,
+        counters.lookup_resources_tuple_fallbacks,
+        counters.lookup_subjects_candidate_subjects,
+        counters.lookup_subjects_candidate_usersets,
+        counters.lookup_subjects_full_root_checks,
+    );
+}
+
+#[cfg(feature = "bench-internals")]
+fn capture_phase15_eval_counters<R>(operation: impl FnOnce() -> R) -> (R, EvaluationReadCounters) {
+    set_evaluation_read_counters_enabled(true);
+    reset_evaluation_read_counters();
+    let result = operation();
+    let counters = evaluation_read_counters();
+    set_evaluation_read_counters_enabled(false);
+    (result, counters)
+}
+
+#[cfg(feature = "bench-internals")]
+fn print_phase15_store_counter_sample(
+    name: &str,
+    engine: &ZanzibarEngine,
+    mut operation: impl FnMut(),
+) {
+    reset_store_view_read_counters();
+    operation();
+    let counters = store_view_read_counters();
+    let stats = must(
+        engine.bench_relationship_delta_stats(Consistency::Latest),
+        "phase15 delta stats failed",
+    );
+    eprintln!(
+        "{name}: query_calls={} delta_segments_inspected={} tombstone_checks={} \
+         checkpoint_rows={} delta_segments={} delta_inserted_rows={} delta_deleted_rows={} \
+         delta_mutations={} tombstone_ratio_bps={}",
+        counters.query_calls,
+        counters.delta_segments_inspected,
+        counters.tombstone_checks,
+        stats.checkpoint_rows,
+        stats.delta_segments,
+        stats.delta_inserted_rows,
+        stats.delta_deleted_rows,
+        stats.delta_mutations,
+        stats.tombstone_ratio_bps,
+    );
+}
+
+#[cfg(feature = "bench-internals")]
+fn print_phase15_posting_histograms(name: &str, histograms: &StorePostingHistograms) {
+    print_phase15_posting_histogram(name, "resource", histograms.resource);
+    print_phase15_posting_histogram(name, "resource_object", histograms.resource_object);
+    print_phase15_posting_histogram(
+        name,
+        "resource_type_relation",
+        histograms.resource_type_relation,
+    );
+    print_phase15_posting_histogram(name, "resource_type", histograms.resource_type);
+    print_phase15_posting_histogram(name, "subject", histograms.subject);
+    print_phase15_posting_histogram(
+        name,
+        "subject_type_relation",
+        histograms.subject_type_relation,
+    );
+    print_phase15_posting_histogram(name, "subject_type", histograms.subject_type);
+}
+
+#[cfg(feature = "bench-internals")]
+fn print_phase15_posting_histogram(
+    name: &str,
+    group: &str,
+    histogram: simple_zanzibar::relationship::StorePostingHistogram,
+) {
+    eprintln!(
+        "{name}: posting_group={group} keys={} total_postings={} max_posting_len={} \
+         singleton_keys={} keys_2_to_4={} keys_5_to_16={} keys_17_to_64={} keys_65_to_256={} \
+         keys_257_to_1024={} keys_1025_to_4096={} keys_over_4096={} estimated_row_id_bytes={}",
+        histogram.keys,
+        histogram.total_postings,
+        histogram.max_posting_len,
+        histogram.singleton_keys,
+        histogram.keys_2_to_4,
+        histogram.keys_5_to_16,
+        histogram.keys_17_to_64,
+        histogram.keys_65_to_256,
+        histogram.keys_257_to_1024,
+        histogram.keys_1025_to_4096,
+        histogram.keys_over_4096,
+        histogram.estimated_row_id_bytes,
+    );
+}
+
 fn build_engine(rules: usize) -> ZanzibarEngine {
     let service = ZanzibarEngine::builder()
         .evaluation_limits(evaluation_limits())
@@ -322,6 +623,90 @@ fn build_engine(rules: usize) -> ZanzibarEngine {
     service
 }
 
+#[cfg(feature = "bench-internals")]
+fn build_phase15_delete_heavy_engine(tombstones: usize) -> ZanzibarEngine {
+    let service = phase15_engine(PHASE15_DIRECT_VIEWER_SCHEMA);
+    let mut batch = Vec::with_capacity(MUTATION_BATCH_LIMIT);
+    for index in 0..tombstones {
+        push_phase15_relationship_line(
+            &service,
+            &mut batch,
+            format!("doc:delete_heavy#viewer@user:deleted_{index:05}"),
+        );
+    }
+    push_phase15_relationship_line(
+        &service,
+        &mut batch,
+        format!("doc:delete_heavy#viewer@user:{PHASE15_TARGET_USER_ID}"),
+    );
+    flush_relationships(&service, &mut batch);
+    let path = unique_snapshot_path("phase15_delete_heavy");
+    must(
+        service.save_snapshot(&path, SnapshotSaveOptions::default()),
+        "failed to checkpoint phase15 delete-heavy fixture",
+    );
+    let loaded = must(
+        ZanzibarEngine::load_snapshot(&path, SnapshotLoadOptions::default()),
+        "failed to load phase15 delete-heavy fixture",
+    );
+    remove_file(&path);
+
+    let deletes = (0..tombstones)
+        .map(|index| {
+            must(
+                RelationshipMutation::delete(format!(
+                    "doc:delete_heavy#viewer@user:deleted_{index:05}",
+                )),
+                "failed to build phase15 delete mutation",
+            )
+        })
+        .collect::<Vec<_>>();
+    must(
+        loaded.write_relationships(deletes),
+        "failed to apply phase15 delete-heavy delta",
+    );
+    loaded
+}
+
+#[cfg(feature = "bench-internals")]
+fn build_phase15_lookup_pruning_engine(candidates: usize) -> ZanzibarEngine {
+    let service = phase15_engine(PHASE15_LOOKUP_PRUNING_SCHEMA);
+    let mut batch = Vec::with_capacity(MUTATION_BATCH_LIMIT);
+    for index in 0..candidates {
+        push_phase15_relationship_line(
+            &service,
+            &mut batch,
+            format!("doc:blocked_{index:06}#banned@user:{PHASE15_TARGET_USER_ID}"),
+        );
+    }
+    flush_relationships(&service, &mut batch);
+    service
+}
+
+#[cfg(feature = "bench-internals")]
+fn phase15_engine(schema: &str) -> ZanzibarEngine {
+    let service = ZanzibarEngine::builder()
+        .evaluation_limits(evaluation_limits())
+        .build();
+    must(service.add_dsl(schema), "failed to apply phase15 schema");
+    service
+}
+
+#[cfg(feature = "bench-internals")]
+fn push_phase15_relationship_line(
+    service: &ZanzibarEngine,
+    batch: &mut Vec<RelationshipMutation>,
+    relationship: String,
+) {
+    batch.push(must(
+        RelationshipMutation::touch(relationship),
+        "failed to parse phase15 relationship",
+    ));
+    if batch.len() == MUTATION_BATCH_LIMIT {
+        flush_relationships(service, batch);
+    }
+}
+
 fn evaluation_limits() -> EvaluationLimits {
     EvaluationLimits {
         max_depth: non_zero_u32(50),
@@ -329,6 +714,28 @@ fn evaluation_limits() -> EvaluationLimits {
         max_lookup_results: non_zero_u32(1_000),
     }
 }
+
+#[cfg(feature = "bench-internals")]
+const PHASE15_DIRECT_VIEWER_SCHEMA: &str = r"
+    namespace doc {
+        relation viewer {}
+    }
+    ";
+
+#[cfg(feature = "bench-internals")]
+const PHASE15_LOOKUP_PRUNING_SCHEMA: &str = r#"
+    namespace doc {
+        relation viewer {}
+        relation banned {}
+
+        relation can_view {
+            rewrite exclusion(
+                computed_userset(relation: "viewer"),
+                computed_userset(relation: "banned")
+            )
+        }
+    }
+    "#;
 
 fn generated_relationships(rules: usize) -> Vec<Relationship> {
     let mut relationships = Vec::with_capacity(rules);
