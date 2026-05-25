@@ -573,6 +573,47 @@ fn test_should_prune_lookup_resources_candidates_from_exclusion_only_relations()
     Ok(())
 }
 
+#[test]
+fn test_should_continue_lookup_resources_frontier_from_pruned_target_type_userset()
+-> Result<(), Box<dyn std::error::Error>> {
+    let engine = ZanzibarEngine::builder().build();
+    engine.add_dsl(
+        r#"
+        namespace group {
+            relation member {}
+        }
+
+        namespace doc {
+            relation seed {}
+            relation viewer {}
+            relation can_view {
+                rewrite computed_userset(relation: "viewer")
+            }
+        }
+        "#,
+    )?;
+    engine.write_relationships([
+        RelationshipMutation::touch("doc:seed#seed@user:alice")?,
+        RelationshipMutation::touch("group:eng#member@doc:seed#seed")?,
+        RelationshipMutation::touch("doc:target#viewer@group:eng#member")?,
+    ])?;
+
+    assert!(engine.check_relation(
+        &object("doc", "target"),
+        &relation("can_view"),
+        &User::user_id("alice"),
+    )?);
+
+    let resources = engine.lookup_resources(LookupResourcesRequest::new(
+        User::user_id("alice"),
+        relation("can_view"),
+        "doc",
+    ))?;
+
+    assert_eq!(resources.resources, vec![object("doc", "target")]);
+    Ok(())
+}
+
 #[cfg(feature = "bench-internals")]
 #[test]
 fn test_should_keep_lookup_planner_conservative_for_intersection()

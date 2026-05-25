@@ -23,7 +23,10 @@ use phase15_fixtures::{
 #[cfg(feature = "bench-internals")]
 use simple_zanzibar::SnapshotLoadOptions;
 #[cfg(feature = "bench-internals")]
-use simple_zanzibar::eval::{evaluation_read_counters, reset_evaluation_read_counters};
+use simple_zanzibar::eval::{
+    EvaluationReadCounters, evaluation_read_counters, reset_evaluation_read_counters,
+    set_evaluation_read_counters_enabled,
+};
 #[cfg(feature = "bench-internals")]
 use simple_zanzibar::relationship::{
     StorePostingHistograms, reset_store_view_read_counters, store_view_read_counters,
@@ -370,12 +373,13 @@ fn bench_phase15_memo_shared_parent(criterion: &mut Criterion, filters: &[String
     });
     criterion.bench_function(name, |bencher| {
         bencher.iter(|| {
-            reset_evaluation_read_counters();
-            let resources = must(
-                engine.lookup_resources(black_box(request.clone())),
-                "phase15 memo fixture lookup failed",
-            );
-            black_box(evaluation_read_counters());
+            let (resources, counters) = capture_phase15_eval_counters(|| {
+                must(
+                    engine.lookup_resources(black_box(request.clone())),
+                    "phase15 memo fixture lookup failed",
+                )
+            });
+            black_box(counters);
             black_box(resources)
         });
     });
@@ -398,12 +402,13 @@ fn bench_phase15_lookup_subjects_allocation(criterion: &mut Criterion, filters: 
     });
     criterion.bench_function(name, |bencher| {
         bencher.iter(|| {
-            reset_evaluation_read_counters();
-            let subjects = must(
-                engine.lookup_subjects(black_box(request.clone())),
-                "phase15 lookup-subjects fixture failed",
-            );
-            black_box(evaluation_read_counters());
+            let (subjects, counters) = capture_phase15_eval_counters(|| {
+                must(
+                    engine.lookup_subjects(black_box(request.clone())),
+                    "phase15 lookup-subjects fixture failed",
+                )
+            });
+            black_box(counters);
             black_box(subjects)
         });
     });
@@ -483,12 +488,13 @@ fn bench_phase15_lookup_planner_pruning(criterion: &mut Criterion, filters: &[St
     });
     criterion.bench_function(name, |bencher| {
         bencher.iter(|| {
-            reset_evaluation_read_counters();
-            let resources = must(
-                engine.lookup_resources(black_box(request.clone())),
-                "phase15 planner-pruning lookup failed",
-            );
-            black_box(evaluation_read_counters());
+            let (resources, counters) = capture_phase15_eval_counters(|| {
+                must(
+                    engine.lookup_resources(black_box(request.clone())),
+                    "phase15 planner-pruning lookup failed",
+                )
+            });
+            black_box(counters);
             black_box(resources)
         });
     });
@@ -496,9 +502,7 @@ fn bench_phase15_lookup_planner_pruning(criterion: &mut Criterion, filters: &[St
 
 #[cfg(feature = "bench-internals")]
 fn print_phase15_eval_counter_sample(name: &str, mut operation: impl FnMut()) {
-    reset_evaluation_read_counters();
-    operation();
-    let counters = evaluation_read_counters();
+    let (_, counters) = capture_phase15_eval_counters(|| operation());
     eprintln!(
         "{name}: check_evaluations={} memo_hit_opportunities={} memo_hits={} memo_misses={} \
          memo_inserts={} memo_depth_skips={} completed_results={} lookup_resources_candidates={} \
@@ -520,6 +524,16 @@ fn print_phase15_eval_counter_sample(name: &str, mut operation: impl FnMut()) {
         counters.lookup_subjects_candidate_usersets,
         counters.lookup_subjects_full_root_checks,
     );
+}
+
+#[cfg(feature = "bench-internals")]
+fn capture_phase15_eval_counters<R>(operation: impl FnOnce() -> R) -> (R, EvaluationReadCounters) {
+    set_evaluation_read_counters_enabled(true);
+    reset_evaluation_read_counters();
+    let result = operation();
+    let counters = evaluation_read_counters();
+    set_evaluation_read_counters_enabled(false);
+    (result, counters)
 }
 
 #[cfg(feature = "bench-internals")]

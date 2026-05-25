@@ -897,6 +897,13 @@ impl RelationshipStoreView {
         }
     }
 
+    pub(crate) fn has_reverse_subject_candidates(&self, filter: &SubjectFilter) -> bool {
+        self.delta
+            .as_ref()
+            .is_some_and(|delta| delta.inserted.has_subject_candidates(filter))
+            || self.checkpoint.has_subject_candidates(filter)
+    }
+
     pub(crate) fn resource_relation(
         &self,
         resource: &ObjectRef,
@@ -1653,6 +1660,13 @@ impl IndexedRelationshipStore {
         }
     }
 
+    fn has_subject_candidates(&self, filter: &SubjectFilter) -> bool {
+        let Some(matcher) = self.subject_matcher(filter) else {
+            return false;
+        };
+        self.subject_candidate_row_ids(&matcher).next().is_some()
+    }
+
     pub(crate) fn resource_relation(
         &self,
         resource: &ObjectRef,
@@ -2256,8 +2270,8 @@ impl RelationshipRef<'_> {
         self.store.resolve(self.row.relation.0) == expected.as_str()
     }
 
-    pub(crate) fn relation_legacy(&self) -> crate::model::Relation {
-        crate::model::Relation(self.store.resolve(self.row.relation.0).to_string())
+    pub(crate) fn relation_name_str(&self) -> &str {
+        self.store.resolve(self.row.relation.0)
     }
 
     pub(crate) fn direct_user_subject_id(&self) -> Option<&str> {

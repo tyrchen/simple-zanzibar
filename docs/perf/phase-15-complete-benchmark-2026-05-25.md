@@ -1,12 +1,19 @@
 # Phase 15 Complete Benchmark Report - 2026-05-25
 
-Measured after commit `0f5bedc phase 15: optimize read follow-up paths`.
+Measured on the Phase 15 PR after the adaptive planner, nested-memo, and lookup-frontier
+correctness follow-up.
 
 Commands:
 
 - `make bench-all`
 - `cargo bench --bench concurrent_runtime`
 - `cargo bench --features bench-internals --bench read_followup_allocations`
+- `cargo bench --features bench-internals --bench perf_optimization -- check_prepared_1m --sample-size 10`
+- `cargo bench --features bench-internals --bench perf_optimization -- lookup_resources_streaming_1m --sample-size 20`
+- `cargo bench --features bench-internals --bench perf_optimization -- lookup_subjects_streaming_1m --sample-size 20`
+- `cargo bench --features bench-internals --bench perf_optimization -- read_heavy --sample-size 10`
+- `cargo bench --features bench-internals --bench perf_optimization -- phase15 --sample-size 10`
+- `cargo bench --bench realworld_authorization -- 1m_rules --sample-size 10`
 
 Criterion timings are reported as `low / estimate / high`.
 
@@ -14,16 +21,15 @@ Criterion timings are reported as `low / estimate / high`.
 
 - Phase comparisons use recorded upper estimates from earlier phase evidence, not Criterion's local
   previous-run cache. Lower is better for every comparison below.
-- Realistic 1M reads are holding the Phase 14 baseline: inherited check is `+1.2%`, mixed read is
-  `+0.4%`, and both remain more than `22%` faster than Phase 12.
-- `lookup_subjects_streaming_1m` is the clean Phase 15 win: `-4.4%` versus Phase 14 and `-28.5%`
+- Realistic 1M reads are holding the Phase 14 baseline: inherited check is `+1.7%`, mixed read is
+  `-0.6%`, and both remain more than `22%` faster than Phase 12.
+- `lookup_subjects_streaming_1m` is the clean Phase 15 win: `-15.8%` versus Phase 14 and `-37.1%`
   versus Phase 12.
-- The main regression is `lookup_resources_streaming_1m`: `+44.2%` versus Phase 14 and `+6.5%`
-  versus Phase 12. The synthetic broad `lookup_resources_*_candidates` cases show the same issue:
-  planner/memo fixed cost is paid when there are no prunable producers to remove.
-- `check_prepared_1m` regressed versus the Phase 14 micro baseline (`+19.7%`) but is still `-14.1%`
-  versus Phase 12; public `check`, org checks, snapshot-loaded checks, and real-world checks remain
-  stable or better on this run.
+- The earlier `lookup_resources_streaming_1m` regression is fixed by adaptive producer-planner
+  bypass plus nested-only request memoization: current high estimate is `+0.7%` versus Phase 14 and
+  `-25.6%` versus Phase 12.
+- `check_prepared_1m` is back within gate: current high estimate is `+2.4%` versus Phase 14 and
+  `-26.5%` versus Phase 12.
 - Non-read path regressions to watch separately: small schema apply, policy file export, and public
   snapshot save at 100k.
 
@@ -37,12 +43,12 @@ the current full benchmark run after Phase 15.1, 15.2, and 15.5. Values are uppe
 
 | Benchmark | Scenario | P12 | P13 | P14 baseline | P15 current | P15 vs P14 | P15 vs P12 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `perf_optimization/check_prepared_1m` | Prepared check micro hot path | `6.0009 us` | `5.3424 us` | `4.3065 us` | `5.1530 us` | `+19.7%` | `-14.1%` |
-| `perf_optimization/lookup_resources_streaming_1m` | Streaming resource lookup micro fixture | `3.1883 ms` | `2.7544 ms` | `2.3551 ms` | `3.3956 ms` | `+44.2%` | `+6.5%` |
-| `perf_optimization/lookup_subjects_streaming_1m` | Streaming subject lookup micro fixture | `6.3451 us` | `5.4722 us` | `4.7426 us` | `4.5348 us` | `-4.4%` | `-28.5%` |
-| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | Realistic inherited permission check | `15.110 us` | `14.833 us` | `11.559 us` | `11.692 us` | `+1.2%` | `-22.6%` |
-| `realworld_authorization/1m_rules/mixed_read_workload` | Mixed check/lookup/expand read workload | `58.164 us` | `53.489 us` | `41.808 us` | `41.975 us` | `+0.4%` | `-27.8%` |
-| `perf_optimization/read_heavy_heavy_write_batched_1m` | Read latency while heavy batched writes publish | `17.844 us` | `12.365 us` | `12.712 us` | `13.824 us` | `+8.7%` | `-22.5%` |
+| `perf_optimization/check_prepared_1m` | Prepared check micro hot path | `6.0009 us` | `5.3424 us` | `4.3065 us` | `4.4088 us` | `+2.4%` | `-26.5%` |
+| `perf_optimization/lookup_resources_streaming_1m` | Streaming resource lookup micro fixture | `3.1883 ms` | `2.7544 ms` | `2.3551 ms` | `2.3713 ms` | `+0.7%` | `-25.6%` |
+| `perf_optimization/lookup_subjects_streaming_1m` | Streaming subject lookup micro fixture | `6.3451 us` | `5.4722 us` | `4.7426 us` | `3.9911 us` | `-15.8%` | `-37.1%` |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | Realistic inherited permission check | `15.110 us` | `14.833 us` | `11.559 us` | `11.754 us` | `+1.7%` | `-22.2%` |
+| `realworld_authorization/1m_rules/mixed_read_workload` | Mixed check/lookup/expand read workload | `58.164 us` | `53.489 us` | `41.808 us` | `41.537 us` | `-0.6%` | `-28.6%` |
+| `perf_optimization/read_heavy_heavy_write_batched_1m` | Read latency while heavy batched writes publish | `17.844 us` | `12.365 us` | `12.712 us` | `13.003 us` | `+2.3%` | `-27.1%` |
 | `snapshot_load_compact/1m` | Full compact snapshot load | `589.75 ms` | `553.98 ms` | `573.95 ms` | `564.88 ms` | `-1.6%` | `-4.2%` |
 | `snapshot_load_trusted_fast/1m` | Trusted-fast snapshot load | `138.34 ms` | `173.52 ms` | `177.49 ms` | `172.57 ms` | `-2.8%` | `+24.7%` |
 | `snapshot_section_size/full_1m/total_bytes` zstd | Full-profile compressed artifact size | `33.1 MB` | `21.5 MB` | `21.5 MB` | `21.5 MB` | `0.0%` | `-35.2%` |
@@ -183,48 +189,48 @@ Throughput summary from the same run:
 | `realworld_authorization/100k_rules/snapshot_load_compact` | Real-world compact snapshot load, 100k | `50.817 ms / 51.362 ms / 52.072 ms` |
 | `realworld_authorization/100k_rules/snapshot_load_trusted_fast` | Real-world trusted-fast load, 100k | `17.947 ms / 18.077 ms / 18.241 ms` |
 | `realworld_authorization/100k_rules/snapshot_file_size` | Real-world snapshot size: `8,181,511` bytes | `459.61 ps / 461.75 ps / 465.17 ps` |
-| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | Workspace membership inheritance, 1m | `11.395 us / 11.535 us / 11.692 us` |
-| `realworld_authorization/1m_rules/check_doc_direct_user` | Direct document grant, 1m | `2.3856 us / 2.4402 us / 2.4809 us` |
-| `realworld_authorization/1m_rules/check_doc_denied_by_ban` | Deny-by-ban check, 1m | `767.52 ns / 777.36 ns / 788.52 ns` |
-| `realworld_authorization/1m_rules/check_doc_project_editor` | Project editor permission, 1m | `3.9805 us / 4.0055 us / 4.0475 us` |
-| `realworld_authorization/1m_rules/lookup_resources_target_user` | User resource lookup, 1m | `5.3348 us / 5.3622 us / 5.3984 us` |
-| `realworld_authorization/1m_rules/lookup_subjects_shared_doc` | Shared document subject lookup, 1m | `6.9955 us / 7.0477 us / 7.1247 us` |
-| `realworld_authorization/1m_rules/lookup_permissions_shared_doc` | Permission enumeration, 1m | `6.7435 us / 6.7731 us / 6.8067 us` |
-| `realworld_authorization/1m_rules/lookup_object_permissions_shared_doc` | Object-permission subject audit, 1m | `15.387 us / 15.493 us / 15.636 us` |
-| `realworld_authorization/1m_rules/expand_shared_doc` | Expand shared document userset, 1m | `2.0885 us / 2.1012 us / 2.1205 us` |
-| `realworld_authorization/1m_rules/mixed_read_workload` | Mixed check/lookup/expand workload, 1m | `41.656 us / 41.814 us / 41.975 us` |
-| `realworld_authorization/1m_rules/snapshot_load_compact` | Real-world compact snapshot load, 1m | `564.98 ms / 568.25 ms / 571.89 ms` |
-| `realworld_authorization/1m_rules/snapshot_load_trusted_fast` | Real-world trusted-fast load, 1m | `177.14 ms / 178.57 ms / 180.77 ms` |
-| `realworld_authorization/1m_rules/snapshot_file_size` | Real-world snapshot size: `79,624,979` bytes | `459.11 ps / 461.95 ps / 466.37 ps` |
+| `realworld_authorization/1m_rules/check_doc_inherited_workspace_member` | Workspace membership inheritance, 1m | `11.543 us / 11.644 us / 11.754 us` |
+| `realworld_authorization/1m_rules/check_doc_direct_user` | Direct document grant, 1m | `2.4403 us / 2.4680 us / 2.4894 us` |
+| `realworld_authorization/1m_rules/check_doc_denied_by_ban` | Deny-by-ban check, 1m | `759.82 ns / 766.60 ns / 772.58 ns` |
+| `realworld_authorization/1m_rules/check_doc_project_editor` | Project editor permission, 1m | `3.9912 us / 4.0215 us / 4.0500 us` |
+| `realworld_authorization/1m_rules/lookup_resources_target_user` | User resource lookup, 1m | `5.4491 us / 5.5407 us / 5.6645 us` |
+| `realworld_authorization/1m_rules/lookup_subjects_shared_doc` | Shared document subject lookup, 1m | `7.0134 us / 7.0501 us / 7.0739 us` |
+| `realworld_authorization/1m_rules/lookup_permissions_shared_doc` | Permission enumeration, 1m | `6.7388 us / 6.7712 us / 6.8075 us` |
+| `realworld_authorization/1m_rules/lookup_object_permissions_shared_doc` | Object-permission subject audit, 1m | `15.252 us / 15.344 us / 15.416 us` |
+| `realworld_authorization/1m_rules/expand_shared_doc` | Expand shared document userset, 1m | `2.0508 us / 2.0599 us / 2.0731 us` |
+| `realworld_authorization/1m_rules/mixed_read_workload` | Mixed check/lookup/expand workload, 1m | `40.953 us / 41.255 us / 41.537 us` |
+| `realworld_authorization/1m_rules/snapshot_load_compact` | Real-world compact snapshot load, 1m | `571.08 ms / 573.68 ms / 577.39 ms` |
+| `realworld_authorization/1m_rules/snapshot_load_trusted_fast` | Real-world trusted-fast load, 1m | `177.36 ms / 178.39 ms / 179.49 ms` |
+| `realworld_authorization/1m_rules/snapshot_file_size` | Real-world snapshot size: `79,624,979` bytes | `461.16 ps / 464.25 ps / 468.13 ps` |
 
 ## Perf Optimization
 
 | Benchmark | Scenario | Result |
 | --- | --- | ---: |
-| `perf_optimization/check_prepared_1m` | Prepared check hot path | `5.0514 us / 5.0996 us / 5.1530 us` |
-| `perf_optimization/lookup_resources_streaming_1m` | Lookup resources streaming fixture | `3.2108 ms / 3.2877 ms / 3.3956 ms` |
-| `perf_optimization/lookup_subjects_streaming_1m` | Lookup subjects streaming fixture | `4.4721 us / 4.5109 us / 4.5348 us` |
+| `perf_optimization/check_prepared_1m` | Prepared check hot path | `4.3200 us / 4.3608 us / 4.4088 us` |
+| `perf_optimization/lookup_resources_streaming_1m` | Lookup resources streaming fixture | `2.2907 ms / 2.3255 ms / 2.3713 ms` |
+| `perf_optimization/lookup_subjects_streaming_1m` | Lookup subjects streaming fixture | `3.9137 us / 3.9490 us / 3.9911 us` |
 | `perf_optimization/write_single_touch_1m` | Single touch write on 1m base | `106.76 us / 148.67 us / 174.73 us` |
 | `perf_optimization/write_mixed_batch_1m` | Mixed write batch on 1m base | `798.23 us / 2.5633 ms / 5.7451 ms` |
-| `perf_optimization/read_heavy_light_write_1m` | Read-heavy workload with light writes | `12.213 us / 13.663 us / 15.512 us` |
-| `perf_optimization/read_heavy_medium_write_unbatched_1m` | Read-heavy workload with medium unbatched writes | `12.083 us / 13.083 us / 13.920 us` |
-| `perf_optimization/read_heavy_medium_write_batched_1m` | Read-heavy workload with medium batched writes | `12.378 us / 13.228 us / 14.123 us` |
-| `perf_optimization/read_heavy_heavy_write_unbatched_1m` | Read-heavy workload with heavy unbatched writes | `13.416 us / 14.201 us / 14.821 us` |
-| `perf_optimization/read_heavy_heavy_write_batched_1m` | Read-heavy workload with heavy batched writes | `12.603 us / 13.156 us / 13.824 us` |
-| `perf_optimization/read_heavy_delta_counters_1m` | Delta/tombstone read counter fixture | `6.8483 us / 6.9058 us / 6.9704 us` |
+| `perf_optimization/read_heavy_light_write_1m` | Read-heavy workload with light writes | `11.208 us / 11.882 us / 12.358 us` |
+| `perf_optimization/read_heavy_medium_write_unbatched_1m` | Read-heavy workload with medium unbatched writes | `11.043 us / 11.743 us / 12.712 us` |
+| `perf_optimization/read_heavy_medium_write_batched_1m` | Read-heavy workload with medium batched writes | `10.890 us / 12.130 us / 13.262 us` |
+| `perf_optimization/read_heavy_heavy_write_unbatched_1m` | Read-heavy workload with heavy unbatched writes | `11.446 us / 12.117 us / 12.813 us` |
+| `perf_optimization/read_heavy_heavy_write_batched_1m` | Read-heavy workload with heavy batched writes | `11.024 us / 11.956 us / 13.003 us` |
+| `perf_optimization/read_heavy_delta_counters_1m` | Delta/tombstone read counter fixture | `4.9192 us / 4.9828 us / 5.0265 us` |
 | `perf_optimization/snapshot_load_phase_timers_1m` | Snapshot load phase timing breakdown | `563.97 ms / 565.54 ms / 567.23 ms` |
 | `snapshot_file_size_check_only/1m` | CheckOnly profile size probe | `460.49 ps / 463.52 ps / 467.99 ps` |
-| `perf_optimization/phase15_memo_shared_parent` | Repeated shared-parent lookup memo fixture | `2.7701 ms / 2.8544 ms / 2.9450 ms` |
-| `perf_optimization/phase15_lookup_subjects_allocation` | Lookup-subject allocation stress fixture | `738.50 us / 787.00 us / 814.79 us` |
-| `perf_optimization/phase15_delete_heavy_delta` | Delete-heavy delta/tombstone fixture | `7.3185 us / 7.3775 us / 7.4741 us` |
-| `perf_optimization/phase15_high_fanout_posting` | High-fanout subject enumeration fixture | `255.04 us / 268.30 us / 278.58 us` |
-| `perf_optimization/phase15_lookup_planner_pruning` | Exclusion-only producer pruning fixture | `997.63 us / 1.0028 ms / 1.0093 ms` |
+| `perf_optimization/phase15_memo_shared_parent` | Repeated shared-parent lookup memo fixture | `2.1069 ms / 2.2104 ms / 2.2809 ms` |
+| `perf_optimization/phase15_lookup_subjects_allocation` | Lookup-subject allocation stress fixture | `810.32 us / 850.91 us / 874.73 us` |
+| `perf_optimization/phase15_delete_heavy_delta` | Delete-heavy delta/tombstone fixture | `7.2660 us / 7.3913 us / 7.5342 us` |
+| `perf_optimization/phase15_high_fanout_posting` | High-fanout subject enumeration fixture | `174.09 us / 202.64 us / 220.26 us` |
+| `perf_optimization/phase15_lookup_planner_pruning` | Exclusion-only producer pruning fixture | `1.4876 ms / 1.5281 ms / 1.5713 ms` |
 
 ## Phase 15 Allocation Companion
 
 | Benchmark | Scenario | Allocation result over 16 iterations |
 | --- | --- | ---: |
-| `read_followup_allocations/phase15_memo_shared_parent` | Allocation profile for shared-parent memo fixture | `929,633 allocs`, `57,763,312` bytes |
+| `read_followup_allocations/phase15_memo_shared_parent` | Allocation profile for shared-parent memo fixture | `673,313 allocs`, `25,449,296` bytes |
 | `read_followup_allocations/phase15_lookup_subjects_allocation` | Allocation profile for lookup-subject streaming fixture | `272,672 allocs`, `13,003,712` bytes |
 | `read_followup_allocations/phase15_high_fanout_posting` | Allocation profile for high-fanout subject fixture | `32,400 allocs`, `6,350,288` bytes |
 

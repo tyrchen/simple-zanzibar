@@ -1,7 +1,7 @@
 //! Core evaluation logic for `check` and `expand` requests.
 
 #[cfg(feature = "bench-internals")]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     num::{NonZeroU32, NonZeroUsize},
@@ -27,6 +27,10 @@ const DEFAULT_MAX_DEPTH: u32 = 50;
 const DEFAULT_MAX_FANOUT_PER_STEP: u32 = 1_000;
 const DEFAULT_MAX_LOOKUP_RESULTS: u32 = 1_000;
 const ACTIVE_INDEX_THRESHOLD: usize = 8;
+const LOOKUP_PLANNER_SAMPLE_RELATIONSHIPS: u32 = 64;
+const LOOKUP_PLANNER_MIN_PRUNE_BPS: u32 = 500;
+#[cfg(feature = "bench-internals")]
+static EVALUATION_READ_COUNTERS_ENABLED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "bench-internals")]
 static CHECK_EVALUATIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
@@ -79,7 +83,7 @@ static LOOKUP_SUBJECTS_RESULT_LIMIT_EXITS: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EvaluationReadCounters {
-    /// Number of check evaluations that reached the non-active path.
+    /// Number of memo-eligible check evaluations that reached the non-active path.
     pub check_evaluations: u64,
     /// Number of completed check keys observed again inside the same request context.
     pub check_memo_hit_opportunities: u64,
@@ -95,7 +99,7 @@ pub struct EvaluationReadCounters {
     pub check_memo_active_cycle_skips: u64,
     /// Number of memo entries skipped because the caller had insufficient remaining depth.
     pub check_memo_depth_insufficient_skips: u64,
-    /// Number of successful check results that would be cacheable by request-local memoization.
+    /// Number of memo-eligible successful check results tracked for request-local memoization.
     pub check_completed_results: u64,
     /// Number of active-recursion cycle denials.
     pub check_active_cycle_denials: u64,
@@ -127,9 +131,10 @@ pub struct EvaluationReadCounters {
     pub lookup_subjects_result_limit_exits: u64,
 }
 
-/// Resets benchmark-only evaluator counters.
+/// Resets and enables benchmark-only evaluator counters.
 #[cfg(feature = "bench-internals")]
 pub fn reset_evaluation_read_counters() {
+    EVALUATION_READ_COUNTERS_ENABLED.store(true, Ordering::Relaxed);
     CHECK_EVALUATIONS.store(0, Ordering::Relaxed);
     CHECK_MEMO_HIT_OPPORTUNITIES.store(0, Ordering::Relaxed);
     CHECK_MEMO_HITS.store(0, Ordering::Relaxed);
@@ -153,6 +158,24 @@ pub fn reset_evaluation_read_counters() {
     LOOKUP_SUBJECTS_FULL_ROOT_CHECKS.store(0, Ordering::Relaxed);
     LOOKUP_SUBJECTS_RETURNED.store(0, Ordering::Relaxed);
     LOOKUP_SUBJECTS_RESULT_LIMIT_EXITS.store(0, Ordering::Relaxed);
+}
+
+/// Enables or disables benchmark-only evaluator counters.
+#[cfg(feature = "bench-internals")]
+pub fn set_evaluation_read_counters_enabled(enabled: bool) {
+    EVALUATION_READ_COUNTERS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(feature = "bench-internals")]
+fn evaluation_read_counters_enabled() -> bool {
+    EVALUATION_READ_COUNTERS_ENABLED.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "bench-internals")]
+fn record_counter(counter: &AtomicU64) {
+    if evaluation_read_counters_enabled() {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Returns benchmark-only evaluator counters.
@@ -198,7 +221,7 @@ pub fn evaluation_read_counters() -> EvaluationReadCounters {
 
 #[cfg(feature = "bench-internals")]
 fn record_active_cycle_denial() {
-    CHECK_ACTIVE_CYCLE_DENIALS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&CHECK_ACTIVE_CYCLE_DENIALS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -206,7 +229,7 @@ fn record_active_cycle_denial() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_check_memo_hit() {
-    CHECK_MEMO_HITS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&CHECK_MEMO_HITS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -214,7 +237,7 @@ fn record_check_memo_hit() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_check_memo_miss() {
-    CHECK_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
+    record_counter(&CHECK_MEMO_MISSES);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -222,7 +245,7 @@ fn record_check_memo_miss() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_check_memo_insert() {
-    CHECK_MEMO_INSERTS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&CHECK_MEMO_INSERTS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -230,7 +253,7 @@ fn record_check_memo_insert() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_check_memo_capacity_skip() {
-    CHECK_MEMO_CAPACITY_SKIPS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&CHECK_MEMO_CAPACITY_SKIPS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -238,7 +261,7 @@ fn record_check_memo_capacity_skip() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_check_memo_active_cycle_skip() {
-    CHECK_MEMO_ACTIVE_CYCLE_SKIPS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&CHECK_MEMO_ACTIVE_CYCLE_SKIPS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -246,7 +269,7 @@ fn record_check_memo_active_cycle_skip() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_check_memo_depth_insufficient_skip() {
-    CHECK_MEMO_DEPTH_INSUFFICIENT_SKIPS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&CHECK_MEMO_DEPTH_INSUFFICIENT_SKIPS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -254,7 +277,7 @@ fn record_check_memo_depth_insufficient_skip() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_resources_frontier_subject() {
-    LOOKUP_RESOURCES_FRONTIER_SUBJECTS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_RESOURCES_FRONTIER_SUBJECTS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -262,7 +285,7 @@ fn record_lookup_resources_frontier_subject() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_resources_frontier_relationship() {
-    LOOKUP_RESOURCES_FRONTIER_RELATIONSHIPS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_RESOURCES_FRONTIER_RELATIONSHIPS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -270,7 +293,7 @@ fn record_lookup_resources_frontier_relationship() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_resources_candidate_resource() {
-    LOOKUP_RESOURCES_CANDIDATE_RESOURCES.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_RESOURCES_CANDIDATE_RESOURCES);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -278,7 +301,7 @@ fn record_lookup_resources_candidate_resource() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_resources_schema_pruned() {
-    LOOKUP_RESOURCES_SCHEMA_PRUNED.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_RESOURCES_SCHEMA_PRUNED);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -286,7 +309,7 @@ fn record_lookup_resources_schema_pruned() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_resources_planner_fallback() {
-    LOOKUP_RESOURCES_PLANNER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_RESOURCES_PLANNER_FALLBACKS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -294,7 +317,7 @@ fn record_lookup_resources_planner_fallback() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_resources_full_root_check() {
-    LOOKUP_RESOURCES_FULL_ROOT_CHECKS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_RESOURCES_FULL_ROOT_CHECKS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -302,7 +325,7 @@ fn record_lookup_resources_full_root_check() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_resources_returned() {
-    LOOKUP_RESOURCES_RETURNED.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_RESOURCES_RETURNED);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -310,7 +333,7 @@ fn record_lookup_resources_returned() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_resources_result_limit_exit() {
-    LOOKUP_RESOURCES_RESULT_LIMIT_EXITS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_RESOURCES_RESULT_LIMIT_EXITS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -318,7 +341,7 @@ fn record_lookup_resources_result_limit_exit() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_subjects_candidate_subject() {
-    LOOKUP_SUBJECTS_CANDIDATE_SUBJECTS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_SUBJECTS_CANDIDATE_SUBJECTS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -326,7 +349,7 @@ fn record_lookup_subjects_candidate_subject() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_subjects_candidate_userset() {
-    LOOKUP_SUBJECTS_CANDIDATE_USERSETS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_SUBJECTS_CANDIDATE_USERSETS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -334,7 +357,7 @@ fn record_lookup_subjects_candidate_userset() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_subjects_full_root_check() {
-    LOOKUP_SUBJECTS_FULL_ROOT_CHECKS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_SUBJECTS_FULL_ROOT_CHECKS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -342,7 +365,7 @@ fn record_lookup_subjects_full_root_check() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_subjects_returned() {
-    LOOKUP_SUBJECTS_RETURNED.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_SUBJECTS_RETURNED);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -350,7 +373,7 @@ fn record_lookup_subjects_returned() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_subjects_result_limit_exit() {
-    LOOKUP_SUBJECTS_RESULT_LIMIT_EXITS.fetch_add(1, Ordering::Relaxed);
+    record_counter(&LOOKUP_SUBJECTS_RESULT_LIMIT_EXITS);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -645,7 +668,7 @@ struct CheckFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LookupProducerPlan {
-    relations: HashSet<RelationName>,
+    relations: Vec<RelationName>,
 }
 
 impl LookupProducerPlan {
@@ -653,6 +676,52 @@ impl LookupProducerPlan {
         self.relations
             .iter()
             .any(|relation| relationship.relation_name_eq(relation))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LookupProducerRuntime {
+    enabled: bool,
+    sampled_relationships: u32,
+    pruned_relationships: u32,
+}
+
+impl LookupProducerRuntime {
+    const fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            sampled_relationships: 0,
+            pruned_relationships: 0,
+        }
+    }
+
+    fn should_prune(
+        &mut self,
+        plan: &LookupProducerPlan,
+        relationship: crate::relationship::RelationshipRef<'_>,
+    ) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let should_prune = !plan.allows_relationship(relationship);
+        self.record_sample(should_prune);
+        should_prune
+    }
+
+    fn record_sample(&mut self, should_prune: bool) {
+        if self.sampled_relationships >= LOOKUP_PLANNER_SAMPLE_RELATIONSHIPS {
+            return;
+        }
+        self.sampled_relationships = self.sampled_relationships.saturating_add(1);
+        if should_prune {
+            self.pruned_relationships = self.pruned_relationships.saturating_add(1);
+        }
+        if self.sampled_relationships == LOOKUP_PLANNER_SAMPLE_RELATIONSHIPS
+            && self.pruned_relationships.saturating_mul(10_000)
+                < LOOKUP_PLANNER_MIN_PRUNE_BPS.saturating_mul(self.sampled_relationships)
+        {
+            self.enabled = false;
+        }
     }
 }
 
@@ -732,7 +801,10 @@ impl<'a> EvaluationContext<'a> {
     }
 
     #[cfg(feature = "bench-internals")]
-    fn record_check_started(&self, key: &CheckKey) {
+    fn record_check_started(&self, key: &CheckKey, memo_eligible: bool) {
+        if !memo_eligible || !evaluation_read_counters_enabled() {
+            return;
+        }
         CHECK_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
         if self.completed_check_keys.contains(key) {
             CHECK_MEMO_HIT_OPPORTUNITIES.fetch_add(1, Ordering::Relaxed);
@@ -744,7 +816,11 @@ impl<'a> EvaluationContext<'a> {
         &mut self,
         key: &CheckKey,
         result: &Result<Membership, ZanzibarError>,
+        memo_eligible: bool,
     ) {
+        if !memo_eligible || !evaluation_read_counters_enabled() {
+            return;
+        }
         if result.is_ok() && self.completed_check_keys.insert(key.clone()) {
             CHECK_COMPLETED_RESULTS.fetch_add(1, Ordering::Relaxed);
         }
@@ -762,30 +838,36 @@ impl<'a> EvaluationContext<'a> {
             }
             return Ok(Membership::Denied);
         }
+        let memo_eligible = self.check_memo.is_some() && !self.check_stack.is_empty();
         #[cfg(feature = "bench-internals")]
-        self.record_check_started(key);
-        if let Some(membership) = self.memo_lookup(key)? {
+        self.record_check_started(key, memo_eligible);
+        if memo_eligible && let Some(membership) = self.memo_lookup(key)? {
             return Ok(membership);
         }
-        #[cfg(feature = "bench-internals")]
-        let completed_key = key.clone();
 
         let entry_remaining_depth = self.remaining_depth;
         self.enter(EvaluationKey::Check(key.clone()))?;
-        self.push_check_frame(entry_remaining_depth);
+        if memo_eligible {
+            self.push_check_frame(entry_remaining_depth);
+        }
         self.push_check_key(key.clone());
 
         let result = evaluate(self);
         self.pop_check_key();
-        let depth_required = self.pop_check_frame_depth_required();
+        let depth_required = if memo_eligible {
+            self.pop_check_frame_depth_required()
+        } else {
+            NonZeroU32::MIN
+        };
         self.leave();
-        if let Ok(membership) = &result
+        if memo_eligible
+            && let Ok(membership) = &result
             && membership.is_memo_cacheable()
         {
             self.memo_insert(key, *membership, depth_required);
         }
         #[cfg(feature = "bench-internals")]
-        self.record_check_completed(&completed_key, &result);
+        self.record_check_completed(key, &result, memo_eligible);
         result
     }
 
@@ -1720,6 +1802,9 @@ pub fn lookup_resources_with_snapshot(
     if producer_plan.is_none() {
         record_lookup_resources_planner_fallback();
     }
+    let mut producer_runtime = LookupProducerRuntime::new(producer_plan.is_some());
+    let resource_subject_type = SubjectType::try_from(resource_type.as_str())?;
+    let mut pruned_relation_has_downstream = Vec::new();
 
     let mut frontier = VecDeque::from([request.subject.clone()]);
     let mut visited_subjects = HashSet::from([request.subject.clone()]);
@@ -1736,17 +1821,27 @@ pub fn lookup_resources_with_snapshot(
         {
             record_lookup_resources_frontier_relationship();
             let resource_type_matches = relationship.resource_type_eq(&resource_type);
-            if resource_type_matches
-                && producer_plan
+            let should_prune = if resource_type_matches {
+                producer_plan
                     .as_ref()
-                    .is_some_and(|plan| !plan.allows_relationship(relationship))
-            {
+                    .is_some_and(|plan| producer_runtime.should_prune(plan, relationship))
+            } else {
+                false
+            };
+            if should_prune {
                 record_lookup_resources_schema_pruned();
-                continue;
+                if !pruned_relation_may_have_downstream(
+                    snapshot,
+                    &resource_subject_type,
+                    relationship.relation_name_str(),
+                    &mut pruned_relation_has_downstream,
+                )? {
+                    continue;
+                }
             }
 
             let object = relationship.resource_object_legacy();
-            if resource_type_matches && seen.insert(object.clone()) {
+            if resource_type_matches && !should_prune && seen.insert(object.clone()) {
                 record_lookup_resources_candidate_resource();
                 check_context.reset_for_reuse();
                 record_lookup_resources_full_root_check();
@@ -1763,14 +1858,50 @@ pub fn lookup_resources_with_snapshot(
                 }
             }
 
-            let userset_subject = User::Userset(object, relationship.relation_legacy());
-            if visited_subjects.insert(userset_subject.clone()) {
+            let userset_subject = User::Userset(
+                object,
+                Relation(relationship.relation_name_str().to_string()),
+            );
+            let should_follow_userset = if should_prune {
+                let userset_filter = SubjectFilter::try_from(&userset_subject)?;
+                snapshot
+                    .relationships()
+                    .has_reverse_subject_candidates(&userset_filter)
+            } else {
+                true
+            };
+            if should_follow_userset && visited_subjects.insert(userset_subject.clone()) {
                 frontier.push_back(userset_subject);
             }
         }
     }
 
     Ok(LookupResources { resources })
+}
+
+fn pruned_relation_may_have_downstream(
+    snapshot: &PublishedSnapshot,
+    resource_subject_type: &SubjectType,
+    relation_name: &str,
+    pruned_relation_has_downstream: &mut Vec<(RelationName, bool)>,
+) -> Result<bool, ZanzibarError> {
+    if let Some((_, has_downstream)) = pruned_relation_has_downstream
+        .iter()
+        .find(|(known_relation, _)| known_relation.as_str() == relation_name)
+    {
+        return Ok(*has_downstream);
+    }
+    let relation_name = RelationName::try_from(relation_name)?;
+    let relation_filter = SubjectFilter::new(
+        resource_subject_type.clone(),
+        None,
+        Some(relation_name.clone()),
+    );
+    let has_downstream = snapshot
+        .relationships()
+        .has_reverse_subject_candidates(&relation_filter);
+    pruned_relation_has_downstream.push((relation_name, has_downstream));
+    Ok(has_downstream)
 }
 
 /// Looks up subjects of the requested type that pass the shared snapshot-backed check evaluator.
@@ -1844,7 +1975,9 @@ fn lookup_producer_plan(
         &mut visiting,
         &mut relations,
     )? {
-        Ok(Some(LookupProducerPlan { relations }))
+        Ok(Some(LookupProducerPlan {
+            relations: relations.into_iter().collect(),
+        }))
     } else {
         Ok(None)
     }
@@ -2120,5 +2253,26 @@ mod tests {
         assert_eq!(memo.get(&key, 2), MemoLookup::DepthInsufficient);
         assert_eq!(memo.get(&key, 3), MemoLookup::Hit(Membership::Allowed));
         Ok(())
+    }
+
+    #[test]
+    fn test_should_disable_lookup_producer_runtime_when_pruning_ratio_is_low() {
+        let mut runtime = LookupProducerRuntime::new(true);
+        runtime.record_sample(true);
+        for _ in 1..LOOKUP_PLANNER_SAMPLE_RELATIONSHIPS {
+            runtime.record_sample(false);
+        }
+
+        assert!(!runtime.enabled);
+    }
+
+    #[test]
+    fn test_should_keep_lookup_producer_runtime_when_pruning_ratio_is_high() {
+        let mut runtime = LookupProducerRuntime::new(true);
+        for _ in 0..LOOKUP_PLANNER_SAMPLE_RELATIONSHIPS {
+            runtime.record_sample(true);
+        }
+
+        assert!(runtime.enabled);
     }
 }
