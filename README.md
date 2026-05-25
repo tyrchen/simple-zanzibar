@@ -5,191 +5,126 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Build Status](https://github.com/tyrchen/simple-zanzibar/workflows/CI/badge.svg)](https://github.com/tyrchen/simple-zanzibar/actions)
 
-A simplified Rust implementation of Google's Zanzibar authorization system, featuring a human-readable DSL for policy definition and comprehensive support for relationship-based access control (ReBAC).
+Simple Zanzibar is a local, in-memory Rust authorization engine inspired by Google's Zanzibar paper.
+It provides relationship-based access control (ReBAC), a small policy DSL, consistency tokens,
+lock-free snapshot reads, compact snapshot artifacts, and public APIs for check, expand, lookup, and
+policy review workflows.
 
-## 🌟 What is Zanzibar?
+The crate is intentionally a local library, not a distributed Zanzibar service. It is useful when an
+application wants Zanzibar-style semantics in-process and can distribute policy/relationship data as
+text or prebuilt `.szsnap` artifacts.
 
-[Google's Zanzibar](https://research.google/pubs/pub48190/) is a global authorization system that provides consistent, scalable authorization decisions across Google's services. It's based on the concept of **relationship tuples** that express relationships between objects and users.
+## Current Capabilities
 
-### Key Concepts
+- Schema-first DSL with direct relations, computed usersets, tuple-to-userset inheritance, union,
+  intersection, and exclusion.
+- Validated relationship strings such as `doc:readme#viewer@group:eng#member`.
+- Single-writer actor with bounded queue; readers use immutable published snapshots through
+  `arc-swap` and do not take a service-level lock.
+- Consistency tokens for exact-snapshot reads across retained revisions.
+- Indexed compact relationship storage for resource-side and subject-side lookup paths.
+- `check`, `expand`, `lookup_resources`, `lookup_subjects`, `lookup_permissions`, and
+  `lookup_object_permissions` APIs.
+- Deterministic policy text import/export and raw or zstd-compressed snapshot save/load.
+- Optional `serde` feature with validated public request/response DTO deserialization.
+- Optional `tracing` feature for structured API spans.
 
-- **Objects**: Resources in your system (e.g., `doc:readme`, `folder:photos`)
-- **Relations**: Types of relationships (e.g., `owner`, `viewer`, `editor`)
-- **Users**: Subjects that can have relationships (e.g., `user:alice`, `group:engineers`)
-- **Tuples**: Assertions of relationships (e.g., `doc:readme#owner@user:alice`)
+## Architecture
 
-## 🏗️ Architecture
-
-```mermaid
-graph TB
-    subgraph "Simple Zanzibar Architecture"
-        DSL[DSL Parser] --> Config[Namespace Config]
-        Config --> Service[Zanzibar Service]
-
-        Service --> Store[Tuple Store]
-        Service --> Eval[Evaluation Engine]
-
-        Store --> Memory[In-Memory Store]
-        Store --> Future[Future: Database Store]
-
-        Eval --> Check[Check API]
-        Eval --> Expand[Expand API]
-
-        Check --> Decision{Authorization Decision}
-        Expand --> Userset[Expanded Userset]
-    end
-
-    subgraph "External Interface"
-        Client[Client Application] --> Service
-        Policy[Policy Definition] --> DSL
-    end
-
-    style Service fill:#e1f5fe
-    style DSL fill:#f3e5f5
-    style Eval fill:#e8f5e8
-    style Store fill:#fff3e0
+```text
+Client / application
+        │
+        ▼
+┌───────────────────────────────┐
+│ ZanzibarEngine public API      │
+│ - validates request DTOs       │
+│ - starts tracing spans         │
+└───────────────┬───────────────┘
+                │
+    ┌───────────┴───────────┐
+    │                       │
+    ▼                       ▼
+Read path               Write path
+ArcSwap snapshot        bounded writer actor
+check/expand/lookup     schema + relationship mutation
+    │                       │
+    ▼                       ▼
+Compiled schema IR      publish new revision token
+Indexed store view      retain exact snapshots
+    │                       │
+    └───────────┬───────────┘
+                ▼
+        `.szsnap` save/load
+        raw or zstd wrapper
 ```
 
-## 🔄 Data Flow
+## Quick Start
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Service as ZanzibarEngine
-    participant Parser as DSL Parser
-    participant Store as Tuple Store
-    participant Eval as Evaluation Engine
-
-    Note over Client,Eval: Policy Setup
-    Client->>Service: add_dsl(policy)
-    Service->>Parser: parse_dsl(policy)
-    Parser-->>Service: NamespaceConfig
-
-    Note over Client,Eval: Tuple Management
-    Client->>Service: write_tuple(tuple)
-    Service->>Store: write_tuple(tuple)
-    Store-->>Service: Ok()
-
-    Note over Client,Eval: Authorization Check
-    Client->>Service: check(object, relation, user)
-    Service->>Eval: check(object, relation, user, config, store)
-    Eval->>Store: read_tuples(filter)
-    Store-->>Eval: Vec<RelationTuple>
-    Eval->>Eval: recursive_evaluation()
-    Eval-->>Service: bool
-    Service-->>Client: Authorization Result
-```
-
-## 📊 Entity Relationship
-
-```mermaid
-erDiagram
-    NAMESPACE {
-        string name
-        map relations
-    }
-
-    RELATION_CONFIG {
-        string name
-        optional userset_rewrite
-    }
-
-    USERSET_EXPRESSION {
-        enum type
-        optional relation
-        optional expressions
-    }
-
-    OBJECT {
-        string namespace
-        string id
-    }
-
-    RELATION {
-        string name
-    }
-
-    USER {
-        enum type
-        string user_id
-        optional object
-        optional relation
-    }
-
-    RELATION_TUPLE {
-        object object
-        relation relation
-        user user
-    }
-
-    NAMESPACE ||--o{ RELATION_CONFIG : contains
-    RELATION_CONFIG ||--o| USERSET_EXPRESSION : has
-    USERSET_EXPRESSION ||--o{ USERSET_EXPRESSION : composed_of
-    RELATION_TUPLE ||--|| OBJECT : references
-    RELATION_TUPLE ||--|| RELATION : has
-    RELATION_TUPLE ||--|| USER : assigned_to
-```
-
-## 🚀 Quick Start
-
-Add this to your `Cargo.toml`:
+Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-simple-zanzibar = "0.1.0"
+simple-zanzibar = "0.2.1"
 ```
 
-### Basic Usage
+Basic permission check:
 
 ```rust
-use simple_zanzibar::{ZanzibarEngine, model::{Object, Relation, RelationTuple, User}};
+use simple_zanzibar::{
+    ZanzibarEngine,
+    model::{Object, Relation, User},
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let service = ZanzibarEngine::builder().build();
+    let engine = ZanzibarEngine::builder().build();
 
-    // Define policy using DSL
-    let policy = r#"
+    engine.add_dsl(r#"
         namespace doc {
             relation owner {}
             relation viewer {
                 rewrite union(this, computed_userset(relation: "owner"))
             }
         }
-    "#;
+    "#)?;
 
-    service.add_dsl(policy)?;
+    engine.touch_relationship("doc:readme#owner@user:alice")?;
 
-    // Create objects and users
-    let doc = Object { namespace: "doc".to_string(), id: "readme".to_string() };
-    let alice = User::UserId("alice".to_string());
+    let doc = Object::new("doc", "readme");
+    let viewer = Relation::new("viewer");
+    let alice = User::user_id("alice");
 
-    // Grant permission
-    service.write_tuple(RelationTuple {
-        object: doc.clone(),
-        relation: Relation("owner".to_string()),
-        user: alice.clone(),
-    })?;
-
-    // Check permission
-    let can_view = service.check_relation(
-        &doc,
-        &Relation("viewer".to_string()),
-        &alice
-    )?;
-
-    println!("Alice can view doc: {}", can_view); // true
-
+    assert!(engine.check_relation(&doc, &viewer, &alice)?);
     Ok(())
 }
 ```
 
-## 📝 DSL Reference
+Exact consistency after a write:
 
-The Simple Zanzibar DSL allows you to define authorization policies in a human-readable format.
+```rust
+use simple_zanzibar::{
+    ZanzibarEngine,
+    model::{CheckRequest, Object, Relation, User},
+    revision::Consistency,
+};
 
-### Syntax Overview
-
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let engine = ZanzibarEngine::builder().build();
+engine.add_dsl("namespace doc { relation viewer {} }")?;
+let token = engine.touch_relationship("doc:readme#viewer@user:alice")?;
+let response = engine.check(CheckRequest::new(
+    Object::new("doc", "readme"),
+    Relation::new("viewer"),
+    User::user_id("alice"),
+    Consistency::Exact(token),
+))?;
+assert!(response.allowed);
+# Ok(())
+# }
 ```
+
+## DSL Reference
+
+```text
 namespace <namespace_name> {
     relation <relation_name> {
         rewrite <userset_expression>
@@ -197,295 +132,188 @@ namespace <namespace_name> {
 }
 ```
 
-### Userset Expressions
+Supported userset expressions:
 
-#### 1. `this`
+- `this`: direct relationships for the current object relation.
+- `computed_userset(relation: "owner")`: another relation on the same object.
+- `tuple_to_userset(tupleset: "parent", computed_userset: "viewer")`: follow related objects and
+  evaluate a relation on each related object.
+- `union(expr1, expr2, ...)`: any expression may allow access.
+- `intersection(expr1, expr2, ...)`: all expressions must allow access.
+- `exclusion(base, exclude)`: allow `base` except subjects in `exclude`.
 
-Direct relationship - users explicitly granted this relation.
+Example:
 
-```
-relation owner {
-    rewrite this
-}
-```
-
-#### 2. `computed_userset(relation: "relation_name")`
-
-Users who have another relation on the same object.
-
-```
-relation viewer {
-    rewrite computed_userset(relation: "owner")
-}
-```
-
-#### 3. `tuple_to_userset(tupleset: "relation1", computed_userset: "relation2")`
-
-Users who have `relation2` on objects that have `relation1` with the current object.
-
-```
-relation viewer {
-    rewrite tuple_to_userset(tupleset: "parent", computed_userset: "viewer")
-}
-```
-
-#### 4. `union(expr1, expr2, ...)`
-
-Users who satisfy any of the expressions.
-
-```
-relation viewer {
-    rewrite union(
-        this,
-        computed_userset(relation: "owner"),
-        computed_userset(relation: "editor")
-    )
-}
-```
-
-#### 5. `intersection(expr1, expr2, ...)`
-
-Users who satisfy all expressions.
-
-```
-relation admin {
-    rewrite intersection(
-        computed_userset(relation: "owner"),
-        computed_userset(relation: "manager")
-    )
-}
-```
-
-#### 6. `exclusion(base_expr, exclude_expr)`
-
-Users in `base_expr` but not in `exclude_expr`.
-
-```
-relation editor {
-    rewrite exclusion(
-        computed_userset(relation: "viewer"),
-        computed_userset(relation: "banned")
-    )
-}
-```
-
-### Complete Example
-
-```
-// File system with hierarchical permissions
-namespace file {
-    relation owner {}
-
-    relation parent {}
-
-    relation viewer {
-        rewrite union(
-            this,
-            computed_userset(relation: "owner"),
-            computed_userset(relation: "editor"),
-            tuple_to_userset(tupleset: "parent", computed_userset: "viewer")
-        )
-    }
-
-    relation editor {
-        rewrite union(
-            this,
-            computed_userset(relation: "owner")
-        )
-    }
+```text
+namespace group {
+    relation member {}
 }
 
 namespace folder {
+    relation viewer {}
+}
+
+namespace doc {
     relation owner {}
-
     relation parent {}
-
+    relation banned {}
     relation viewer {
-        rewrite union(
-            this,
-            computed_userset(relation: "owner"),
-            tuple_to_userset(tupleset: "parent", computed_userset: "viewer")
+        rewrite exclusion(
+            union(
+                computed_userset(relation: "owner"),
+                tuple_to_userset(tupleset: "parent", computed_userset: "viewer")
+            ),
+            computed_userset(relation: "banned")
         )
     }
 }
 ```
 
-## 🔧 API Reference
-
-### ZanzibarEngine
-
-The main service for handling authorization.
+## Public API Overview
 
 ```rust
-impl ZanzibarEngine {
-    // Create a new engine
-    pub fn builder() -> ZanzibarEngineBuilder
-
-    // Load policy from DSL
-    pub fn add_dsl(&self, dsl: &str) -> Result<(), EngineError>
-
-    // Add namespace configuration
-    pub fn apply_namespace_config(&self, config: NamespaceConfig) -> Result<ConsistencyToken, EngineError>
-
-    // Write a relation tuple
-    pub fn write_tuple(&self, tuple: impl Borrow<RelationTuple>) -> Result<(), EngineError>
-
-    // Delete a relation tuple
-    pub fn delete_tuple(&self, tuple: &RelationTuple) -> Result<(), EngineError>
-
-    // Check if user has relation to object
-    pub fn check_relation(&self, object: &Object, relation: &Relation, user: &User) -> Result<bool, EngineError>
-
-    // Expand userset for object and relation
-    pub fn expand_relation(&self, object: &Object, relation: &Relation) -> Result<ExpandedUserset, EngineError>
-}
-```
-
-### Data Types
-
-```rust
-// Object represents a resource
-pub struct Object {
-    pub namespace: String,
-    pub id: String,
-}
-
-// Relation represents a permission type
-pub struct Relation(pub String);
-
-// User can be a direct user ID or a userset
-pub enum User {
-    UserId(String),
-    Userset(Object, Relation),
-}
-
-// RelationTuple represents a permission assertion
-pub struct RelationTuple {
-    pub object: Object,
-    pub relation: Relation,
-    pub user: User,
-}
-```
-
-## 📚 Examples
-
-### File Permissions System
-
-```bash
-cargo run --example file_permissions
-```
-
-This example demonstrates:
-
-- Hierarchical file and folder permissions
-- Dynamic permission granting and revocation
-- Permission inheritance through parent relationships
-- Real-world usage patterns
-
-### Custom Implementation
-
-```rust
-use simple_zanzibar::{ZanzibarEngine, model::*};
-
-// Define your domain objects
-let document = Object {
-    namespace: "document".to_string(),
-    id: "proposal.pdf".to_string()
+use simple_zanzibar::{
+    ZanzibarEngine,
+    model::{
+        CheckRequest, ExpandRequest, LookupObjectPermissionsRequest,
+        LookupPermissionsRequest, LookupResourcesRequest, LookupSubjectsRequest,
+    },
+    relationship::{Precondition, RelationshipMutation},
+    revision::ConsistencyToken,
+    schema::SchemaSource,
 };
 
-let user = User::UserId("john.doe".to_string());
-
-// Set up your service with policies
-let service = ZanzibarEngine::builder().build();
-service.add_dsl(r#"
-    namespace document {
-        relation owner {}
-        relation collaborator {}
-        relation viewer {
-            rewrite union(
-                this,
-                computed_userset(relation: "owner"),
-                computed_userset(relation: "collaborator")
-            )
-        }
-    }
-"#)?;
-
-// Grant permissions
-service.write_tuple(RelationTuple {
-    object: document.clone(),
-    relation: Relation("collaborator".to_string()),
-    user: user.clone(),
-})?;
-
-// Check permissions
-let can_view = service.check_relation(
-    &document,
-    &Relation("viewer".to_string()),
-    &user
-)?;
+impl ZanzibarEngine {
+    pub fn builder() -> simple_zanzibar::ZanzibarEngineBuilder;
+    pub fn apply_schema(&self, source: SchemaSource<'_>) -> Result<ConsistencyToken, simple_zanzibar::EngineError>;
+    pub fn write_relationships(
+        &self,
+        mutations: impl IntoIterator<Item = RelationshipMutation>,
+    ) -> Result<ConsistencyToken, simple_zanzibar::EngineError>;
+    pub fn write_relationships_with_preconditions(
+        &self,
+        mutations: impl IntoIterator<Item = RelationshipMutation>,
+        preconditions: impl IntoIterator<Item = Precondition>,
+    ) -> Result<ConsistencyToken, simple_zanzibar::EngineError>;
+    pub fn check(&self, request: CheckRequest) -> Result<simple_zanzibar::model::CheckResponse, simple_zanzibar::EngineError>;
+    pub fn expand(&self, request: ExpandRequest) -> Result<simple_zanzibar::model::ExpandResponse, simple_zanzibar::EngineError>;
+    pub fn lookup_resources(&self, request: impl std::borrow::Borrow<LookupResourcesRequest>) -> Result<simple_zanzibar::model::LookupResources, simple_zanzibar::EngineError>;
+    pub fn lookup_subjects(&self, request: impl std::borrow::Borrow<LookupSubjectsRequest>) -> Result<simple_zanzibar::model::LookupSubjects, simple_zanzibar::EngineError>;
+    pub fn lookup_permissions(&self, request: impl std::borrow::Borrow<LookupPermissionsRequest>) -> Result<simple_zanzibar::model::LookupPermissions, simple_zanzibar::EngineError>;
+    pub fn lookup_object_permissions(&self, request: impl std::borrow::Borrow<LookupObjectPermissionsRequest>) -> Result<simple_zanzibar::model::LookupObjectPermissions, simple_zanzibar::EngineError>;
+}
 ```
 
-## 🧪 Testing
+String convenience methods are available for ergonomic setup:
 
-Run the test suite:
+- `add_dsl` / `add_dsl_with_token`
+- `create_relationship`
+- `touch_relationship`
+- `delete_relationship`
+- `check_relation`
+- `expand_relation`
+
+## Policy Text and Snapshot Artifacts
+
+Reviewable policy text is deterministic and grouped by resource type:
+
+```rust
+use simple_zanzibar::{PolicyText, ZanzibarEngine};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let policy = PolicyText::from_single_relationship_file(
+    "namespace doc { relation viewer {} }".to_string(),
+    "doc:readme#viewer@user:alice\n".to_string(),
+);
+let engine = ZanzibarEngine::from_policy_text(&policy)?;
+let exported = engine.export_policy_text()?;
+assert!(exported.schema.contains("namespace doc"));
+# Ok(())
+# }
+```
+
+Snapshots are the fastest whole-state distribution format:
+
+```rust
+use simple_zanzibar::{SnapshotLoadOptions, SnapshotSaveOptions, ZanzibarEngine};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let path = std::env::temp_dir().join("simple-zanzibar-readme.szsnap.zst");
+let engine = ZanzibarEngine::builder().build();
+engine.add_dsl("namespace doc { relation viewer {} }")?;
+engine.touch_relationship("doc:readme#viewer@user:alice")?;
+engine.save_snapshot(&path, SnapshotSaveOptions::zstd())?;
+let loaded = ZanzibarEngine::load_snapshot(&path, SnapshotLoadOptions::zstd())?;
+# std::fs::remove_file(path).ok();
+# let _ = loaded;
+# Ok(())
+# }
+```
+
+## Testing and Verification
+
+Common checks:
 
 ```bash
-# Run all tests
-cargo test
-
-# Run specific test categories
-cargo test --test integration_tests
-cargo test --test storage_tests
-cargo test --test eval_tests
-cargo test --test parser_tests
-
-# Run with output
-cargo test -- --nocapture
+cargo build
+cargo test --all-features
+cargo +nightly fmt --check
+cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic
+cargo audit
+cargo deny check
 ```
 
-## 🔍 Performance Considerations
+The Makefile keeps common automation discoverable:
 
-- **In-Memory Storage**: Current implementation uses `HashSet` for fast lookups
-- **Cycle Detection**: Prevents infinite recursion in policy evaluation
-- **Extensible Storage**: `TupleStore` trait allows custom storage backends
-- **Zero-Copy Parsing**: Efficient DSL parsing with `pest`
+```bash
+make check                 # build + nextest + fmt-check + clippy
+make bench-all             # full benchmark suite
+make bench-perf-continuous # focused continuous performance filters
+make perf-charts           # regenerate docs/perf SVGs from history.ndjson
+```
 
-## 🛣️ Roadmap
+The test suite includes unit, integration, property, snapshot-corruption, public API completeness,
+concurrent-runtime, e2e policy-to-snapshot, and benchmark harness coverage. The current performance
+report is in [`docs/perf/phase-15-complete-benchmark-2026-05-25.md`](docs/perf/phase-15-complete-benchmark-2026-05-25.md).
 
-- [ ] Persistent storage backends (PostgreSQL, Redis)
-- [ ] Metrics and observability
-- [ ] Policy validation and testing tools
-- [ ] Performance benchmarks
-- [ ] gRPC API server
-- [ ] Policy migration tools
+## Performance Notes
 
-## 🤝 Contributing
+- Relationship data is stored in compact indexed snapshots, not a linear `HashSet` scan on hot
+  paths.
+- Reads acquire a published immutable snapshot through `arc-swap` and reuse request-local evaluator
+  state where possible.
+- Writes are serialized through one bounded actor per engine; batch writes are much faster than many
+  single-relationship writes.
+- Raw `.szsnap` files optimize load speed. Zstd-wrapped snapshots optimize distribution size and are
+  decoded under a configured byte cap.
+- `IndexProfile::CheckOnly` can reduce artifact size when subject-side reverse lookup APIs are not
+  needed.
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+## Repository Map
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+- `src/api.rs`: public engine, writer actor, tenant sharding, public error model.
+- `src/domain.rs`: validated identifiers and relationship grammar.
+- `src/schema/`: schema compiler and resolver.
+- `src/relationship.rs`: compact relationship store and snapshot index encoding.
+- `src/eval.rs`: check, expand, lookup, memoization, and lookup planning.
+- `src/snapshot.rs`: raw and zstd snapshot save/load with validation.
+- `specs/`: product, design, performance, verification, and implementation specs.
+- `docs/perf/`: recorded benchmark evidence and generated charts.
 
-## 📄 License
+## Non-Goals
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE.md) file for details.
+- No persistent database backend in the current crate.
+- No network server or gRPC API.
+- No distributed consistency protocol.
+- No cryptographic signature implementation for snapshots; callers can use external integrity and
+  then select `SnapshotIntegrityMode::External` where appropriate.
 
-## 🙏 Acknowledgments
+## License
 
-- [Google's Zanzibar paper](https://research.google/pubs/pub48190/) for the foundational concepts
-- [OpenFGA](https://openfga.dev/) for inspiration on DSL design
-- The Rust community for excellent crates like `pest` and `thiserror`
+This project is licensed under the MIT License. See [LICENSE.md](LICENSE.md).
 
-## 📞 Support
+## Acknowledgments
 
-- 📖 [Documentation](https://docs.rs/simple-zanzibar)
-- 🐛 [Issue Tracker](https://github.com/tyrchen/simple-zanzibar/issues)
-- 💬 [Discussions](https://github.com/tyrchen/simple-zanzibar/discussions)
-
----
-
-**Simple Zanzibar** - Making authorization simple, scalable, and secure. 🔐
+- [Google's Zanzibar paper](https://research.google/pubs/pub48190/) for the authorization model.
+- [SpiceDB](https://github.com/authzed/spicedb) for production implementation patterns studied in
+  [`docs/research/study-spicedb.md`](docs/research/study-spicedb.md).

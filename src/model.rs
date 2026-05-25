@@ -2,13 +2,18 @@
 
 use std::hash::Hash;
 
-use crate::revision::Consistency;
+use crate::{
+    domain::{
+        DomainError, ObjectRef, ObjectType, RelationName, Relationship, SubjectRef, SubjectType,
+    },
+    revision::Consistency,
+};
 
 /// Represents a namespaced digital object.
 /// e.g., `doc:readme`, `folder:A`
 #[cfg_attr(
     feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
+    derive(serde::Serialize),
     serde(rename_all = "camelCase", deny_unknown_fields)
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -28,11 +33,44 @@ impl Object {
             id: id.into(),
         }
     }
+
+    /// Validates this object's namespace and identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when the namespace or object id violates the public identifier
+    /// grammar or byte limits.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        ObjectRef::try_from(self).map(drop)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Object {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct ObjectSerde {
+            namespace: String,
+            id: String,
+        }
+
+        let value = ObjectSerde::deserialize(deserializer)?;
+        let object = Self {
+            namespace: value.namespace,
+            id: value.id,
+        };
+        object.validate().map_err(serde::de::Error::custom)?;
+        Ok(object)
+    }
 }
 
 /// Represents a relation or permission type on an object.
 /// e.g., `owner`, `editor`, `viewer`
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Relation(pub String);
 
@@ -42,18 +80,40 @@ impl Relation {
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
+
+    /// Validates this relation or permission name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when the relation violates the public relation-name grammar or byte
+    /// limit.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        RelationName::try_from(self).map(drop)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Relation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let relation = Self(<String as serde::Deserialize>::deserialize(deserializer)?);
+        relation.validate().map_err(serde::de::Error::custom)?;
+        Ok(relation)
+    }
 }
 
 /// Represents either a specific user ID or a reference to a userset (e.g., a group).
 #[cfg_attr(
     feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
+    derive(serde::Serialize),
     serde(rename_all = "camelCase", tag = "type", content = "value")
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum User {
     /// A specific user, identified by a unique string.
-    /// e.g., `"10"`, `"alice@example.com"`
+    /// e.g., `"10"`, `"alice"`.
     UserId(String),
     /// A set of users, identified by an object-relation pair.
     /// e.g., `group:eng#member`
@@ -72,6 +132,38 @@ impl User {
     pub fn userset(object: Object, relation: Relation) -> Self {
         Self::Userset(object, relation)
     }
+
+    /// Validates this subject reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when a direct user id or userset object/relation violates public
+    /// identifier grammar or byte limits.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        SubjectRef::try_from(self).map(drop)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for User {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", tag = "type", content = "value")]
+        enum UserSerde {
+            UserId(String),
+            Userset(Object, Relation),
+        }
+
+        let user = match UserSerde::deserialize(deserializer)? {
+            UserSerde::UserId(id) => Self::UserId(id),
+            UserSerde::Userset(object, relation) => Self::Userset(object, relation),
+        };
+        user.validate().map_err(serde::de::Error::custom)?;
+        Ok(user)
+    }
 }
 
 /// The core relation tuple, representing a single permission assertion.
@@ -79,7 +171,7 @@ impl User {
 /// e.g., `(doc:readme#owner@user:alice)`
 #[cfg_attr(
     feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
+    derive(serde::Serialize),
     serde(rename_all = "camelCase", deny_unknown_fields)
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -101,6 +193,41 @@ impl RelationTuple {
             relation,
             user,
         }
+    }
+
+    /// Validates this relationship tuple.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when any tuple component violates public identifier grammar or byte
+    /// limits.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        Relationship::try_from(self).map(drop)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for RelationTuple {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RelationTupleSerde {
+            object: Object,
+            relation: Relation,
+            user: User,
+        }
+
+        let value = RelationTupleSerde::deserialize(deserializer)?;
+        let tuple = Self {
+            object: value.object,
+            relation: value.relation,
+            user: value.user,
+        };
+        tuple.validate().map_err(serde::de::Error::custom)?;
+        Ok(tuple)
     }
 }
 
@@ -132,6 +259,17 @@ impl CheckRequest {
             user,
             consistency,
         }
+    }
+
+    /// Validates domain fields in this check request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when the object, relation, or subject is invalid.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.object.validate()?;
+        self.relation.validate()?;
+        self.user.validate()
     }
 }
 
@@ -173,6 +311,16 @@ impl ExpandRequest {
             consistency,
         }
     }
+
+    /// Validates domain fields in this expand request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when the object or relation is invalid.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.object.validate()?;
+        self.relation.validate()
+    }
 }
 
 /// Response for an expand request.
@@ -190,7 +338,7 @@ pub struct ExpandResponse {
 /// Request for resources of one type that a subject can access through a permission.
 #[cfg_attr(
     feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
+    derive(serde::Serialize),
     serde(rename_all = "camelCase", deny_unknown_fields)
 )]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +361,42 @@ impl LookupResourcesRequest {
             resource_type: resource_type.into(),
         }
     }
+
+    /// Validates domain fields in this lookup request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when the subject, permission, or resource type is invalid.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.subject.validate()?;
+        self.permission.validate()?;
+        ObjectType::try_from(self.resource_type.as_str()).map(drop)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for LookupResourcesRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct LookupResourcesRequestSerde {
+            subject: User,
+            permission: Relation,
+            resource_type: String,
+        }
+
+        let value = LookupResourcesRequestSerde::deserialize(deserializer)?;
+        let request = Self {
+            subject: value.subject,
+            permission: value.permission,
+            resource_type: value.resource_type,
+        };
+        request.validate().map_err(serde::de::Error::custom)?;
+        Ok(request)
+    }
 }
 
 /// Resources returned by a lookup request.
@@ -230,7 +414,7 @@ pub struct LookupResources {
 /// Request for subjects of one type that can access a resource through a permission.
 #[cfg_attr(
     feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
+    derive(serde::Serialize),
     serde(rename_all = "camelCase", deny_unknown_fields)
 )]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +436,42 @@ impl LookupSubjectsRequest {
             permission,
             subject_type: subject_type.into(),
         }
+    }
+
+    /// Validates domain fields in this lookup request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when the resource, permission, or subject type is invalid.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.resource.validate()?;
+        self.permission.validate()?;
+        SubjectType::try_from(self.subject_type.as_str()).map(drop)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for LookupSubjectsRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct LookupSubjectsRequestSerde {
+            resource: Object,
+            permission: Relation,
+            subject_type: String,
+        }
+
+        let value = LookupSubjectsRequestSerde::deserialize(deserializer)?;
+        let request = Self {
+            resource: value.resource,
+            permission: value.permission,
+            subject_type: value.subject_type,
+        };
+        request.validate().map_err(serde::de::Error::custom)?;
+        Ok(request)
     }
 }
 
@@ -293,6 +513,16 @@ impl LookupPermissionsRequest {
             consistency,
         }
     }
+
+    /// Validates domain fields in this lookup request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when the subject or resource is invalid.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.subject.validate()?;
+        self.resource.validate()
+    }
 }
 
 /// Permissions returned by a subject/resource lookup request.
@@ -310,7 +540,7 @@ pub struct LookupPermissions {
 /// Request for subjects grouped by every permission they have on one resource.
 #[cfg_attr(
     feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
+    derive(serde::Serialize),
     serde(rename_all = "camelCase", deny_unknown_fields)
 )]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +566,41 @@ impl LookupObjectPermissionsRequest {
             subject_type: subject_type.into(),
             consistency,
         }
+    }
+
+    /// Validates domain fields in this lookup request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError`] when the resource or subject type is invalid.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.resource.validate()?;
+        SubjectType::try_from(self.subject_type.as_str()).map(drop)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for LookupObjectPermissionsRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct LookupObjectPermissionsRequestSerde {
+            resource: Object,
+            subject_type: String,
+            consistency: Consistency,
+        }
+
+        let value = LookupObjectPermissionsRequestSerde::deserialize(deserializer)?;
+        let request = Self {
+            resource: value.resource,
+            subject_type: value.subject_type,
+            consistency: value.consistency,
+        };
+        request.validate().map_err(serde::de::Error::custom)?;
+        Ok(request)
     }
 }
 

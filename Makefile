@@ -6,6 +6,17 @@ check: build test fmt-check clippy
 test:
 	@cargo nextest run --all-features
 
+prod-ready-check: build test fmt-check lint audit deny doc
+
+audit:
+	@cargo audit
+
+deny:
+	@cargo deny check
+
+doc:
+	@RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+
 bench-baseline:
 	@cargo bench --bench baseline -- --sample-size 10
 
@@ -73,6 +84,11 @@ bench-perf-continuous:
 	@cargo bench --features bench-internals --bench perf_optimization -- lookup_subjects_streaming_1m --sample-size "$${PERF_SAMPLE_SIZE:-10}"
 	@cargo bench --features bench-internals --bench perf_optimization -- read_heavy_heavy_write_batched_1m --sample-size "$${PERF_SAMPLE_SIZE:-10}"
 
+bench-prod-smoke:
+	@cargo bench --features bench-internals --bench perf_optimization -- check_prepared_1m --sample-size "$${PERF_SAMPLE_SIZE:-10}"
+	@cargo bench --features bench-internals --bench perf_optimization -- lookup_resources_streaming_1m --sample-size "$${PERF_SAMPLE_SIZE:-10}"
+	@cargo bench --bench snapshot -- snapshot_load_trusted_fast/1m --sample-size "$${PERF_SAMPLE_SIZE:-10}"
+
 bench-snapshot-memory:
 	@cargo bench --bench snapshot --no-run
 	@set -e; \
@@ -133,4 +149,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-read-followup-baseline bench-snapshot-section-size perf-charts perf-charts-check perf-history-ingest perf-tools-check perf-impact-chart phase-benchmark-trends bench-perf-continuous bench-snapshot-memory bench-snapshot-zstd-memory bench-all fmt fmt-check clippy lint release update-submodule
+.PHONY: build check test prod-ready-check audit deny doc bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-read-followup-baseline bench-snapshot-section-size perf-charts perf-charts-check perf-history-ingest perf-tools-check perf-impact-chart phase-benchmark-trends bench-perf-continuous bench-prod-smoke bench-snapshot-memory bench-snapshot-zstd-memory bench-all fmt fmt-check clippy lint release update-submodule

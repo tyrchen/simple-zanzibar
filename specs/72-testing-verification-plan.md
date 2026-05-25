@@ -55,6 +55,7 @@ This plan defines how each phase proves correctness, safety, compatibility, and 
 | Public API completeness | zstd snapshot round trips, policy text import/export, schema replacement/deletion, permission enumeration, and public API benchmarks for [19](./19-public-api-completeness-design.md). |
 | Concurrent runtime | lock-free read acquisition, writer actor lifecycle, failed-write atomicity, concurrent read/write behaviour, tenant isolation, and mixed workload benchmarks for [20](./20-concurrent-engine-runtime-design.md). |
 | Structural performance optimization | prepared-check equivalence, ID-native recursion, streaming lookup, segmented-store properties, index-profile support, snapshot phase timers, and 1M write/read benchmarks for [21](./21-performance-optimization-design.md). |
+| Production readiness | serde boundary rejection, policy-text-to-zstd-snapshot e2e flow, current README/API documentation, and Makefile production gate for [94](./94-production-readiness-review.md). |
 
 ## 4. Command Gates
 
@@ -62,11 +63,18 @@ Every implementation phase closes only when these pass:
 
 ```text
 cargo build
-cargo test
+cargo test --all-features
 cargo +nightly fmt --check
-cargo clippy -- -D warnings -W clippy::pedantic
+cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic
 cargo audit
 cargo deny check
+RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+```
+
+The Makefile equivalent for release-hardening and production-readiness reviews is:
+
+```text
+make prod-ready-check
 ```
 
 For boundary-module hardening phases, also run:
