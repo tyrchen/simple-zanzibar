@@ -502,13 +502,15 @@ fn bench_phase15_lookup_planner_pruning(criterion: &mut Criterion, filters: &[St
 
 #[cfg(feature = "bench-internals")]
 fn print_phase15_eval_counter_sample(name: &str, operation: impl FnOnce()) {
-    let (_, counters) = capture_phase15_eval_counters(operation);
+    let ((), counters) = capture_phase15_eval_counters(operation);
     eprintln!(
         "{name}: check_evaluations={} memo_hit_opportunities={} memo_hits={} memo_misses={} \
          memo_inserts={} memo_depth_skips={} completed_results={} lookup_resources_candidates={} \
          lookup_resources_schema_pruned={} lookup_resources_planner_fallbacks={} \
-         lookup_resources_full_root_checks={} lookup_subjects_candidates={} \
-         lookup_subjects_usersets={} lookup_subjects_full_root_checks={}",
+         lookup_resources_full_root_checks={} lookup_resources_residual_checks={} \
+         lookup_resources_proven_without_check={} lookup_resources_tuple_fallbacks={} \
+         lookup_subjects_candidates={} lookup_subjects_usersets={} \
+         lookup_subjects_full_root_checks={}",
         counters.check_evaluations,
         counters.check_memo_hit_opportunities,
         counters.check_memo_hits,
@@ -520,6 +522,9 @@ fn print_phase15_eval_counter_sample(name: &str, operation: impl FnOnce()) {
         counters.lookup_resources_schema_pruned,
         counters.lookup_resources_planner_fallbacks,
         counters.lookup_resources_full_root_checks,
+        counters.lookup_resources_residual_checks,
+        counters.lookup_resources_proven_without_check,
+        counters.lookup_resources_tuple_fallbacks,
         counters.lookup_subjects_candidate_subjects,
         counters.lookup_subjects_candidate_usersets,
         counters.lookup_subjects_full_root_checks,

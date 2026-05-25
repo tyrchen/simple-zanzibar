@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+<title id="title">Phase 15 performance deltas</title>
+<desc id="desc">Bar charts comparing Phase 15 upper estimates with Phase 14 and Phase 12 baselines.</desc>
+<rect width="1600" height="980" fill="#f7f8fb"/>
+<text x="56.0" y="58.0" font-size="34" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">Phase 15 performance delta bars</text>
+<text x="56.0" y="88.0" font-size="16" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">Negative means faster or smaller. Correctness-sensitive rows are separated.</text>
+<rect x="56.0" y="126.0" width="710.0" height="730.0" rx="8.0" fill="#ffffff" stroke="#e7eaf0"/>
+<text x="80.0" y="164.0" font-size="24" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">P15 vs P14</text>
+<text x="80.0" y="192.0" font-size="14" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">Latest follow-up against confirmed Phase 14 baseline</text>
+<line x1="316.0" y1="204.0" x2="316.0" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="316.0" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">-45%</text>
+<line x1="377.7" y1="204.0" x2="377.7" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="377.7" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">-30%</text>
+<line x1="439.3" y1="204.0" x2="439.3" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="439.3" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">-15%</text>
+<line x1="501.0" y1="204.0" x2="501.0" y2="708.0" stroke="#cfd6e2" stroke-width="1.0"/>
+<text x="501.0" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">+0%</text>
+<line x1="562.7" y1="204.0" x2="562.7" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="562.7" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">+15%</text>
+<line x1="624.3" y1="204.0" x2="624.3" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="624.3" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">+30%</text>
+<line x1="686.0" y1="204.0" x2="686.0" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="686.0" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">+45%</text>
+<text x="80.0" y="240.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">prepared check</text>
+<text x="80.0" y="258.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">4.304 us</text>
+<rect x="500.7" y="228.0" width="2.0" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="702.0" y="242.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-0.1%</text>
+<text x="80.0" y="294.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">lookup resources</text>
+<text x="80.0" y="312.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">2.34 ms</text>
+<rect x="498.1" y="282.0" width="2.9" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="702.0" y="296.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-0.7%</text>
+<text x="80.0" y="348.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">lookup subjects</text>
+<text x="80.0" y="366.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">3.922 us</text>
+<rect x="429.8" y="336.0" width="71.2" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="702.0" y="350.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-17.3%</text>
+<text x="80.0" y="402.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">realworld inherited</text>
+<text x="80.0" y="420.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">11.578 us</text>
+<rect x="501.0" y="390.0" width="2.0" height="18.0" rx="4.0" fill="#c2413a"/>
+<text x="702.0" y="404.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#c2413a" text-anchor="start">+0.2%</text>
+<text x="80.0" y="456.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">heavy-write read</text>
+<text x="80.0" y="474.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">11.581 us</text>
+<rect x="464.4" y="444.0" width="36.6" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="702.0" y="458.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-8.9%</text>
+<text x="80.0" y="510.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">full snapshot load</text>
+<text x="80.0" y="528.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">564.88 ms</text>
+<rect x="494.5" y="498.0" width="6.5" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="702.0" y="512.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-1.6%</text>
+<text x="80.0" y="564.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">trusted fast load</text>
+<text x="80.0" y="582.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">172.57 ms</text>
+<rect x="489.6" y="552.0" width="11.4" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="702.0" y="566.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-2.8%</text>
+<text x="80.0" y="618.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">Full zstd bytes</text>
+<text x="80.0" y="636.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">21.5 MB</text>
+<rect x="501.0" y="606.0" width="2.0" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="702.0" y="620.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">+0.0%</text>
+<text x="80.0" y="672.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">CheckOnly raw bytes</text>
+<text x="80.0" y="690.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">59.1 MB</text>
+<rect x="501.0" y="660.0" width="2.0" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="702.0" y="674.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">+0.0%</text>
+<rect x="836.0" y="126.0" width="710.0" height="730.0" rx="8.0" fill="#ffffff" stroke="#e7eaf0"/>
+<text x="860.0" y="164.0" font-size="24" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">P15 vs P12</text>
+<text x="860.0" y="192.0" font-size="14" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">Longer trend since structural read baseline</text>
+<line x1="1096.0" y1="204.0" x2="1096.0" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="1096.0" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">-45%</text>
+<line x1="1157.7" y1="204.0" x2="1157.7" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="1157.7" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">-30%</text>
+<line x1="1219.3" y1="204.0" x2="1219.3" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="1219.3" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">-15%</text>
+<line x1="1281.0" y1="204.0" x2="1281.0" y2="708.0" stroke="#cfd6e2" stroke-width="1.0"/>
+<text x="1281.0" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">+0%</text>
+<line x1="1342.7" y1="204.0" x2="1342.7" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="1342.7" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">+15%</text>
+<line x1="1404.3" y1="204.0" x2="1404.3" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="1404.3" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">+30%</text>
+<line x1="1466.0" y1="204.0" x2="1466.0" y2="708.0" stroke="#d9dee8" stroke-width="1.0"/>
+<text x="1466.0" y="196.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="middle">+45%</text>
+<text x="860.0" y="240.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">prepared check</text>
+<text x="860.0" y="258.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">4.304 us</text>
+<rect x="1164.7" y="228.0" width="116.3" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="1482.0" y="242.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-28.3%</text>
+<text x="860.0" y="294.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">lookup resources</text>
+<text x="860.0" y="312.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">2.34 ms</text>
+<rect x="1171.4" y="282.0" width="109.6" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="1482.0" y="296.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-26.7%</text>
+<text x="860.0" y="348.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">lookup subjects</text>
+<text x="860.0" y="366.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">3.922 us</text>
+<rect x="1124.0" y="336.0" width="157.0" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="1482.0" y="350.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-38.2%</text>
+<text x="860.0" y="402.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">realworld inherited</text>
+<text x="860.0" y="420.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">11.578 us</text>
+<rect x="1184.9" y="390.0" width="96.1" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="1482.0" y="404.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-23.4%</text>
+<text x="860.0" y="456.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">heavy-write read</text>
+<text x="860.0" y="474.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">11.581 us</text>
+<rect x="1136.7" y="444.0" width="144.3" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="1482.0" y="458.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-35.1%</text>
+<text x="860.0" y="510.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">full snapshot load</text>
+<text x="860.0" y="528.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">564.88 ms</text>
+<rect x="1263.7" y="498.0" width="17.3" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="1482.0" y="512.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-4.2%</text>
+<text x="860.0" y="564.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">trusted fast load</text>
+<text x="860.0" y="582.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">172.57 ms</text>
+<rect x="1281.0" y="552.0" width="101.7" height="18.0" rx="4.0" fill="#c2413a"/>
+<text x="1482.0" y="566.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#c2413a" text-anchor="start">+24.7%</text>
+<text x="860.0" y="618.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">Full zstd bytes</text>
+<text x="860.0" y="636.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">21.5 MB</text>
+<rect x="1136.4" y="606.0" width="144.6" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="1482.0" y="620.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-35.2%</text>
+<text x="860.0" y="672.0" font-size="13" font-weight="700" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#172033" text-anchor="start">CheckOnly raw bytes</text>
+<text x="860.0" y="690.0" font-size="11" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">59.1 MB</text>
+<rect x="1180.5" y="660.0" width="100.5" height="18.0" rx="4.0" fill="#14845c"/>
+<text x="1482.0" y="674.0" font-size="12" font-weight="800" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#14845c" text-anchor="start">-24.4%</text>
+<text x="56.0" y="936.0" font-size="13" font-weight="400" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#667085" text-anchor="start">Sources: docs/perf/history.ndjson. Lower latency and smaller size are better.</text>
+</svg>

@@ -1,7 +1,9 @@
 //! Core evaluation logic for `check` and `expand` requests.
 
 #[cfg(feature = "bench-internals")]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::cell::Cell;
+#[cfg(feature = "bench-internals")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     num::{NonZeroU32, NonZeroUsize},
@@ -30,7 +32,9 @@ const ACTIVE_INDEX_THRESHOLD: usize = 8;
 const LOOKUP_PLANNER_SAMPLE_RELATIONSHIPS: u32 = 64;
 const LOOKUP_PLANNER_MIN_PRUNE_BPS: u32 = 500;
 #[cfg(feature = "bench-internals")]
-static EVALUATION_READ_COUNTERS_ENABLED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static EVALUATION_READ_COUNTERS_ENABLED: Cell<bool> = const { Cell::new(false) };
+}
 #[cfg(feature = "bench-internals")]
 static CHECK_EVALUATIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
@@ -63,6 +67,12 @@ static LOOKUP_RESOURCES_SCHEMA_PRUNED: AtomicU64 = AtomicU64::new(0);
 static LOOKUP_RESOURCES_PLANNER_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
 static LOOKUP_RESOURCES_FULL_ROOT_CHECKS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static LOOKUP_RESOURCES_RESIDUAL_CHECKS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static LOOKUP_RESOURCES_PROVEN_WITHOUT_CHECK: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-internals")]
+static LOOKUP_RESOURCES_TUPLE_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
 static LOOKUP_RESOURCES_RETURNED: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "bench-internals")]
@@ -115,6 +125,12 @@ pub struct EvaluationReadCounters {
     pub lookup_resources_planner_fallbacks: u64,
     /// Number of full-root checks run by `lookup_resources`.
     pub lookup_resources_full_root_checks: u64,
+    /// Number of residual guard checks run by `lookup_resources`.
+    pub lookup_resources_residual_checks: u64,
+    /// Number of exact-proof resources returned by `lookup_resources` without a root check.
+    pub lookup_resources_proven_without_check: u64,
+    /// Number of tuple-to-userset candidate paths intentionally verified by full-root fallback.
+    pub lookup_resources_tuple_fallbacks: u64,
     /// Number of resources returned by `lookup_resources`.
     pub lookup_resources_returned: u64,
     /// Number of `lookup_resources` exits caused by `max_lookup_results`.
@@ -134,7 +150,7 @@ pub struct EvaluationReadCounters {
 /// Resets and enables benchmark-only evaluator counters.
 #[cfg(feature = "bench-internals")]
 pub fn reset_evaluation_read_counters() {
-    EVALUATION_READ_COUNTERS_ENABLED.store(true, Ordering::Relaxed);
+    set_evaluation_read_counters_enabled(true);
     CHECK_EVALUATIONS.store(0, Ordering::Relaxed);
     CHECK_MEMO_HIT_OPPORTUNITIES.store(0, Ordering::Relaxed);
     CHECK_MEMO_HITS.store(0, Ordering::Relaxed);
@@ -151,6 +167,9 @@ pub fn reset_evaluation_read_counters() {
     LOOKUP_RESOURCES_SCHEMA_PRUNED.store(0, Ordering::Relaxed);
     LOOKUP_RESOURCES_PLANNER_FALLBACKS.store(0, Ordering::Relaxed);
     LOOKUP_RESOURCES_FULL_ROOT_CHECKS.store(0, Ordering::Relaxed);
+    LOOKUP_RESOURCES_RESIDUAL_CHECKS.store(0, Ordering::Relaxed);
+    LOOKUP_RESOURCES_PROVEN_WITHOUT_CHECK.store(0, Ordering::Relaxed);
+    LOOKUP_RESOURCES_TUPLE_FALLBACKS.store(0, Ordering::Relaxed);
     LOOKUP_RESOURCES_RETURNED.store(0, Ordering::Relaxed);
     LOOKUP_RESOURCES_RESULT_LIMIT_EXITS.store(0, Ordering::Relaxed);
     LOOKUP_SUBJECTS_CANDIDATE_SUBJECTS.store(0, Ordering::Relaxed);
@@ -163,12 +182,12 @@ pub fn reset_evaluation_read_counters() {
 /// Enables or disables benchmark-only evaluator counters.
 #[cfg(feature = "bench-internals")]
 pub fn set_evaluation_read_counters_enabled(enabled: bool) {
-    EVALUATION_READ_COUNTERS_ENABLED.store(enabled, Ordering::Relaxed);
+    EVALUATION_READ_COUNTERS_ENABLED.with(|flag| flag.set(enabled));
 }
 
 #[cfg(feature = "bench-internals")]
 fn evaluation_read_counters_enabled() -> bool {
-    EVALUATION_READ_COUNTERS_ENABLED.load(Ordering::Relaxed)
+    EVALUATION_READ_COUNTERS_ENABLED.with(Cell::get)
 }
 
 #[cfg(feature = "bench-internals")]
@@ -205,6 +224,10 @@ pub fn evaluation_read_counters() -> EvaluationReadCounters {
             .load(Ordering::Relaxed),
         lookup_resources_full_root_checks: LOOKUP_RESOURCES_FULL_ROOT_CHECKS
             .load(Ordering::Relaxed),
+        lookup_resources_residual_checks: LOOKUP_RESOURCES_RESIDUAL_CHECKS.load(Ordering::Relaxed),
+        lookup_resources_proven_without_check: LOOKUP_RESOURCES_PROVEN_WITHOUT_CHECK
+            .load(Ordering::Relaxed),
+        lookup_resources_tuple_fallbacks: LOOKUP_RESOURCES_TUPLE_FALLBACKS.load(Ordering::Relaxed),
         lookup_resources_returned: LOOKUP_RESOURCES_RETURNED.load(Ordering::Relaxed),
         lookup_resources_result_limit_exits: LOOKUP_RESOURCES_RESULT_LIMIT_EXITS
             .load(Ordering::Relaxed),
@@ -322,6 +345,30 @@ fn record_lookup_resources_full_root_check() {
 
 #[cfg(not(feature = "bench-internals"))]
 fn record_lookup_resources_full_root_check() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_lookup_resources_residual_check() {
+    record_counter(&LOOKUP_RESOURCES_RESIDUAL_CHECKS);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_lookup_resources_residual_check() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_lookup_resources_proven_without_check() {
+    record_counter(&LOOKUP_RESOURCES_PROVEN_WITHOUT_CHECK);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_lookup_resources_proven_without_check() {}
+
+#[cfg(feature = "bench-internals")]
+fn record_lookup_resources_tuple_fallback() {
+    record_counter(&LOOKUP_RESOURCES_TUPLE_FALLBACKS);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn record_lookup_resources_tuple_fallback() {}
 
 #[cfg(feature = "bench-internals")]
 fn record_lookup_resources_returned() {
@@ -669,6 +716,7 @@ struct CheckFrame {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LookupProducerPlan {
     relations: Vec<RelationName>,
+    verification_rules: Vec<LookupVerificationRule>,
 }
 
 impl LookupProducerPlan {
@@ -676,6 +724,145 @@ impl LookupProducerPlan {
         self.relations
             .iter()
             .any(|relation| relationship.relation_name_eq(relation))
+    }
+
+    fn verification_for_relationship(
+        &self,
+        relationship: crate::relationship::RelationshipRef<'_>,
+        proof: LookupSubjectProof,
+        limits: EvaluationLimits,
+    ) -> LookupCandidateVerification {
+        if !proof.is_exact() || proof.direct_depth >= limits.max_depth.get() {
+            return LookupCandidateVerification::FullRoot;
+        }
+        self.verification_rules
+            .iter()
+            .find(|rule| relationship.relation_name_eq(&rule.relation))
+            .map_or(LookupCandidateVerification::FullRoot, |rule| {
+                rule.verification.clone()
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LookupVerificationRule {
+    relation: RelationName,
+    verification: LookupCandidateVerification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LookupCandidateVerification {
+    FullRoot,
+    ProvenWithoutCheck,
+    Residual(Vec<LookupResidualCheck>),
+}
+
+impl LookupCandidateVerification {
+    fn with_required_allowed(
+        self,
+        relation_context: RelationName,
+        expression: CompiledUsersetExpression,
+    ) -> Self {
+        self.with_residual(LookupResidualCheck {
+            relation_context,
+            expression,
+            expected: LookupResidualExpected::Allowed,
+        })
+    }
+
+    fn with_required_denied(
+        self,
+        relation_context: RelationName,
+        expression: CompiledUsersetExpression,
+    ) -> Self {
+        self.with_residual(LookupResidualCheck {
+            relation_context,
+            expression,
+            expected: LookupResidualExpected::Denied,
+        })
+    }
+
+    fn with_residual(self, residual: LookupResidualCheck) -> Self {
+        match self {
+            Self::FullRoot => Self::FullRoot,
+            Self::ProvenWithoutCheck => Self::Residual(vec![residual]),
+            Self::Residual(mut residuals) => {
+                residuals.push(residual);
+                Self::Residual(residuals)
+            }
+        }
+    }
+
+    fn union_merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::ProvenWithoutCheck, _) | (_, Self::ProvenWithoutCheck) => {
+                Self::ProvenWithoutCheck
+            }
+            (Self::Residual(left), Self::Residual(right)) if left == right => Self::Residual(left),
+            _ => Self::FullRoot,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LookupResidualCheck {
+    relation_context: RelationName,
+    expression: CompiledUsersetExpression,
+    expected: LookupResidualExpected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LookupResidualExpected {
+    Allowed,
+    Denied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LookupSubjectProof {
+    direct_depth: u32,
+    exact: bool,
+}
+
+impl LookupSubjectProof {
+    const fn exact_root() -> Self {
+        Self {
+            direct_depth: 0,
+            exact: true,
+        }
+    }
+
+    const fn inexact() -> Self {
+        Self {
+            direct_depth: 0,
+            exact: false,
+        }
+    }
+
+    const fn is_exact(self) -> bool {
+        self.exact
+    }
+
+    fn next_exact(self) -> Self {
+        if self.exact {
+            Self {
+                direct_depth: self.direct_depth.saturating_add(1),
+                exact: true,
+            }
+        } else {
+            Self::inexact()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LookupFrontierEntry {
+    subject: User,
+    proof: LookupSubjectProof,
+}
+
+impl LookupFrontierEntry {
+    fn new(subject: User, proof: LookupSubjectProof) -> Self {
+        Self { subject, proof }
     }
 }
 
@@ -959,6 +1146,46 @@ impl<'a> EvaluationContext<'a> {
                 None => context.eval_this(object, relation_definition.name(), user),
             }
         })
+    }
+
+    fn verify_lookup_residuals(
+        &mut self,
+        object: &Object,
+        root_relation: &RelationName,
+        user: &User,
+        residuals: &[LookupResidualCheck],
+    ) -> Result<Membership, ZanzibarError> {
+        let key = CheckKey::from_relation_name(self.snapshot, object, root_relation, user);
+        self.evaluate_check_key(&key, |context| {
+            context.verify_lookup_residuals_entered(object, user, residuals)
+        })
+    }
+
+    fn verify_lookup_residuals_entered(
+        &mut self,
+        object: &Object,
+        user: &User,
+        residuals: &[LookupResidualCheck],
+    ) -> Result<Membership, ZanzibarError> {
+        for residual in residuals {
+            record_lookup_resources_residual_check();
+            let result = self.eval_compiled_schema_expression(
+                object,
+                &residual.relation_context,
+                user,
+                &residual.expression,
+            )?;
+            match residual.expected {
+                LookupResidualExpected::Allowed if result != Membership::Allowed => {
+                    return Ok(Membership::Denied);
+                }
+                LookupResidualExpected::Denied if result == Membership::Allowed => {
+                    return Ok(Membership::Denied);
+                }
+                LookupResidualExpected::Allowed | LookupResidualExpected::Denied => {}
+            }
+        }
+        Ok(Membership::Allowed)
     }
 
     fn check_relation_name(
@@ -1830,22 +2057,25 @@ pub fn lookup_resources_with_snapshot(
     let mut relation_expansions = Vec::new();
     let mut tuple_relation_expansions = Vec::new();
 
-    let mut frontier = VecDeque::from([request.subject.clone()]);
+    let mut frontier = VecDeque::from([LookupFrontierEntry::new(
+        request.subject.clone(),
+        LookupSubjectProof::exact_root(),
+    )]);
     let mut visited_subjects = HashSet::from([request.subject.clone()]);
     let mut seen = HashSet::new();
     let mut resources = Vec::new();
     let mut check_context = EvaluationContext::new_with_request_memo(snapshot, limits);
 
-    while let Some(subject) = frontier.pop_front() {
+    while let Some(frontier_entry) = frontier.pop_front() {
         record_lookup_resources_frontier_subject();
         enqueue_same_object_relation_expansions(
             snapshot,
-            &subject,
+            &frontier_entry.subject,
             &mut frontier,
             &mut visited_subjects,
             &mut relation_expansions,
         )?;
-        let subject_filter = SubjectFilter::try_from(&subject)?;
+        let subject_filter = SubjectFilter::try_from(&frontier_entry.subject)?;
         for relationship in snapshot
             .relationships()
             .reverse_query_compact_relationships(&subject_filter)
@@ -1854,6 +2084,7 @@ pub fn lookup_resources_with_snapshot(
             if process_lookup_resources_relationship(
                 snapshot,
                 relationship,
+                &frontier_entry,
                 request,
                 limits,
                 &resource_type,
@@ -1872,7 +2103,7 @@ pub fn lookup_resources_with_snapshot(
         }
         if process_tuple_to_userset_ignored_relation_edges(
             snapshot,
-            &subject,
+            &frontier_entry.subject,
             request,
             limits,
             &resource_type,
@@ -1897,6 +2128,7 @@ pub fn lookup_resources_with_snapshot(
 fn process_lookup_resources_relationship(
     snapshot: &PublishedSnapshot,
     relationship: crate::relationship::RelationshipRef<'_>,
+    frontier_entry: &LookupFrontierEntry,
     request: &LookupResourcesRequest,
     limits: EvaluationLimits,
     resource_type: &ObjectType,
@@ -1904,7 +2136,7 @@ fn process_lookup_resources_relationship(
     producer_plan: Option<&LookupProducerPlan>,
     producer_runtime: &mut LookupProducerRuntime,
     pruned_relation_has_downstream: &mut Vec<(RelationName, bool)>,
-    frontier: &mut VecDeque<User>,
+    frontier: &mut VecDeque<LookupFrontierEntry>,
     visited_subjects: &mut HashSet<User>,
     seen: &mut HashSet<Object>,
     resources: &mut Vec<Object>,
@@ -1929,14 +2161,14 @@ fn process_lookup_resources_relationship(
     }
 
     let object = relationship.resource_object_legacy();
+    let relationship_proof =
+        lookup_relationship_proof(snapshot, relationship, frontier_entry.proof, &object)?;
     if resource_type_matches && !should_prune && seen.insert(object.clone()) {
         record_lookup_resources_candidate_resource();
-        check_context.reset_for_reuse();
-        record_lookup_resources_full_root_check();
-        if check_context
-            .check(&object, &request.permission, &request.subject)?
-            .is_allowed()
-        {
+        let verification = producer_plan.map_or(LookupCandidateVerification::FullRoot, |plan| {
+            plan.verification_for_relationship(relationship, relationship_proof, limits)
+        });
+        if verify_lookup_resource_candidate(check_context, &object, request, &verification)? {
             resources.push(object.clone());
             record_lookup_resources_returned();
             if lookup_result_limit_reached(resources.len(), limits) {
@@ -1959,15 +2191,79 @@ fn process_lookup_resources_relationship(
         true
     };
     if should_follow_userset && visited_subjects.insert(userset_subject.clone()) {
-        frontier.push_back(userset_subject);
+        frontier.push_back(LookupFrontierEntry::new(
+            userset_subject,
+            relationship_proof,
+        ));
     }
     Ok(false)
+}
+
+fn lookup_relationship_proof(
+    snapshot: &PublishedSnapshot,
+    relationship: crate::relationship::RelationshipRef<'_>,
+    frontier_proof: LookupSubjectProof,
+    object: &Object,
+) -> Result<LookupSubjectProof, ZanzibarError> {
+    if !frontier_proof.is_exact() || frontier_proof.direct_depth > 0 {
+        return Ok(LookupSubjectProof::inexact());
+    }
+    let object_type = ObjectType::try_from(object.namespace.as_str())?;
+    let relation = RelationName::try_from(relationship.relation_name_str())?;
+    if relation_direct_row_is_exact_proof(snapshot, &object_type, &relation)? {
+        Ok(frontier_proof.next_exact())
+    } else {
+        Ok(LookupSubjectProof::inexact())
+    }
+}
+
+fn relation_direct_row_is_exact_proof(
+    snapshot: &PublishedSnapshot,
+    object_type: &ObjectType,
+    relation: &RelationName,
+) -> Result<bool, ZanzibarError> {
+    let relation_definition = snapshot
+        .schema()
+        .resolver()
+        .relation(object_type, relation)?;
+    Ok(matches!(
+        relation_definition.compiled_userset_rewrite(),
+        None | Some(CompiledUsersetExpression::This)
+    ))
+}
+
+fn verify_lookup_resource_candidate(
+    check_context: &mut EvaluationContext<'_>,
+    object: &Object,
+    request: &LookupResourcesRequest,
+    verification: &LookupCandidateVerification,
+) -> Result<bool, ZanzibarError> {
+    match verification {
+        LookupCandidateVerification::FullRoot => {
+            check_context.reset_for_reuse();
+            record_lookup_resources_full_root_check();
+            Ok(check_context
+                .check(object, &request.permission, &request.subject)?
+                .is_allowed())
+        }
+        LookupCandidateVerification::ProvenWithoutCheck => {
+            record_lookup_resources_proven_without_check();
+            Ok(true)
+        }
+        LookupCandidateVerification::Residual(residuals) => {
+            check_context.reset_for_reuse();
+            let root_relation = RelationName::try_from(&request.permission)?;
+            Ok(check_context
+                .verify_lookup_residuals(object, &root_relation, &request.subject, residuals)?
+                .is_allowed())
+        }
+    }
 }
 
 fn enqueue_same_object_relation_expansions(
     snapshot: &PublishedSnapshot,
     subject: &User,
-    frontier: &mut VecDeque<User>,
+    frontier: &mut VecDeque<LookupFrontierEntry>,
     visited_subjects: &mut HashSet<User>,
     relation_expansions: &mut Vec<SameObjectRelationExpansion>,
 ) -> Result<(), ZanzibarError> {
@@ -1993,7 +2289,10 @@ fn enqueue_same_object_relation_expansions(
             .has_reverse_subject_candidates(&subject_filter)
             && visited_subjects.insert(expanded_subject.clone())
         {
-            frontier.push_back(expanded_subject);
+            frontier.push_back(LookupFrontierEntry::new(
+                expanded_subject,
+                LookupSubjectProof::inexact(),
+            ));
         }
     }
     Ok(())
@@ -2155,7 +2454,7 @@ fn process_tuple_to_userset_ignored_relation_edges(
     request: &LookupResourcesRequest,
     limits: EvaluationLimits,
     resource_type: &ObjectType,
-    frontier: &mut VecDeque<User>,
+    frontier: &mut VecDeque<LookupFrontierEntry>,
     visited_subjects: &mut HashSet<User>,
     seen: &mut HashSet<Object>,
     resources: &mut Vec<Object>,
@@ -2194,12 +2493,13 @@ fn process_tuple_to_userset_ignored_relation_edges(
             let candidate = relationship.resource_object_legacy();
             if relationship.resource_type_eq(resource_type) && seen.insert(candidate.clone()) {
                 record_lookup_resources_candidate_resource();
-                check_context.reset_for_reuse();
-                record_lookup_resources_full_root_check();
-                if check_context
-                    .check(&candidate, &request.permission, &request.subject)?
-                    .is_allowed()
-                {
+                record_lookup_resources_tuple_fallback();
+                if verify_lookup_resource_candidate(
+                    check_context,
+                    &candidate,
+                    request,
+                    &LookupCandidateVerification::FullRoot,
+                )? {
                     resources.push(candidate.clone());
                     record_lookup_resources_returned();
                     if lookup_result_limit_reached(resources.len(), limits) {
@@ -2219,7 +2519,10 @@ fn process_tuple_to_userset_ignored_relation_edges(
                 .has_reverse_subject_candidates(&target_filter)
                 && visited_subjects.insert(target_subject.clone())
             {
-                frontier.push_back(target_subject);
+                frontier.push_back(LookupFrontierEntry::new(
+                    target_subject,
+                    LookupSubjectProof::inexact(),
+                ));
             }
         }
     }
@@ -2530,108 +2833,198 @@ fn lookup_producer_plan(
     let relation_definition = resolver
         .relation_by_id(relation_id)
         .ok_or_else(compiled_schema_invariant_error)?;
-    let mut relations = HashSet::new();
     let mut visiting = HashSet::new();
-    if collect_relation_producers(
+    let Some(verification_rules) = collect_relation_verification_rules(
         snapshot,
         relation_id,
         relation_definition,
         &mut visiting,
-        &mut relations,
-    )? {
-        Ok(Some(LookupProducerPlan {
-            relations: relations.into_iter().collect(),
-        }))
-    } else {
+    )?
+    else {
+        return Ok(None);
+    };
+    if verification_rules.is_empty() {
         Ok(None)
+    } else {
+        let mut relations = Vec::new();
+        for rule in &verification_rules {
+            if !relations.contains(&rule.relation) {
+                relations.push(rule.relation.clone());
+            }
+        }
+        Ok(Some(LookupProducerPlan {
+            relations,
+            verification_rules,
+        }))
     }
 }
 
-fn collect_relation_producers(
+fn collect_relation_verification_rules(
     snapshot: &PublishedSnapshot,
     relation_id: SchemaRelationId,
     relation_definition: &SchemaRelationDefinition,
     visiting: &mut HashSet<SchemaRelationId>,
-    producers: &mut HashSet<RelationName>,
-) -> Result<bool, ZanzibarError> {
+) -> Result<Option<Vec<LookupVerificationRule>>, ZanzibarError> {
     if !visiting.insert(relation_id) {
-        return Ok(false);
+        return Ok(None);
     }
-    let supported = if let Some(expression) = relation_definition.compiled_userset_rewrite() {
-        collect_expression_producers(
+    let rules = if let Some(expression) = relation_definition.compiled_userset_rewrite() {
+        collect_expression_verification_rules(
             snapshot,
             relation_definition.name(),
             expression,
             visiting,
-            producers,
         )?
     } else {
-        producers.insert(relation_definition.name().clone());
-        true
+        Some(vec![LookupVerificationRule {
+            relation: relation_definition.name().clone(),
+            verification: LookupCandidateVerification::ProvenWithoutCheck,
+        }])
     };
     visiting.remove(&relation_id);
-    Ok(supported)
+    Ok(rules.map(merge_lookup_verification_rules))
 }
 
-fn collect_expression_producers(
+fn collect_expression_verification_rules(
     snapshot: &PublishedSnapshot,
     current_relation: &RelationName,
     expression: &CompiledUsersetExpression,
     visiting: &mut HashSet<SchemaRelationId>,
-    producers: &mut HashSet<RelationName>,
-) -> Result<bool, ZanzibarError> {
+) -> Result<Option<Vec<LookupVerificationRule>>, ZanzibarError> {
     match expression {
-        CompiledUsersetExpression::This => {
-            producers.insert(current_relation.clone());
-            Ok(true)
-        }
+        CompiledUsersetExpression::This => Ok(Some(vec![LookupVerificationRule {
+            relation: current_relation.clone(),
+            verification: LookupCandidateVerification::ProvenWithoutCheck,
+        }])),
         CompiledUsersetExpression::ComputedUserset {
             relation,
             relation_id,
             target_has_rewrite,
         } => {
             if !target_has_rewrite {
-                producers.insert(relation.clone());
-                return Ok(true);
+                return Ok(Some(vec![LookupVerificationRule {
+                    relation: relation.clone(),
+                    verification: LookupCandidateVerification::ProvenWithoutCheck,
+                }]));
             }
             let relation_definition = snapshot
                 .schema()
                 .resolver()
                 .relation_by_id(*relation_id)
                 .ok_or_else(compiled_schema_invariant_error)?;
-            collect_relation_producers(
+            collect_relation_verification_rules(
                 snapshot,
                 *relation_id,
                 relation_definition,
                 visiting,
-                producers,
             )
         }
         CompiledUsersetExpression::Union(expressions) => {
+            let mut rules = Vec::new();
             for expression in expressions {
-                if !collect_expression_producers(
+                let Some(child_rules) = collect_expression_verification_rules(
                     snapshot,
                     current_relation,
                     expression,
                     visiting,
-                    producers,
-                )? {
-                    return Ok(false);
-                }
+                )?
+                else {
+                    return Ok(None);
+                };
+                rules.extend(child_rules);
             }
-            Ok(true)
+            Ok(Some(rules))
         }
-        CompiledUsersetExpression::Exclusion { base, .. } => {
-            collect_expression_producers(snapshot, current_relation, base, visiting, producers)
+        CompiledUsersetExpression::Exclusion { base, exclude } => {
+            let Some(base_rules) =
+                collect_expression_verification_rules(snapshot, current_relation, base, visiting)?
+            else {
+                return Ok(None);
+            };
+            Ok(Some(
+                base_rules
+                    .into_iter()
+                    .map(|rule| LookupVerificationRule {
+                        relation: rule.relation,
+                        verification: rule.verification.with_required_denied(
+                            current_relation.clone(),
+                            exclude.as_ref().clone(),
+                        ),
+                    })
+                    .collect(),
+            ))
         }
         CompiledUsersetExpression::TupleToUserset {
             tupleset_relation, ..
-        } => {
-            producers.insert(tupleset_relation.clone());
-            Ok(true)
+        } => Ok(Some(vec![LookupVerificationRule {
+            relation: tupleset_relation.clone(),
+            verification: LookupCandidateVerification::FullRoot,
+        }])),
+        CompiledUsersetExpression::Intersection(expressions) => {
+            collect_intersection_verification_rules(
+                snapshot,
+                current_relation,
+                expressions,
+                visiting,
+            )
         }
-        CompiledUsersetExpression::Intersection(_) => Ok(false),
     }
+}
+
+fn collect_intersection_verification_rules(
+    snapshot: &PublishedSnapshot,
+    current_relation: &RelationName,
+    expressions: &[CompiledUsersetExpression],
+    visiting: &mut HashSet<SchemaRelationId>,
+) -> Result<Option<Vec<LookupVerificationRule>>, ZanzibarError> {
+    for (seed_index, seed_expression) in expressions.iter().enumerate() {
+        let Some(seed_rules) = collect_expression_verification_rules(
+            snapshot,
+            current_relation,
+            seed_expression,
+            visiting,
+        )?
+        else {
+            continue;
+        };
+        if seed_rules
+            .iter()
+            .any(|rule| matches!(rule.verification, LookupCandidateVerification::FullRoot))
+        {
+            continue;
+        }
+        let mut guarded_rules = seed_rules;
+        for (guard_index, guard_expression) in expressions.iter().enumerate() {
+            if guard_index == seed_index {
+                continue;
+            }
+            for rule in &mut guarded_rules {
+                rule.verification = rule
+                    .verification
+                    .clone()
+                    .with_required_allowed(current_relation.clone(), guard_expression.clone());
+            }
+        }
+        return Ok(Some(guarded_rules));
+    }
+    Ok(None)
+}
+
+fn merge_lookup_verification_rules(
+    rules: Vec<LookupVerificationRule>,
+) -> Vec<LookupVerificationRule> {
+    let mut merged: Vec<LookupVerificationRule> = Vec::new();
+    for rule in rules {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| existing.relation == rule.relation)
+        {
+            existing.verification = existing.verification.clone().union_merge(rule.verification);
+        } else {
+            merged.push(rule);
+        }
+    }
+    merged
 }
 
 fn relation_definition_requires_lookup_subject_verification(

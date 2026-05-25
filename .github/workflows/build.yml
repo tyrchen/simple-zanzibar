@@ -24,6 +24,10 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
       - name: Install Rust
         run: |
           rustup toolchain install stable --component llvm-tools-preview
@@ -45,6 +49,8 @@ jobs:
         run: cargo clippy --all-targets --all-features --tests --benches -- -D warnings
       - name: Execute rust tests
         run: cargo nextest run --all-features
+      - name: Check perf visualization tools
+        run: make perf-tools-check
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v4
         id: git-cliff

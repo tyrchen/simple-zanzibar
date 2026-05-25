@@ -50,11 +50,28 @@ bench-read-followup-baseline:
 bench-snapshot-section-size:
 	@cargo bench --bench snapshot_section_size -- --sample-size 10
 
-perf-impact-chart:
-	@uv run --script tools/render_perf_impact_chart.py
+perf-charts:
+	@uv run --project tools/perfviz --locked perfviz render
 
-phase-benchmark-trends:
-	@uv run --script tools/render_phase_benchmark_trends.py
+perf-charts-check:
+	@uv run --project tools/perfviz --locked perfviz render --check
+
+perf-history-ingest:
+	@uv run --project tools/perfviz --locked perfviz ingest-criterion --phase "$${PERF_PHASE:-local}"
+
+perf-tools-check:
+	@uv run --project tools/perfviz --locked python -m unittest discover -s tools/perfviz/tests
+	@uv run --project tools/perfviz --locked perfviz render --check
+
+perf-impact-chart: perf-charts
+
+phase-benchmark-trends: perf-charts
+
+bench-perf-continuous:
+	@cargo bench --features bench-internals --bench perf_optimization -- check_prepared_1m --sample-size "$${PERF_SAMPLE_SIZE:-10}"
+	@cargo bench --features bench-internals --bench perf_optimization -- lookup_resources_streaming_1m --sample-size "$${PERF_SAMPLE_SIZE:-10}"
+	@cargo bench --features bench-internals --bench perf_optimization -- lookup_subjects_streaming_1m --sample-size "$${PERF_SAMPLE_SIZE:-10}"
+	@cargo bench --features bench-internals --bench perf_optimization -- read_heavy_heavy_write_batched_1m --sample-size "$${PERF_SAMPLE_SIZE:-10}"
 
 bench-snapshot-memory:
 	@cargo bench --bench snapshot --no-run
@@ -116,4 +133,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-read-followup-baseline bench-snapshot-section-size perf-impact-chart phase-benchmark-trends bench-snapshot-memory bench-snapshot-zstd-memory bench-all fmt fmt-check clippy lint release update-submodule
+.PHONY: build check test bench-baseline bench-org bench-org-memory bench-snapshot bench-public-api bench-concurrent-runtime bench-realworld bench-perf-optimization bench-read-followup-baseline bench-snapshot-section-size perf-charts perf-charts-check perf-history-ingest perf-tools-check perf-impact-chart phase-benchmark-trends bench-perf-continuous bench-snapshot-memory bench-snapshot-zstd-memory bench-all fmt fmt-check clippy lint release update-submodule
